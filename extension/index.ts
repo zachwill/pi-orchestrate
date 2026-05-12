@@ -4,7 +4,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { installDefaultWorkersOnce } from "./default-workers.js";
 import { registerCrewIntegration } from "./integration.js";
 import { workerRuntime } from "./runtime/worker-runtime.js";
-import { updateWidget } from "./status-widget.js";
+import { stopWidgetAnimation, updateWidget } from "./status-widget.js";
 
 const extensionDir = dirname(fileURLToPath(import.meta.url));
 const hooksKey = Symbol.for("pi-workers.processHooksSetup");
@@ -56,6 +56,7 @@ export default function registerPiWorkers(pi: ExtensionAPI) {
   pi.on("session_shutdown", (event, ctx) => {
     const sessionId = ctx.sessionManager.getSessionId();
     workerRuntime.deactivateSession(sessionId);
+    stopWidgetAnimation();
 
     if (event.reason === "quit") {
       workerRuntime.abortAll();
