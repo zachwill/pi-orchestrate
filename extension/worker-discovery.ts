@@ -168,8 +168,8 @@ function loadConfig(filePath: string, legacy: boolean): { defaults: WorkerDefaul
   return { defaults, overrides, warnings };
 }
 
-function pickConfigPaths(canonical: string, compat: string, legacyCrew: string): string[] {
-  if (fs.existsSync(canonical)) return [canonical];
+function pickCompatibilityConfigPaths(canonical: string, compat: string, legacyCrew: string): string[] {
+  if (fs.existsSync(canonical)) return [];
   const paths: string[] = [];
   if (fs.existsSync(legacyCrew)) paths.push(legacyCrew);
   if (fs.existsSync(compat)) paths.push(compat);
@@ -182,9 +182,9 @@ function sources(cwd: string): Source[] {
   const userCanonical = path.join(agentDir, "pi-workers");
   return [
     { label: "project canonical", agentDirs: [path.join(projectCanonical, "agents")], configPaths: [path.join(projectCanonical, "config.json")], compatibility: false },
-    { label: "project compatibility", agentDirs: [path.join(cwd, ".pi", "agents")], configPaths: pickConfigPaths(path.join(projectCanonical, "config.json"), path.join(cwd, ".pi", "pi-workers.json"), path.join(cwd, ".pi", "pi-crew.json")), compatibility: true },
+    { label: "project compatibility", agentDirs: [path.join(cwd, ".pi", "agents")], configPaths: pickCompatibilityConfigPaths(path.join(projectCanonical, "config.json"), path.join(cwd, ".pi", "pi-workers.json"), path.join(cwd, ".pi", "pi-crew.json")), compatibility: true },
     { label: "user canonical", agentDirs: [path.join(userCanonical, "agents")], configPaths: [path.join(userCanonical, "config.json")], compatibility: false },
-    { label: "user compatibility", agentDirs: [path.join(agentDir, "agents")], configPaths: pickConfigPaths(path.join(userCanonical, "config.json"), path.join(agentDir, "pi-workers.json"), path.join(agentDir, "pi-crew.json")), compatibility: true },
+    { label: "user compatibility", agentDirs: [path.join(agentDir, "agents")], configPaths: pickCompatibilityConfigPaths(path.join(userCanonical, "config.json"), path.join(agentDir, "pi-workers.json"), path.join(agentDir, "pi-crew.json")), compatibility: true },
   ];
 }
 
