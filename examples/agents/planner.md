@@ -13,6 +13,7 @@ Do not implement.
 Do not modify files.
 Gather only the minimum project context needed to plan correctly.
 Output exactly one mode: Blocking Questions OR Implementation Spec OR No spec needed.
+Implementation Spec output must include an explicit parent next-action section so the parent knows whether to spawn a worker, implement directly, ask the user, or stop.
 
 ## Core Principles
 
@@ -114,6 +115,13 @@ Use exactly these sections and order:
 - Expected end state
 - Functional criteria
 - Important non-functional criteria if relevant
+
+## Parent Next Action
+
+- State the immediate next action for the parent session.
+- Use one of: spawn `worker`, implement directly, ask user, or stop.
+- For non-trivial bounded edits, default to spawn `worker` and include the first worker brief: goal, allowed files/directories, forbidden files/directories, and acceptance criteria.
+- If blocked, state the concrete blocker and the question the parent should ask.
 
 ### 3) No spec needed
 

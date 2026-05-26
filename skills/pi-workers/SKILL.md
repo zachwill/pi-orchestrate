@@ -26,6 +26,17 @@ Include:
 - Use `crew_respond` only for interactive workers in waiting state.
 - Use `crew_done` to dispose a waiting interactive worker when no more input is needed.
 
+## Planner follow-through
+
+- Treat a planner result as a handoff contract, not background context.
+- When a planner returns an Implementation Spec, the parent must immediately spawn the specified worker, implement directly if trivial, ask the blocking question, or state the blocker.
+- Do not wait for another user turn after a usable planner spec.
+- If the planner includes `## Parent Next Action`, follow it first.
+
+## Scout boundaries
+
+Broad synthesis, architecture review, cross-file review, transcript/content review, and recommendations go to `investigator` or `planner`, not `scout`.
+
 ## Terminology
 
 Use worker terminology in new prompts. The tools keep `crew_*` names for compatibility. `crew_spawn` accepts `worker`; `subagent` remains a legacy alias.

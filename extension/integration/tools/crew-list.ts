@@ -11,7 +11,7 @@ export function registerCrewListTool({ pi, runtime, notifyDiscoveryWarnings }: C
     description: "List available worker definitions and active workers. Use for discovery or one-time status snapshots only; worker results are delivered automatically as steering messages.",
     parameters: Type.Object({}),
     promptSnippet: "List worker definitions and active workers.",
-    promptGuidelines: ["crew_list: Use before crew_spawn to discover worker names and descriptions.", "crew_list: Do not poll for completion; worker results arrive as steering messages."],
+    promptGuidelines: ["crew_list: Use before crew_spawn to discover worker names and descriptions.", "crew_list: Role boundaries: scout = narrow discovery only; investigator = broad/cross-file synthesis or review; planner = deterministic implementation specs.", "crew_list: Do not poll for completion; worker results arrive as steering messages."],
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const { workers, warnings } = discoverWorkers(ctx.cwd);
       notifyDiscoveryWarnings(ctx, warnings);

@@ -1,4 +1,4 @@
-import { sendWorkerNote, sendWorkerResult, type SendMessageFn, type WorkerPayload } from "../worker-messages.js";
+import { sendWorkerNote, sendWorkerResult, workerResultAdvisory, type SendMessageFn, type WorkerPayload } from "../worker-messages.js";
 
 export interface ActiveRuntimeBinding { sessionId: string; isIdle: () => boolean; sendMessage: SendMessageFn }
 interface PendingMessage { ownerSessionId: string; payload: WorkerPayload; queuedAt: number }
@@ -33,7 +33,10 @@ export class DeliveryCoordinator {
     if (!this.binding || this.binding.sessionId !== ownerSessionId) { this.pendingMessages.push({ ownerSessionId, payload, queuedAt: Date.now() }); return; }
     const remaining = countRunningForOwner(ownerSessionId, payload.id);
     const isIdle = this.binding.isIdle();
-    sendWorkerResult(payload, this.binding.sendMessage, { isIdle, triggerTurn: !(isIdle && remaining > 0) });
+    const advisory = workerResultAdvisory(payload);
+    const triggerTurn = !(isIdle && remaining > 0);
+    sendWorkerResult(payload, this.binding.sendMessage, { isIdle, triggerTurn: advisory ? false : triggerTurn });
+    if (advisory) sendWorkerNote(advisory, this.binding.sendMessage, { isIdle, triggerTurn });
     if (remaining > 0) sendWorkerNote(`⏳ ${remaining} worker(s) still running`, this.binding.sendMessage, { isIdle, triggerTurn: isIdle });
   }
 }
