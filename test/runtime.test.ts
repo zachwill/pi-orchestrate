@@ -1,0 +1,1089 @@
+import { describe, expect, test } from "bun:test";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import {
+  MAX_WORKER_INSTRUCTIONS_LENGTH,
+  MAX_WORKER_TITLE_LENGTH,
+  createSequentialIdFactories,
+  createWorkerCatalog,
+  type OrchestrateTaskInput,
+  type WorkerDefinition,
+  type WorkerId,
+  type WorkerOutcome,
+  type WorkerUsage,
+} from "../extension/domain.ts";
+import {
+  MAX_COMPLETED_WAVE_HISTORY,
+  MAX_TERMINAL_WORKER_HISTORY,
+  SHUTDOWN_CLEANUP_GRACE_MS,
+  createOrchestratorRuntime,
+  type BestEffortDeadline,
+  type CompletedWave,
+  type OrchestrationContext,
+  type OrchestratorRuntimeOptions,
+} from "../extension/runtime.ts";
+import {
+  createWorkflowScheduler,
+  type WorkflowScheduler,
+} from "../extension/scheduler.ts";
+import type {
+  WorkerSessionFactory,
+  WorkerSessionFactoryOptions,
+  WorkerSessionHandle,
+} from "../extension/worker-session.ts";
+
+class Deferred<T = void> {
+  readonly promise: Promise<T>;
+  private complete!: (value: T | PromiseLike<T>) => void;
+
+  constructor() {
+    this.promise = new Promise<T>((resolve) => {
+      this.complete = resolve;
+    });
+  }
+
+  resolve(value: T extends void ? undefined : T): void {
+    this.complete(value as T);
+  }
+}
+
+class Counter {
+  value = 0;
+  private readonly waiters: Array<{ count: number; resolve: () => void }> = [];
+
+  increment(): void {
+    this.value += 1;
+    for (const waiter of [...this.waiters]) {
+      if (this.value >= waiter.count) waiter.resolve();
+    }
+  }
+
+  waitFor(count: number): Promise<void> {
+    if (this.value >= count) return Promise.resolve();
+    return new Promise((resolve) => this.waiters.push({ count, resolve }));
+  }
+}
+
+const EMPTY_USAGE: WorkerUsage = {
+  input: 0,
+  output: 0,
+  cacheRead: 0,
+  cacheWrite: 0,
+  cost: 0,
+  contextTokens: 0,
+  turns: 0,
+};
+
+interface PromptPlan {
+  readonly gate: Deferred;
+  readonly outcome: WorkerOutcome;
+}
+
+class PromptTracker {
+  readonly starts = new Counter();
+  active = 0;
+  maximumActive = 0;
+
+  start(): void {
+    this.active += 1;
+    this.maximumActive = Math.max(this.maximumActive, this.active);
+    this.starts.increment();
+  }
+
+  finish(): void {
+    this.active -= 1;
+  }
+}
+
+class FakeHandle implements WorkerSessionHandle {
+  readonly sessionFile: string;
+  readonly prompts: string[] = [];
+  readonly disposed = new Deferred();
+  readonly abortStarts = new Counter();
+  abortGate: Deferred | undefined;
+  abortCalls = 0;
+  disposeCalls = 0;
+  disposeFailure: Error | undefined;
+  private readonly usageListeners = new Set<(usage: WorkerUsage) => void>();
+  private readonly activityListeners = new Set<
+    (activity: string | undefined) => void
+  >();
+  private readonly activityListenerHistory: Array<
+    (activity: string | undefined) => void
+  > = [];
+
+  constructor(
+    name: string,
+    readonly promptPlans: PromptPlan[],
+    private readonly tracker: PromptTracker,
+  ) {
+    this.sessionFile = `/sessions/${name}.jsonl`;
+  }
+
+  async prompt(instructions: string): Promise<WorkerOutcome> {
+    const plan = this.promptPlans[this.prompts.length];
+    if (!plan) throw new Error("Missing fake prompt plan");
+    this.prompts.push(instructions);
+    this.tracker.start();
+    try {
+      await plan.gate.promise;
+      return plan.outcome;
+    } finally {
+      this.tracker.finish();
+    }
+  }
+
+  async abort(): Promise<void> {
+    this.abortCalls += 1;
+    this.abortStarts.increment();
+    await this.abortGate?.promise;
+  }
+
+  dispose(): void {
+    this.disposeCalls += 1;
+    this.disposed.resolve(undefined);
+    if (this.disposeFailure) throw this.disposeFailure;
+  }
+
+  subscribeUsage(listener: (usage: WorkerUsage) => void): () => void {
+    this.usageListeners.add(listener);
+    return () => this.usageListeners.delete(listener);
+  }
+
+  emitUsage(usage: WorkerUsage): void {
+    for (const listener of this.usageListeners) listener(usage);
+  }
+
+  subscribeActivity(
+    listener: (activity: string | undefined) => void,
+  ): () => void {
+    this.activityListeners.add(listener);
+    this.activityListenerHistory.push(listener);
+    return () => this.activityListeners.delete(listener);
+  }
+
+  emitActivity(activity: string | undefined): void {
+    for (const listener of this.activityListeners) listener(activity);
+  }
+
+  emitStaleActivity(activity: string | undefined): void {
+    for (const listener of this.activityListenerHistory) listener(activity);
+  }
+}
+
+interface CreatePlan {
+  readonly handle: FakeHandle;
+  readonly gate?: Deferred;
+}
+
+class FakeFactory implements WorkerSessionFactory {
+  readonly creates = new Counter();
+  readonly options: WorkerSessionFactoryOptions[] = [];
+
+  constructor(private readonly plans: CreatePlan[]) {}
+
+  async create(options: WorkerSessionFactoryOptions): Promise<WorkerSessionHandle> {
+    const plan = this.plans[this.options.length];
+    if (!plan) throw new Error("Missing fake create plan");
+    this.options.push(options);
+    this.creates.increment();
+    await plan.gate?.promise;
+    return plan.handle;
+  }
+}
+
+function model(provider: string, id: string): Model<Api> {
+  return {
+    provider,
+    id,
+    name: id,
+    api: "openai-responses",
+    baseUrl: "https://example.test",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128_000,
+    maxTokens: 16_000,
+  };
+}
+
+function definition(
+  name: string,
+  lifecycle: WorkerDefinition["lifecycle"] = "one-shot",
+  configuredModel?: WorkerDefinition["model"],
+): WorkerDefinition {
+  return {
+    name,
+    source: { kind: "package", filePath: `/workers/${name}.md` },
+    description: `${name} worker`,
+    systemPrompt: `You are ${name}.`,
+    lifecycle,
+    tools: ["read"],
+    skills: [],
+    model: configuredModel,
+  };
+}
+
+function context(
+  ownerSessionId: string,
+  workers: readonly WorkerDefinition[],
+  overrides: Partial<OrchestrationContext> = {},
+): OrchestrationContext {
+  return {
+    ownerSessionId,
+    cwd: "/project",
+    agentDir: "/agent",
+    parentSessionFile: "/sessions/parent.jsonl",
+    projectTrusted: true,
+    catalog: createWorkerCatalog(workers),
+    parentModel: model("parent", "selected"),
+    modelRegistry: { find: () => undefined } as unknown as ModelRegistry,
+    ...overrides,
+  };
+}
+
+function task(
+  worker: string,
+  title = `Use ${worker}`,
+  instructions = `Instructions for ${worker}`,
+): OrchestrateTaskInput {
+  return { worker, title, instructions };
+}
+
+function promptPlan(outcome: WorkerOutcome, resolved = false): PromptPlan {
+  const gate = new Deferred();
+  if (resolved) gate.resolve(undefined);
+  return { gate, outcome };
+}
+
+function runtime(
+  factory: WorkerSessionFactory,
+  overrides: Partial<OrchestratorRuntimeOptions> = {},
+) {
+  return createOrchestratorRuntime({
+    workerSessionFactory: factory,
+    idFactories: createSequentialIdFactories(),
+    clock: () => 1_700_000_000_000,
+    ...overrides,
+  });
+}
+
+async function expectPending(promise: Promise<unknown>): Promise<void> {
+  let settled = false;
+  void promise.finally(() => {
+    settled = true;
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(settled).toBe(false);
+}
+
+describe("orchestration admission and concurrency", () => {
+  test("rejects invalid input and model preflight atomically before IDs, state, or sessions", async () => {
+    const tracker = new PromptTracker();
+    const handle = new FakeHandle(
+      "known",
+      [promptPlan({ status: "completed", assistantText: "ok" })],
+      tracker,
+    );
+    const factory = new FakeFactory([{ handle }]);
+    const orchestrator = runtime(factory);
+    const known = definition("known");
+    const missingModel = definition("missing-model", "one-shot", {
+      provider: "provider",
+      modelId: "missing",
+    });
+    const owner = context("owner", [known, missingModel]);
+
+    await expect(
+      orchestrator.orchestrate(owner, [task("known"), task("unknown")], "async"),
+    ).rejects.toThrow("Unknown worker");
+    await expect(
+      orchestrator.orchestrate(owner, [task("known", " ")], "async"),
+    ).rejects.toThrow("title must not be blank");
+    await expect(
+      orchestrator.orchestrate(
+        owner,
+        [task("known", "x".repeat(MAX_WORKER_TITLE_LENGTH + 1))],
+        "async",
+      ),
+    ).rejects.toThrow("title must be at most");
+    await expect(
+      orchestrator.orchestrate(
+        owner,
+        [task("known", "title", "x".repeat(MAX_WORKER_INSTRUCTIONS_LENGTH + 1))],
+        "async",
+      ),
+    ).rejects.toThrow("instructions must be at most");
+    await expect(
+      orchestrator.orchestrate(owner, [task("known"), task("missing-model")], "async"),
+    ).rejects.toThrow('configured model "provider/missing" was not found');
+    await expect(
+      orchestrator.orchestrate(
+        context("owner", [known], { parentModel: undefined }),
+        [task("known")],
+        "async",
+      ),
+    ).rejects.toThrow("no configured model and no parent model is available");
+
+    expect(factory.creates.value).toBe(0);
+    expect(await orchestrator.snapshot("owner")).toEqual({ waves: [], workers: [] });
+
+    const accepted = await orchestrator.orchestrate(owner, [task("known")], "async");
+    expect(accepted).toEqual({ id: "wave-1", workerIds: ["worker-1"] });
+    await tracker.starts.waitFor(1);
+    handle.promptPlans[0]!.gate.resolve(undefined);
+    await handle.disposed.promise;
+    await orchestrator.shutdown();
+  });
+
+  test("preflights every configured model before creating any session", async () => {
+    const tracker = new PromptTracker();
+    const factory = new FakeFactory([
+      { handle: new FakeHandle("unused", [], tracker) },
+    ]);
+    const configured = definition("configured", "one-shot", {
+      provider: "provider",
+      modelId: "available",
+    });
+    const unavailable = definition("unavailable", "one-shot", {
+      provider: "provider",
+      modelId: "unavailable",
+    });
+    const findCalls: string[] = [];
+    const registry = {
+      find(provider: string, id: string) {
+        findCalls.push(`${provider}/${id}`);
+        return id === "available" ? model(provider, id) : undefined;
+      },
+    } as unknown as ModelRegistry;
+    const orchestrator = runtime(factory);
+
+    await expect(
+      orchestrator.orchestrate(
+        context("owner", [configured, unavailable], { modelRegistry: registry }),
+        [task("configured"), task("unavailable")],
+        "async",
+      ),
+    ).rejects.toThrow("provider/unavailable");
+
+    expect(findCalls).toEqual(["provider/available", "provider/unavailable"]);
+    expect(factory.creates.value).toBe(0);
+    expect(await orchestrator.snapshot("owner")).toEqual({ waves: [], workers: [] });
+    await orchestrator.shutdown();
+  });
+
+  test("starts all twelve prompts before any prompt completes", async () => {
+    const tracker = new PromptTracker();
+    const workers = Array.from({ length: 12 }, (_, index) => definition(`worker-${index}`));
+    const plans = workers.map((worker) => ({
+      handle: new FakeHandle(
+        worker.name,
+        [promptPlan({ status: "completed", assistantText: worker.name })],
+        tracker,
+      ),
+    }));
+    const factory = new FakeFactory(plans);
+    const orchestrator = runtime(factory);
+    const completion = new Deferred<CompletedWave>();
+    orchestrator.subscribeCompletion((wave) => completion.resolve(wave));
+
+    await orchestrator.orchestrate(
+      context("owner", workers),
+      workers.map((worker) => task(worker.name)),
+      "async",
+    );
+    await factory.creates.waitFor(12);
+    await tracker.starts.waitFor(12);
+
+    expect(factory.creates.value).toBe(12);
+    expect(tracker.maximumActive).toBe(12);
+    expect(plans.every((plan) => plan.handle.promptPlans[0]!.gate)).toBe(true);
+
+    for (const plan of plans) plan.handle.promptPlans[0]!.gate.resolve(undefined);
+
+    await completion.promise;
+    expect(tracker.maximumActive).toBe(12);
+    await orchestrator.shutdown();
+  });
+});
+
+describe("completion, reusable workers, and wave ownership", () => {
+  test("returns ordered results and marks async waves complete without claiming delivery", async () => {
+    const tracker = new PromptTracker();
+    const workers = [definition("alpha"), definition("beta"), definition("gamma")];
+    const plans = workers.map((worker) => ({
+      handle: new FakeHandle(
+        worker.name,
+        [promptPlan({ status: "completed", assistantText: `result-${worker.name}` })],
+        tracker,
+      ),
+    }));
+    const orchestrator = runtime(new FakeFactory(plans));
+    const completion = new Deferred<CompletedWave>();
+    orchestrator.subscribeCompletion((wave) => completion.resolve(wave));
+
+    const accepted = await orchestrator.orchestrate(
+      context("owner", workers),
+      workers.map((worker) => task(worker.name)),
+      "async",
+    );
+    await tracker.starts.waitFor(3);
+    plans[2]!.handle.promptPlans[0]!.gate.resolve(undefined);
+    plans[1]!.handle.promptPlans[0]!.gate.resolve(undefined);
+    plans[0]!.handle.promptPlans[0]!.gate.resolve(undefined);
+
+    const completed = await completion.promise;
+    expect(completed.results.map((item) => item.worker)).toEqual(["alpha", "beta", "gamma"]);
+    expect(completed.results.map((item) => item.workerId)).toEqual(accepted.workerIds);
+    expect(completed.results.map((item) => item.outcome.status)).toEqual([
+      "completed",
+      "completed",
+      "completed",
+    ]);
+    expect((await orchestrator.snapshot("owner")).waves[0]?.state).toBe("complete");
+    expect((await orchestrator.snapshot("owner")).waves[0]).not.toHaveProperty("delivered");
+    await orchestrator.shutdown();
+  });
+
+  test("keeps one worker ID across reusable ready, send, and close", async () => {
+    const tracker = new PromptTracker();
+    const first = promptPlan({ status: "ready", assistantText: "first" });
+    const second = promptPlan({ status: "ready", assistantText: "second" });
+    const handle = new FakeHandle("reusable", [first, second], tracker);
+    const factory = new FakeFactory([{ handle }]);
+    const orchestrator = runtime(factory);
+    const owner = context("owner", [definition("reusable", "reusable")]);
+
+    const initial = orchestrator.orchestrate(owner, [task("reusable")], "inline");
+    await tracker.starts.waitFor(1);
+    first.gate.resolve(undefined);
+    const firstWave = await initial;
+    const workerId = firstWave.results[0]!.workerId;
+    expect(firstWave.results[0]?.status).toBe("ready");
+    expect(handle.disposeCalls).toBe(0);
+
+    const followUp = orchestrator.send(owner, workerId, "Follow up", "inline");
+    await tracker.starts.waitFor(2);
+    const running = await orchestrator.snapshot("owner");
+    expect(running.workers[0]?.status).toBe("running");
+    expect(running.workers[0]?.outcome).toBeUndefined();
+    second.gate.resolve(undefined);
+
+    const secondWave = await followUp;
+    expect(secondWave.results[0]?.workerId).toBe(workerId);
+    expect(secondWave.results[0]?.outcome).toEqual({ status: "ready", assistantText: "second" });
+    expect(factory.creates.value).toBe(1);
+    expect(handle.prompts).toEqual(["Instructions for reusable", "Follow up"]);
+
+    await orchestrator.close("owner", workerId);
+    await expect(orchestrator.close("owner", workerId)).rejects.toThrow("ready reusable");
+    await expect(orchestrator.send(owner, workerId, "Again", "async")).rejects.toThrow(
+      "worker_send",
+    );
+    expect(handle.disposeCalls).toBe(1);
+    expect((await orchestrator.snapshot("owner")).workers[0]).toMatchObject({
+      id: workerId,
+      status: "closed",
+      outcome: { status: "closed" },
+    });
+    await orchestrator.shutdown();
+  });
+
+  test("retains ready workers and bounds terminal worker and completed wave history globally", async () => {
+    const tracker = new PromptTracker();
+    const reusableHandle = new FakeHandle(
+      "reusable",
+      [promptPlan({ status: "ready", assistantText: "ready" }, true)],
+      tracker,
+    );
+    const terminalPlans = Array.from({ length: 101 }, (_, index) => ({
+      handle: new FakeHandle(
+        `one-${index}`,
+        [promptPlan({ status: "completed", assistantText: `${index}` }, true)],
+        tracker,
+      ),
+    }));
+    const orchestrator = runtime(new FakeFactory([{ handle: reusableHandle }, ...terminalPlans]));
+    const reusable = definition("reusable", "reusable");
+    const oneShot = definition("one-shot");
+    const owner = context("owner", [reusable, oneShot]);
+
+    const reusableWave = await orchestrator.orchestrate(owner, [task("reusable")], "inline");
+    const reusableId = reusableWave.results[0]!.workerId;
+    for (let index = 0; index < 101; index += 1) {
+      await orchestrator.orchestrate(owner, [task("one-shot", `Work ${index}`)], "inline");
+    }
+
+    const snapshot = await orchestrator.snapshot("owner");
+    expect(snapshot.waves).toHaveLength(MAX_COMPLETED_WAVE_HISTORY);
+    expect(snapshot.waves[0]?.id).toBe("wave-3");
+    expect(snapshot.workers).toHaveLength(MAX_TERMINAL_WORKER_HISTORY + 1);
+    expect(snapshot.workers.some((worker) => worker.id === reusableId && worker.status === "ready")).toBe(true);
+    expect(snapshot.workers.some((worker) => worker.id === "worker-2")).toBe(false);
+
+    await orchestrator.close("owner", reusableId);
+    const closed = await orchestrator.snapshot("owner");
+    expect(closed.workers).toHaveLength(MAX_TERMINAL_WORKER_HISTORY);
+    expect(closed.workers.some((worker) => worker.id === reusableId && worker.status === "closed")).toBe(true);
+    await orchestrator.shutdown();
+  });
+});
+
+describe("runtime state observability", () => {
+  test("emits owner-scoped state and snapshots usage and activity despite listener errors", async () => {
+    const tracker = new PromptTracker();
+    const first = new FakeHandle(
+      "first",
+      [promptPlan({ status: "completed", assistantText: "first" })],
+      tracker,
+    );
+    const second = new FakeHandle(
+      "second",
+      [promptPlan({ status: "completed", assistantText: "second" })],
+      tracker,
+    );
+    const orchestrator = runtime(new FakeFactory([{ handle: first }, { handle: second }]));
+    const notifications: string[] = [];
+    orchestrator.subscribeState(() => {
+      throw new Error("listener failed");
+    });
+    const unsubscribe = orchestrator.subscribeState((ownerSessionId) => {
+      notifications.push(ownerSessionId);
+    });
+
+    await orchestrator.orchestrate(
+      context("owner-a", [definition("first")]),
+      [task("first")],
+      "async",
+    );
+    await orchestrator.orchestrate(
+      context("owner-b", [definition("second")]),
+      [task("second")],
+      "async",
+    );
+    await tracker.starts.waitFor(2);
+    notifications.length = 0;
+
+    const usage: WorkerUsage = {
+      input: 12,
+      output: 4,
+      cacheRead: 3,
+      cacheWrite: 1,
+      cost: 0.25,
+      contextTokens: 20,
+      turns: 1,
+    };
+    first.emitUsage(usage);
+    first.emitActivity("read");
+
+    expect(notifications).toEqual(["owner-a", "owner-a"]);
+    const ownerA = await orchestrator.snapshot("owner-a");
+    expect(ownerA.workers[0]?.usage).toEqual(usage);
+    expect(ownerA.workers[0]?.activity).toBe("read");
+    expect(Object.isFrozen(ownerA)).toBe(true);
+    expect(Object.isFrozen(ownerA.workers)).toBe(true);
+    expect(Object.isFrozen(ownerA.workers[0])).toBe(true);
+    expect(Object.isFrozen(ownerA.workers[0]?.usage)).toBe(true);
+    const ownerBWorker = (await orchestrator.snapshot("owner-b")).workers[0];
+    expect(ownerBWorker?.usage).toEqual(EMPTY_USAGE);
+    expect(ownerBWorker?.activity).toBeUndefined();
+
+    unsubscribe();
+    unsubscribe();
+    first.emitActivity("bash");
+    expect(notifications).toEqual(["owner-a", "owner-a"]);
+
+    first.promptPlans[0]!.gate.resolve(undefined);
+    second.promptPlans[0]!.gate.resolve(undefined);
+    await Promise.all([first.disposed.promise, second.disposed.promise]);
+    await orchestrator.shutdown();
+  });
+});
+
+describe("ownership, cancellation, and shutdown", () => {
+  test("keeps snapshots and worker operations isolated by owner", async () => {
+    const tracker = new PromptTracker();
+    const plan = promptPlan({ status: "ready", assistantText: "ready" });
+    const handle = new FakeHandle("reusable", [plan], tracker);
+    const orchestrator = runtime(new FakeFactory([{ handle }]));
+    const worker = definition("reusable", "reusable");
+    const ownerA = context("owner-a", [worker]);
+    const ownerB = context("owner-b", [worker]);
+    const accepted = await orchestrator.orchestrate(ownerA, [task("reusable")], "async");
+
+    expect(await orchestrator.snapshot("owner-b")).toEqual({ waves: [], workers: [] });
+    await expect(
+      orchestrator.send(ownerB, accepted.workerIds[0]!, "intrude", "async"),
+    ).rejects.toThrow("not owned");
+    await expect(orchestrator.close("owner-b", accepted.workerIds[0]!)).rejects.toThrow("not owned");
+    await expect(
+      orchestrator.abort("owner-b", { workerIds: accepted.workerIds }),
+    ).rejects.toThrow("not owned");
+
+    await orchestrator.abort("owner-a", { all: true });
+    plan.gate.resolve(undefined);
+    await orchestrator.shutdown();
+  });
+
+  test("aborts pending bootstrap and disposes a session created late", async () => {
+    const tracker = new PromptTracker();
+    const createGate = new Deferred();
+    const handle = new FakeHandle(
+      "late",
+      [promptPlan({ status: "completed", assistantText: "late" })],
+      tracker,
+    );
+    const factory = new FakeFactory([{ handle, gate: createGate }]);
+    const orchestrator = runtime(factory);
+    const completion = new Deferred<CompletedWave>();
+    orchestrator.subscribeCompletion((wave) => completion.resolve(wave));
+
+    const accepted = await orchestrator.orchestrate(
+      context("owner", [definition("late")]),
+      [task("late")],
+      "async",
+    );
+    await factory.creates.waitFor(1);
+    await orchestrator.abort("owner", { waveId: accepted.id });
+    expect((await completion.promise).results[0]?.status).toBe("aborted");
+
+    createGate.resolve(undefined);
+    await handle.disposed.promise;
+    expect(handle.disposeCalls).toBe(1);
+    expect(handle.prompts).toHaveLength(0);
+    expect((await orchestrator.snapshot("owner")).workers[0]?.status).toBe("aborted");
+    await orchestrator.shutdown();
+  });
+
+  test("awaits prompt abort and ignores a late prompt result", async () => {
+    const tracker = new PromptTracker();
+    const prompt = promptPlan({ status: "completed", assistantText: "too late" });
+    const handle = new FakeHandle("running", [prompt], tracker);
+    handle.abortGate = new Deferred();
+    const orchestrator = runtime(new FakeFactory([{ handle }]));
+    const completion = new Deferred<CompletedWave>();
+    orchestrator.subscribeCompletion((wave) => completion.resolve(wave));
+
+    const accepted = await orchestrator.orchestrate(
+      context("owner", [definition("running")]),
+      [task("running")],
+      "async",
+    );
+    await tracker.starts.waitFor(1);
+    handle.emitActivity("read");
+    expect((await orchestrator.snapshot("owner")).workers[0]?.activity).toBe("read");
+    const aborting = orchestrator.abort("owner", { workerIds: accepted.workerIds });
+    await expectPending(aborting);
+    expect(handle.abortCalls).toBe(1);
+
+    handle.abortGate.resolve(undefined);
+    await aborting;
+    expect((await completion.promise).results[0]?.status).toBe("aborted");
+    handle.emitStaleActivity("bash");
+    prompt.gate.resolve(undefined);
+    await Promise.resolve();
+    const abortedWorker = (await orchestrator.snapshot("owner")).workers[0];
+    expect(abortedWorker?.activity).toBeUndefined();
+    expect(abortedWorker?.outcome).toEqual({ status: "aborted" });
+    await orchestrator.shutdown();
+  });
+
+  test("shutdown force-closes and disposes a ready reusable session", async () => {
+    const tracker = new PromptTracker();
+    const prompt = promptPlan({ status: "ready", assistantText: "ready" });
+    const handle = new FakeHandle("reusable", [prompt], tracker);
+    handle.abortGate = new Deferred();
+    const orchestrator = runtime(new FakeFactory([{ handle }]));
+    const owner = context("owner", [definition("reusable", "reusable")]);
+
+    const initial = orchestrator.orchestrate(owner, [task("reusable")], "inline");
+    await tracker.starts.waitFor(1);
+    prompt.gate.resolve(undefined);
+    await initial;
+
+    await orchestrator.shutdown();
+
+    expect(handle.abortCalls).toBe(0);
+    expect(handle.disposeCalls).toBe(1);
+    expect((await orchestrator.snapshot("owner")).workers[0]).toMatchObject({
+      status: "closed",
+      outcome: { status: "closed" },
+    });
+    await expect(orchestrator.orchestrate(owner, [task("reusable")], "async")).rejects.toThrow(
+      "shutting down",
+    );
+  });
+});
+
+describe("keyed scheduling and reentrant reusable sends", () => {
+  test("reports workflow defects and replaces a still-settling keyed workflow", async () => {
+    const scheduler = createWorkflowScheduler<string>();
+    const firstStarted = new Deferred();
+    const firstGate = new Deferred();
+    const secondStarted = new Deferred();
+    const secondGate = new Deferred();
+    const defect = new Deferred<unknown>();
+
+    scheduler.start(
+      "worker",
+      async () => {
+        firstStarted.resolve(undefined);
+        await firstGate.promise;
+      },
+      (error) => defect.resolve(error),
+    );
+    await firstStarted.promise;
+
+    scheduler.start(
+      "worker",
+      async () => {
+        secondStarted.resolve(undefined);
+        await secondGate.promise;
+        throw new Error("scheduler boom");
+      },
+      (error) => defect.resolve(error),
+    );
+    await secondStarted.promise;
+    secondGate.resolve(undefined);
+
+    const reported = await defect.promise;
+    expect(reported).toBeInstanceOf(Error);
+    expect((reported as Error).message).toContain("scheduler boom");
+    firstGate.resolve(undefined);
+    await scheduler.close();
+  });
+
+  test("completion listeners can synchronously send the next reusable generation", async () => {
+    const tracker = new PromptTracker();
+    const first = promptPlan({ status: "ready", assistantText: "first" });
+    const second = promptPlan({ status: "ready", assistantText: "second" });
+    const handle = new FakeHandle("completion-reentrant", [first, second], tracker);
+    const orchestrator = runtime(new FakeFactory([{ handle }]));
+    const owner = context("owner", [definition("reusable", "reusable")]);
+    let followUp: Promise<CompletedWave> | undefined;
+
+    orchestrator.subscribeCompletion((wave) => {
+      if (wave.id !== "wave-1") return;
+      followUp = orchestrator.send(
+        owner,
+        wave.results[0]!.workerId,
+        "Completion follow-up",
+        "inline",
+      );
+    });
+
+    await orchestrator.orchestrate(owner, [task("reusable")], "async");
+    await tracker.starts.waitFor(1);
+    first.gate.resolve(undefined);
+    await tracker.starts.waitFor(2);
+
+    expect(handle.prompts).toEqual(["Instructions for reusable", "Completion follow-up"]);
+    second.gate.resolve(undefined);
+    const completed = await followUp!;
+    expect(completed.results[0]?.outcome).toEqual({
+      status: "ready",
+      assistantText: "second",
+    });
+    await orchestrator.close("owner", completed.results[0]!.workerId);
+    await orchestrator.shutdown();
+  });
+
+  test("state listeners can synchronously send the next reusable generation", async () => {
+    const tracker = new PromptTracker();
+    const first = promptPlan({ status: "ready", assistantText: "first" });
+    const second = promptPlan({ status: "ready", assistantText: "second" });
+    const handle = new FakeHandle("state-reentrant", [first, second], tracker);
+    const orchestrator = runtime(new FakeFactory([{ handle }]));
+    const owner = context("owner", [definition("reusable", "reusable")]);
+    const accepted = await orchestrator.orchestrate(owner, [task("reusable")], "async");
+    await tracker.starts.waitFor(1);
+    let followUp: Promise<CompletedWave> | undefined;
+    let sent = false;
+
+    orchestrator.subscribeState(() => {
+      if (sent) return;
+      sent = true;
+      followUp = orchestrator.send(
+        owner,
+        accepted.workerIds[0]!,
+        "State follow-up",
+        "inline",
+      );
+    });
+
+    first.gate.resolve(undefined);
+    await tracker.starts.waitFor(2);
+    expect(handle.prompts).toEqual(["Instructions for reusable", "State follow-up"]);
+    second.gate.resolve(undefined);
+    expect((await followUp!).results[0]?.status).toBe("ready");
+    await orchestrator.close("owner", accepted.workerIds[0]!);
+    await orchestrator.shutdown();
+  });
+});
+
+describe("inline AbortSignal ownership", () => {
+  test("an already-aborted signal commits no wave, worker, ID, or session", async () => {
+    const orchestrator = runtime(new FakeFactory([]));
+    const owner = context("owner", [definition("worker")]);
+    const controller = new AbortController();
+    controller.abort(new Error("parent turn ended"));
+
+    await expect(
+      orchestrator.orchestrate(owner, [task("worker")], "inline", controller.signal),
+    ).rejects.toThrow("parent turn ended");
+    expect(await orchestrator.snapshot("owner")).toEqual({ waves: [], workers: [] });
+    await orchestrator.shutdown();
+  });
+
+  test("abort after inline admission cancels the exact wave and rejects after settlement", async () => {
+    const tracker = new PromptTracker();
+    const prompt = promptPlan({ status: "completed", assistantText: "late" });
+    const handle = new FakeHandle("inline-abort", [prompt], tracker);
+    const orchestrator = runtime(new FakeFactory([{ handle }]));
+    const owner = context("owner", [definition("worker")]);
+    const controller = new AbortController();
+    const reason = new Error("inline cancelled");
+
+    const inline = orchestrator.orchestrate(
+      owner,
+      [task("worker")],
+      "inline",
+      controller.signal,
+    );
+    await tracker.starts.waitFor(1);
+    controller.abort(reason);
+
+    await expect(inline).rejects.toBe(reason);
+    expect(await orchestrator.snapshot("owner")).toMatchObject({
+      waves: [{ state: "complete" }],
+      workers: [{ status: "aborted", outcome: { status: "aborted" } }],
+    });
+    prompt.gate.resolve(undefined);
+    await orchestrator.shutdown();
+  });
+
+  test("abort after inline send cancels that reusable generation", async () => {
+    const tracker = new PromptTracker();
+    const first = promptPlan({ status: "ready", assistantText: "ready" });
+    const second = promptPlan({ status: "ready", assistantText: "late" });
+    const handle = new FakeHandle("send-abort", [first, second], tracker);
+    const orchestrator = runtime(new FakeFactory([{ handle }]));
+    const owner = context("owner", [definition("reusable", "reusable")]);
+
+    const initial = orchestrator.orchestrate(owner, [task("reusable")], "inline");
+    await tracker.starts.waitFor(1);
+    first.gate.resolve(undefined);
+    const workerId = (await initial).results[0]!.workerId;
+    const controller = new AbortController();
+    const followUp = orchestrator.send(
+      owner,
+      workerId,
+      "cancel this generation",
+      "inline",
+      controller.signal,
+    );
+    await tracker.starts.waitFor(2);
+    controller.abort(new Error("send cancelled"));
+
+    await expect(followUp).rejects.toThrow("send cancelled");
+    expect((await orchestrator.snapshot("owner")).workers[0]?.status).toBe("aborted");
+    second.gate.resolve(undefined);
+    await orchestrator.shutdown();
+  });
+
+  test("async dispatch does not retain the caller's signal after acceptance", async () => {
+    const tracker = new PromptTracker();
+    const prompt = promptPlan({ status: "completed", assistantText: "done" });
+    const handle = new FakeHandle("async-signal", [prompt], tracker);
+    const orchestrator = runtime(new FakeFactory([{ handle }]));
+    const owner = context("owner", [definition("worker")]);
+    const controller = new AbortController();
+    const completion = new Deferred<CompletedWave>();
+    orchestrator.subscribeCompletion((wave) => completion.resolve(wave));
+
+    await orchestrator.orchestrate(owner, [task("worker")], "async", controller.signal);
+    await tracker.starts.waitFor(1);
+    controller.abort();
+    expect((await orchestrator.snapshot("owner")).workers[0]?.status).toBe("running");
+
+    prompt.gate.resolve(undefined);
+    expect((await completion.promise).results[0]?.status).toBe("completed");
+    await orchestrator.shutdown();
+  });
+});
+
+describe("active-only aborts and bounded lifecycle barriers", () => {
+  test("ready workers reject explicit abort with use worker_close and all aborts active only", async () => {
+    const tracker = new PromptTracker();
+    const prompt = promptPlan({ status: "ready", assistantText: "ready" });
+    const handle = new FakeHandle("ready", [prompt], tracker);
+    const orchestrator = runtime(new FakeFactory([{ handle }]));
+    const owner = context("owner", [definition("reusable", "reusable")]);
+
+    const initial = orchestrator.orchestrate(owner, [task("reusable")], "inline");
+    await tracker.starts.waitFor(1);
+    prompt.gate.resolve(undefined);
+    const workerId = (await initial).results[0]!.workerId;
+
+    await expect(orchestrator.abort("owner", { workerIds: [workerId] })).rejects.toThrow(
+      "use worker_close",
+    );
+    await orchestrator.abort("owner", { all: true });
+    expect((await orchestrator.snapshot("owner")).workers[0]?.status).toBe("ready");
+    expect(handle.abortCalls).toBe(0);
+
+    await orchestrator.close("owner", workerId);
+    await orchestrator.shutdown();
+  });
+
+  test("concurrent aborts join one stored cancellation promise", async () => {
+    const tracker = new PromptTracker();
+    const prompt = promptPlan({ status: "completed", assistantText: "late" });
+    const handle = new FakeHandle("joined-abort", [prompt], tracker);
+    handle.abortGate = new Deferred();
+    const orchestrator = runtime(new FakeFactory([{ handle }]));
+    const accepted = await orchestrator.orchestrate(
+      context("owner", [definition("worker")]),
+      [task("worker")],
+      "async",
+    );
+    await tracker.starts.waitFor(1);
+
+    const firstAbort = orchestrator.abort("owner", { workerIds: accepted.workerIds });
+    await handle.abortStarts.waitFor(1);
+    const secondAbort = orchestrator.abort("owner", { workerIds: accepted.workerIds });
+    await expectPending(firstAbort);
+    await expectPending(secondAbort);
+    expect(handle.abortCalls).toBe(1);
+
+    handle.abortGate.resolve(undefined);
+    await Promise.all([firstAbort, secondAbort]);
+    expect(handle.abortCalls).toBe(1);
+    prompt.gate.resolve(undefined);
+    await orchestrator.shutdown();
+  });
+
+  test("cancellation uses the injected bounded timeout policy", async () => {
+    const tracker = new PromptTracker();
+    const prompt = promptPlan({ status: "completed", assistantText: "late" });
+    const handle = new FakeHandle("timed-abort", [prompt], tracker);
+    handle.abortGate = new Deferred();
+    const deadlineGate = new Deferred<"settled" | "timed-out">();
+    const calls: number[] = [];
+    const deadline: BestEffortDeadline = {
+      wait(_promise, timeoutMs) {
+        calls.push(timeoutMs);
+        return calls.length === 1
+          ? deadlineGate.promise
+          : Promise.resolve("timed-out");
+      },
+    };
+    const orchestrator = runtime(new FakeFactory([{ handle }]), {
+      bestEffortDeadline: deadline,
+    });
+    const accepted = await orchestrator.orchestrate(
+      context("owner", [definition("worker")]),
+      [task("worker")],
+      "async",
+    );
+    await tracker.starts.waitFor(1);
+
+    const aborting = orchestrator.abort("owner", { workerIds: accepted.workerIds });
+    await handle.abortStarts.waitFor(1);
+    await expectPending(aborting);
+    deadlineGate.resolve("timed-out");
+    await aborting;
+
+    expect(calls[0]).toBe(SHUTDOWN_CLEANUP_GRACE_MS);
+    expect((await orchestrator.snapshot("owner")).workers[0]?.status).toBe("aborted");
+    handle.abortGate.resolve(undefined);
+    prompt.gate.resolve(undefined);
+    await orchestrator.shutdown();
+  });
+
+  test("shutdown bounds pending bootstrap cleanup and still disposes a late session", async () => {
+    const tracker = new PromptTracker();
+    const createGate = new Deferred();
+    const handle = new FakeHandle("late-shutdown", [], tracker);
+    const deadlineCalls: number[] = [];
+    const deadline: BestEffortDeadline = {
+      wait(_promise, timeoutMs) {
+        deadlineCalls.push(timeoutMs);
+        return Promise.resolve("timed-out");
+      },
+    };
+    const orchestrator = runtime(
+      new FakeFactory([{ handle, gate: createGate }]),
+      { bestEffortDeadline: deadline },
+    );
+
+    await orchestrator.orchestrate(
+      context("owner", [definition("worker")]),
+      [task("worker")],
+      "async",
+    );
+    await orchestrator.shutdown();
+
+    expect(deadlineCalls).toEqual([SHUTDOWN_CLEANUP_GRACE_MS]);
+    expect((await orchestrator.snapshot("owner")).workers[0]?.status).toBe("aborted");
+    expect(handle.disposeCalls).toBe(0);
+    createGate.resolve(undefined);
+    await handle.disposed.promise;
+    expect(handle.disposeCalls).toBe(1);
+  });
+});
+
+describe("defect and cleanup supervision", () => {
+  test("an injected scheduler defect fails the current worker and completes its wave", async () => {
+    let closeCalls = 0;
+    const scheduler: WorkflowScheduler<WorkerId> = {
+      start(_key, _workflow, onDefect) {
+        onDefect(new Error("workflow defect"));
+      },
+      remove() {
+        return Promise.resolve();
+      },
+      close() {
+        closeCalls += 1;
+        return Promise.resolve();
+      },
+    };
+    const orchestrator = runtime(new FakeFactory([]), { scheduler });
+
+    const completed = await orchestrator.orchestrate(
+      context("owner", [definition("worker")]),
+      [task("worker")],
+      "inline",
+    );
+
+    expect(completed.results[0]).toMatchObject({
+      status: "failed",
+      outcome: { status: "failed", message: "workflow defect" },
+    });
+    await orchestrator.shutdown();
+    expect(closeCalls).toBe(1);
+  });
+
+  test("session disposal exceptions cannot strand completion or shutdown", async () => {
+    const tracker = new PromptTracker();
+    const handle = new FakeHandle(
+      "dispose-error",
+      [promptPlan({ status: "completed", assistantText: "done" })],
+      tracker,
+    );
+    handle.disposeFailure = new Error("dispose failed");
+    const orchestrator = runtime(new FakeFactory([{ handle }]));
+    const inline = orchestrator.orchestrate(
+      context("owner", [definition("worker")]),
+      [task("worker")],
+      "inline",
+    );
+    await tracker.starts.waitFor(1);
+    handle.promptPlans[0]!.gate.resolve(undefined);
+
+    expect((await inline).results[0]?.status).toBe("completed");
+    expect(handle.disposeCalls).toBe(1);
+    await orchestrator.shutdown();
+  });
+});

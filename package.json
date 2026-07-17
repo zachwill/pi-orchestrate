@@ -1,31 +1,44 @@
 {
-  "name": "@zachwill/pi-workers",
+  "name": "@zachwill/pi-orchestrate",
   "version": "0.1.0",
   "type": "module",
-  "description": "User-owned async worker orchestration for pi coding agent",
-  "files": ["extension/", "skills/", "prompts/", "examples/", "README.md"],
-  "keywords": ["pi-package", "pi", "workers", "subagents", "orchestration"],
+  "description": "Concurrent worker orchestration for Pi",
+  "files": ["extension/", "examples/", "README.md", "LICENSE"],
+  "keywords": ["pi-package", "pi", "workers", "orchestration"],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zachwill/pi-orchestrate.git"
+  },
+  "homepage": "https://github.com/zachwill/pi-orchestrate#readme",
+  "bugs": {
+    "url": "https://github.com/zachwill/pi-orchestrate/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "pi": {
-    "extensions": ["./extension/index.ts"],
-    "skills": ["./skills"],
-    "prompts": ["./prompts"]
+    "extensions": ["./extension/index.ts"]
   },
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "effect": "4.0.0-beta.99"
   },
   "peerDependencies": {
-    "@mariozechner/pi-agent-core": "*",
-    "@mariozechner/pi-ai": "*",
-    "@mariozechner/pi-coding-agent": "*",
-    "@mariozechner/pi-tui": "*",
+    "@earendil-works/pi-agent-core": "^0.80.10",
+    "@earendil-works/pi-ai": "^0.80.10",
+    "@earendil-works/pi-coding-agent": "^0.80.10",
+    "@earendil-works/pi-tui": "^0.80.10",
     "typebox": "*"
   },
   "devDependencies": {
-    "@mariozechner/pi-agent-core": "^0.73.0",
-    "@mariozechner/pi-ai": "^0.73.0",
-    "@mariozechner/pi-coding-agent": "^0.73.0",
-    "@mariozechner/pi-tui": "^0.73.0",
+    "@earendil-works/pi-agent-core": "0.80.10",
+    "@earendil-works/pi-ai": "0.80.10",
+    "@earendil-works/pi-coding-agent": "0.80.10",
+    "@earendil-works/pi-tui": "0.80.10",
     "@types/node": "^22.19.17",
     "typebox": "^1.1.37",
     "typescript": "^5.9.3"

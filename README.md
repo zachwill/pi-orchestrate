@@ -1,116 +1,94 @@
-# @zachwill/pi-workers
+# Pi Orchestrate
 
-Async worker orchestration for pi. It preserves the `crew_*` tool names from `@melihmucuk/pi-crew` while making worker definitions user-owned instead of package-bundled.
+[`@zachwill/pi-orchestrate`](https://www.npmjs.com/package/@zachwill/pi-orchestrate) adds concurrent worker orchestration to [Pi](https://pi.dev). It helps a parent agent **delegate → dispatch → deliver**: delegate bounded work, dispatch independent tasks as one wave, then deliver one aggregate result to the parent.
 
-## Install / dev
+## Install
 
 ```bash
-cd /Users/zachwill/code/pi-workers
-bun install
-bun run typecheck
-pi install /Users/zachwill/code/pi-workers
+pi install npm:@zachwill/pi-orchestrate
 ```
 
-On first load, the extension copies the default `investigator`, `scout`, and `worker` examples into `~/.pi/agent/pi-workers/agents/` if they do not already exist. It writes `~/.pi/agent/pi-workers/default-workers.json` as a one-time marker, so deleting those worker Markdown files later does not cause them to reappear. The package-owned files in `examples/agents/*.md` remain templates only; active workers are always loaded from user/project namespaces.
+Pi packages execute with your system permissions. Review the package and worker definitions before trusting them.
 
-## Tools
+## Public tools
 
-- `crew_list` — list discovered workers and active workers for the current session.
-- `crew_spawn` — spawn a non-blocking worker. Use `worker`; legacy `subagent` is accepted.
-- `crew_abort` — abort one, many, or all active workers.
-- `crew_respond` — send input to an interactive waiting worker.
-- `crew_done` — dispose an interactive waiting worker.
+Pi Orchestrate adds exactly five tools:
 
-Results are delivered as session-owned steering messages with custom types `pi-workers-result` and `pi-workers-note`. Do not poll `crew_list` for completion.
+- `orchestrate` dispatches 1–12 tasks with `orchestrate({ tasks: [{ worker, title, instructions }] })`.
+- `orchestration_status` inspects the trusted catalog, catalog diagnostics, waves, and worker states without exposing full task instructions.
+- `worker_send` sends follow-up instructions to an owned reusable worker in the `ready` state.
+- `worker_abort` stops owned active work that is no longer needed.
+- `worker_close` closes an owned reusable worker in the `ready` state.
 
-## Default workers
+An `orchestrate` wave first performs atomic input, catalog, and model preflight. No worker starts if any task fails that preflight. After acceptance, worker resources start independently: a resource startup failure becomes that worker's `failed` result and does not roll back or stop its peers.
 
-The default workers are ordinary Markdown files after first load:
+All tasks in a wave execute concurrently, including a full 12-task wave. Pi Orchestrate applies no hidden concurrency throttle. The aggregate result preserves task order.
 
-```txt
-~/.pi/agent/pi-workers/agents/investigator.md
-~/.pi/agent/pi-workers/agents/scout.md
-~/.pi/agent/pi-workers/agents/worker.md
-```
+For asynchronous behavior, `orchestrate` or `worker_send` must be the sole tool call in its assistant message. Mixing either with any sibling tool call makes its wave inline and blocking. Inline work receives the parent turn's cancellation signal. Accepted async work does not retain that signal and continues independently.
 
-Edit or delete them like any other user-owned worker. They are not overwritten during package updates. To reinstall defaults manually, copy files from `examples/agents/` or remove `~/.pi/agent/pi-workers/default-workers.json` and restart pi.
+A successful async call yields the parent turn until aggregate results arrive. Do not poll `orchestration_status` for completion. If the owning session becomes inactive, its workers continue and completed results remain queued. Those results become available only when that exact owning session resumes; they are never delivered to another session.
 
-## Worker locations
+Worker IDs identify live worker sessions. A reusable worker keeps the same worker ID across `worker_send` follow-ups, with each follow-up result belonging to a new wave. One-shot workers finish as `completed`. Reusable workers deliver as `ready` and wait for `worker_send` or `worker_close`. Use `worker_abort` only for active work, not to close a ready worker.
 
-Discovery precedence, highest first:
+## Parent orchestration contract
 
-1. Project canonical: `<cwd>/.pi/pi-workers/agents/*.md`, `<cwd>/.pi/pi-workers/config.json`
-2. Project compatibility: `<cwd>/.pi/agents/*.md`, `<cwd>/.pi/pi-workers.json`, `<cwd>/.pi/pi-crew.json`
-3. User canonical: `~/.pi/agent/pi-workers/agents/*.md`, `~/.pi/agent/pi-workers/config.json`
-4. User compatibility: `~/.pi/agent/agents/*.md`, `~/.pi/agent/pi-workers.json`, `~/.pi/agent/pi-crew.json`
+Pi Orchestrate automatically injects the authoritative orchestration contract and trusted worker catalog into the parent system prompt. In summary, the parent owns the task end to end:
 
-Compatibility paths work with warnings. Legacy `pi-crew.json` is only read when the canonical `pi-workers/config.json` is absent in the same scope.
+1. Keep trivial or tightly coupled work in the parent session.
+2. Give every delegated task a full brief: objective, paths and scope, forbidden actions, context, constraints, observable success, checks, and expected output.
+3. Dispatch every known independent task in one `orchestrate` wave, up to 12 tasks.
+4. Make an async `orchestrate` or `worker_send` call the sole tool call in its assistant message, then yield after acceptance.
+5. Review delivered evidence and changes, resolve conflicts, integrate deliberately, and run the relevant verification.
+6. Deliver the final answer from the parent session.
 
-## Worker Markdown
+Workers provide evidence or bounded changes. They do not replace parent judgment.
+
+## Trusted worker catalog
+
+Definitions are loaded by name with this precedence:
+
+1. Package workers in [`examples/workers/`](examples/workers/) are active fallbacks automatically.
+2. User definitions in `~/.pi/agent/pi-orchestrate/workers/*.md` override package fallbacks by name.
+3. Project definitions in `<project>/.pi/pi-orchestrate/workers/*.md` override user and package definitions by name, but only after Pi trusts the project.
+
+An untrusted project contributes no worker definitions. Review project definitions as part of Pi's normal project-trust flow before enabling them.
+
+All three package fallbacks intentionally omit `model`, so they portably inherit the parent model active at dispatch. User and trusted project overrides are the model-specialization points: add `model` to an override only when that worker needs a specific provider/model.
+
+To customize a fallback, create a Markdown definition manually at the user or project path with the same filename and `name`. The linked package fallbacks are templates. This instruction does not assume your shell is inside a source checkout or that an npm-installed package has a particular current working directory.
+
+## Worker definitions
+
+A worker is a strict Markdown system prompt. Its basename must equal its `name`:
 
 ```md
 ---
-name: scout
-description: Fast bounded reconnaissance.
-model: anthropic/claude-sonnet-4-5
-thinking: low
-tools: read, grep, find, ls
-skills:
-  - vitepress-writing
-compaction: true
-interactive: false
+name: reviewer
+description: Reviews a bounded change and returns evidence.
+tools: read, grep, find, ls, bash
+lifecycle: reusable
 ---
-You are a scout worker. Report concise findings with file paths.
+
+You are a review worker. Inspect only the assigned scope and return concise findings with file paths.
 ```
 
-Required frontmatter: `name`, `description`.
+Frontmatter supports these fields:
 
-Optional frontmatter: `model`, `thinking`, `tools`, `skills`, `compaction`, `interactive`.
+- `name` and `description` are required.
+- `tools` and `lifecycle` are required. Grant the smallest useful tool set.
+- `model` is optional. When omitted, the worker inherits the parent model active when dispatched.
+- `thinking`, `skills`, and `compaction` are optional.
+- `lifecycle` must be exactly `one-shot` or `reusable`.
+- The Markdown body must be nonempty.
 
-`tools` and `skills` accept YAML arrays or comma-separated strings. Omitted `tools` means child-session defaults after filtering this extension out. `tools: []` means no tools. Omitted `skills` means normal pi skill discovery. `skills: []` means no skills.
+Unknown fields, invalid values, filename/name mismatches, and empty bodies invalidate a definition. A read-only prompt is not enforcement when its tools can write.
 
-## Config schema
+## Lifecycle and process limits
 
-Canonical filename: `config.json` in the `pi-workers` namespace.
+Use one-shot workers for bounded investigation, review, and implementation. Use reusable workers only when follow-up continuity matters. Reusable workers remain live in memory while the Pi process is running; they do not survive process exit. Close ready reusable workers when the conversation is complete.
 
-```json
-{
-  "defaults": {
-    "scope": "project",
-    "confirmProjectWorkers": false,
-    "maxActiveWorkers": 8,
-    "maxConcurrentSpawns": 4
-  },
-  "workers": {
-    "scout": {
-      "description": "Fast bounded reconnaissance.",
-      "promptFile": "./prompts/scout.md",
-      "model": "anthropic/claude-sonnet-4-5",
-      "thinking": "low",
-      "tools": ["read", "grep", "find", "ls"],
-      "skills": [],
-      "compaction": true,
-      "interactive": false
-    }
-  }
-}
-```
+## Isolation, trust, and writes
 
-Within the same source/scope, Markdown defines the base worker and config overrides Markdown fields. Config-only workers are valid when they have `description` and exactly one prompt source (`prompt` or `promptFile`). `promptFile` resolves relative to the config file and supports `~`.
+Worker sessions are isolated from the parent's conversational context, but they run in-process and are not sandboxes. They share the parent process's filesystem and environment permissions. Treat worker prompts, optional skills, models, and tool grants as trusted code.
 
-## Skills are not the registry
-
-`skills/` contains main-agent instructions. Worker definitions are child-agent system prompts plus runtime config. This package includes only `skills/pi-workers/SKILL.md` for orchestration protocol: when to spawn, how to brief workers, async result handling, interactive lifecycle, and anti-polling rules.
-
-## Migration from pi-crew
-
-- Move active agents from `~/.pi/agent/agents/*.md` to `~/.pi/agent/pi-workers/agents/*.md`.
-- Move project agents from `<cwd>/.pi/agents/*.md` to `<cwd>/.pi/pi-workers/agents/*.md`.
-- Rename `pi-crew.json` to `pi-workers/config.json` and use root `workers` instead of `agents`.
-- Update new `crew_spawn` calls to pass `worker`; existing `subagent` calls still work for now.
-
-Compatibility is intentionally a bridge, not the design center. The preferred shape is the canonical `pi-workers/` namespace plus `worker` terminology.
-
-## Runtime model
-
-The extension uses a process-level singleton `WorkerRuntime` on `globalThis`. Each worker gets an isolated child `AgentSession`; the child resource loader filters this extension out by resolved path to avoid recursive orchestration tools by default. Interactive workers remain alive in waiting state until `crew_respond` or `crew_done`; non-interactive workers dispose after result delivery. Pending result messages are queued in memory for inactive owner sessions and dropped after 24 hours.
+Pi Orchestrate performs no automatic filesystem writes. A worker writes only when its instructions and granted tools cause it to do so. Parallel workers must have non-overlapping write scopes, and the parent must inspect and verify their changes.

@@ -1,0 +1,717 @@
+import { describe, expect, test } from "bun:test";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import {
+  getAgentDir,
+  type ExtensionAPI,
+  type ExtensionContext,
+  type ModelRegistry,
+  type ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import type { TSchema } from "typebox";
+import * as Value from "typebox/value";
+import {
+  createWorkerCatalog,
+  type WaveId,
+  type WorkerCatalog,
+  type WorkerDefinition,
+  type WorkerId,
+  type WorkerUsage,
+} from "../extension/domain.js";
+import type {
+  AbortTarget,
+  AcceptedWave,
+  CompletedWave,
+  OrchestrationContext,
+  OrchestratorRuntime,
+  RuntimeSnapshot,
+} from "../extension/runtime.js";
+import {
+  registerOrchestrationTools,
+  type OrchestrationToolDependencies,
+} from "../extension/tools.js";
+
+type RegisteredTool = ToolDefinition<TSchema, unknown>;
+type DispatchMode = "async" | "inline";
+
+class FakePi {
+  readonly tools: RegisteredTool[] = [];
+
+  registerTool(tool: RegisteredTool): void {
+    this.tools.push(tool);
+  }
+
+  tool(name: string): RegisteredTool {
+    const tool = this.tools.find((candidate) => candidate.name === name);
+    if (!tool) throw new Error(`Missing registered tool: ${name}`);
+    return tool;
+  }
+}
+
+class FakeRuntime {
+  readonly orchestrateCalls: Array<{
+    context: OrchestrationContext;
+    tasks: readonly { worker: string; title: string; instructions: string }[];
+    mode: DispatchMode;
+    signal?: AbortSignal;
+  }> = [];
+  readonly sendCalls: Array<{
+    context: OrchestrationContext;
+    workerId: WorkerId;
+    instructions: string;
+    mode: DispatchMode;
+    signal?: AbortSignal;
+  }> = [];
+  readonly abortCalls: Array<{ ownerSessionId: string; target: AbortTarget }> = [];
+  readonly closeCalls: Array<{ ownerSessionId: string; workerId: WorkerId }> = [];
+  readonly snapshotCalls: string[] = [];
+
+  acceptedWave: AcceptedWave = {
+    id: "wave-accepted" as WaveId,
+    workerIds: ["worker-accepted" as WorkerId],
+  };
+  completedWave: CompletedWave = completedWave();
+  snapshotResult: RuntimeSnapshot = snapshot();
+  failures: Partial<
+    Record<"orchestrate" | "send" | "abort" | "close" | "snapshot", Error>
+  > = {};
+
+  async orchestrate(
+    context: OrchestrationContext,
+    tasks: readonly { worker: string; title: string; instructions: string }[],
+    mode: DispatchMode,
+    signal?: AbortSignal,
+  ): Promise<AcceptedWave | CompletedWave> {
+    this.orchestrateCalls.push({ context, tasks, mode, signal });
+    if (this.failures.orchestrate) throw this.failures.orchestrate;
+    return mode === "async" ? this.acceptedWave : this.completedWave;
+  }
+
+  async send(
+    context: OrchestrationContext,
+    workerId: WorkerId,
+    instructions: string,
+    mode: DispatchMode,
+    signal?: AbortSignal,
+  ): Promise<AcceptedWave | CompletedWave> {
+    this.sendCalls.push({ context, workerId, instructions, mode, signal });
+    if (this.failures.send) throw this.failures.send;
+    return mode === "async" ? this.acceptedWave : this.completedWave;
+  }
+
+  async abort(ownerSessionId: string, target: AbortTarget): Promise<void> {
+    this.abortCalls.push({ ownerSessionId, target });
+    if (this.failures.abort) throw this.failures.abort;
+  }
+
+  async close(ownerSessionId: string, workerId: WorkerId): Promise<void> {
+    this.closeCalls.push({ ownerSessionId, workerId });
+    if (this.failures.close) throw this.failures.close;
+  }
+
+  async snapshot(ownerSessionId: string): Promise<RuntimeSnapshot> {
+    this.snapshotCalls.push(ownerSessionId);
+    if (this.failures.snapshot) throw this.failures.snapshot;
+    return this.snapshotResult;
+  }
+}
+
+interface Harness {
+  readonly pi: FakePi;
+  readonly runtime: FakeRuntime;
+  readonly context: ExtensionContext;
+  readonly catalog: WorkerCatalog;
+  readonly catalogCalls: ExtensionContext[];
+  readonly dispatchCalls: string[];
+  readonly modes: Map<string, DispatchMode>;
+}
+
+function harness(): Harness {
+  const pi = new FakePi();
+  const runtime = new FakeRuntime();
+  const catalog = createWorkerCatalog([definition("scout")], [
+    {
+      severity: "warning",
+      source: "project",
+      filePath: "/project/.pi/pi-orchestrate/workers/bad.md",
+      message: "ignored invalid worker",
+    },
+  ]);
+  const context = extensionContext();
+  const catalogCalls: ExtensionContext[] = [];
+  const dispatchCalls: string[] = [];
+  const modes = new Map<string, DispatchMode>();
+  const deps: OrchestrationToolDependencies = {
+    runtime: runtime as unknown as OrchestratorRuntime,
+    getCatalog(ctx) {
+      catalogCalls.push(ctx);
+      return catalog;
+    },
+    getDispatchMode(toolCallId) {
+      dispatchCalls.push(toolCallId);
+      return modes.get(toolCallId) ?? "async";
+    },
+  };
+
+  registerOrchestrationTools(pi as unknown as ExtensionAPI, deps);
+  return { pi, runtime, context, catalog, catalogCalls, dispatchCalls, modes };
+}
+
+async function invoke(
+  pi: FakePi,
+  name: string,
+  toolCallId: string,
+  params: unknown,
+  ctx: ExtensionContext,
+  signal?: AbortSignal,
+) {
+  return pi.tool(name).execute(
+    toolCallId,
+    params as never,
+    signal,
+    undefined,
+    ctx,
+  );
+}
+
+function extensionContext(overrides: {
+  ownerSessionId?: string;
+  sessionFile?: string;
+  cwd?: string;
+  trusted?: boolean;
+} = {}): ExtensionContext {
+  const modelRegistry = { marker: "registry" } as unknown as ModelRegistry;
+  const parentModel = model("parent-provider", "parent-model");
+  return {
+    cwd: overrides.cwd ?? "/workspace",
+    sessionManager: {
+      getSessionId: () => overrides.ownerSessionId ?? "owner-session",
+      getSessionFile: () => overrides.sessionFile ?? "/sessions/parent.jsonl",
+    },
+    modelRegistry,
+    model: parentModel,
+    isProjectTrusted: () => overrides.trusted ?? true,
+  } as unknown as ExtensionContext;
+}
+
+function model(provider: string, id: string): Model<Api> {
+  return {
+    provider,
+    id,
+    name: id,
+    api: "openai-responses",
+    baseUrl: "https://example.test",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 128_000,
+    maxTokens: 16_000,
+  };
+}
+
+function definition(name: string): WorkerDefinition {
+  return {
+    name,
+    source: { kind: "project", filePath: `/workers/${name}.md` },
+    description: `${name} description`,
+    systemPrompt: `You are ${name}.`,
+    lifecycle: "one-shot",
+    tools: ["read"],
+    skills: ["review"],
+    model: { provider: "worker-provider", modelId: "worker-model" },
+    thinking: "high",
+    compaction: { enabled: true, reserveTokens: 100, keepRecentTokens: 50 },
+  };
+}
+
+const usage: WorkerUsage = {
+  input: 11,
+  output: 12,
+  cacheRead: 13,
+  cacheWrite: 14,
+  cost: 0.15,
+  contextTokens: 16,
+  turns: 2,
+};
+
+function completedWave(): CompletedWave {
+  return {
+    id: "wave-inline" as WaveId,
+    ownerSessionId: "owner-session",
+    mode: "inline",
+    results: [
+      {
+        workerId: "worker-inline" as WorkerId,
+        worker: "scout",
+        title: "Inspect",
+        status: "completed",
+        outcome: { status: "completed", assistantText: "Inspection complete." },
+        usage,
+        sessionFile: "/sessions/worker-inline.jsonl",
+      },
+    ],
+  };
+}
+
+function snapshot(): RuntimeSnapshot {
+  return {
+    waves: [
+      {
+        id: "wave-owned" as WaveId,
+        ownerSessionId: "owner-session",
+        workerIds: ["worker-owned" as WorkerId],
+        mode: "async",
+        state: "running",
+        createdAt: 123,
+      },
+    ],
+    workers: [
+      {
+        id: "worker-owned" as WorkerId,
+        worker: "scout",
+        ownerSessionId: "owner-session",
+        waveId: "wave-owned" as WaveId,
+        title: "Inspect",
+        instructions: "Inspect the runtime.",
+        lifecycle: "reusable",
+        status: "ready",
+        usage,
+        outcome: { status: "ready", assistantText: "Ready for follow-up." },
+        sessionFile: "/sessions/worker-owned.jsonl",
+      },
+    ],
+  };
+}
+
+const expectedSchemas = {
+  orchestrate: {
+    type: "object",
+    required: ["tasks"],
+    properties: {
+      tasks: {
+        type: "array",
+        items: {
+          type: "object",
+          required: ["worker", "title", "instructions"],
+          properties: {
+            worker: { type: "string" },
+            title: { type: "string" },
+            instructions: { type: "string" },
+          },
+          additionalProperties: false,
+        },
+        minItems: 1,
+        maxItems: 12,
+      },
+    },
+    additionalProperties: false,
+  },
+  orchestration_status: {
+    type: "object",
+    properties: {},
+    additionalProperties: false,
+  },
+  worker_send: {
+    type: "object",
+    required: ["worker_id", "instructions"],
+    properties: {
+      worker_id: { type: "string", minLength: 1 },
+      instructions: { type: "string" },
+    },
+    additionalProperties: false,
+  },
+  worker_abort: {
+    anyOf: [
+      {
+        type: "object",
+        required: ["worker_ids"],
+        properties: {
+          worker_ids: {
+            type: "array",
+            items: { type: "string", minLength: 1 },
+            minItems: 1,
+          },
+        },
+        additionalProperties: false,
+      },
+      {
+        type: "object",
+        required: ["wave_id"],
+        properties: { wave_id: { type: "string", minLength: 1 } },
+        additionalProperties: false,
+      },
+      {
+        type: "object",
+        required: ["all"],
+        properties: { all: { type: "boolean", const: true } },
+        additionalProperties: false,
+      },
+    ],
+  },
+  worker_close: {
+    type: "object",
+    required: ["worker_id"],
+    properties: { worker_id: { type: "string", minLength: 1 } },
+    additionalProperties: false,
+  },
+} as const;
+
+describe("registerOrchestrationTools", () => {
+  test("registers exactly the five canonical names and strict schemas", () => {
+    const { pi } = harness();
+
+    expect(pi.tools.map((tool) => tool.name)).toEqual([
+      "orchestrate",
+      "orchestration_status",
+      "worker_send",
+      "worker_abort",
+      "worker_close",
+    ]);
+    for (const tool of pi.tools) {
+      expect(tool.parameters).toEqual(
+        expectedSchemas[tool.name as keyof typeof expectedSchemas],
+      );
+      expect(tool.renderCall).toBeUndefined();
+      expect(tool.renderResult).toBeUndefined();
+    }
+
+    const names = pi.tools.map((tool) => tool.name);
+    expect(names).not.toContain("worker_status");
+    expect(names).not.toContain("worker_respond");
+    expect(names).not.toContain("delegate");
+  });
+
+  test("schemas reject malformed, ambiguous, and legacy arguments", () => {
+    const { pi } = harness();
+    const validTask = { worker: "scout", title: "Inspect", instructions: "Inspect." };
+
+    expect(Value.Check(pi.tool("orchestrate").parameters, { tasks: [validTask] })).toBe(true);
+    expect(Value.Check(pi.tool("orchestrate").parameters, { tasks: [] })).toBe(false);
+    expect(
+      Value.Check(pi.tool("orchestrate").parameters, {
+        tasks: Array.from({ length: 12 }, () => validTask),
+      }),
+    ).toBe(true);
+    expect(
+      Value.Check(pi.tool("orchestrate").parameters, {
+        tasks: Array.from({ length: 13 }, () => validTask),
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(pi.tool("orchestrate").parameters, {
+        tasks: [{ ...validTask, extra: true }],
+      }),
+    ).toBe(false);
+    expect(
+      Value.Check(pi.tool("orchestrate").parameters, { tasks: [validTask], extra: true }),
+    ).toBe(false);
+
+    expect(Value.Check(pi.tool("orchestration_status").parameters, {})).toBe(true);
+    expect(Value.Check(pi.tool("orchestration_status").parameters, { poll: true })).toBe(false);
+
+    expect(
+      Value.Check(pi.tool("worker_send").parameters, {
+        worker_id: "worker-1",
+        instructions: "Continue.",
+      }),
+    ).toBe(true);
+    expect(
+      Value.Check(pi.tool("worker_send").parameters, {
+        workerId: "worker-1",
+        instructions: "Continue.",
+      }),
+    ).toBe(false);
+
+    const abortSchema = pi.tool("worker_abort").parameters;
+    expect(Value.Check(abortSchema, { worker_ids: ["worker-1"] })).toBe(true);
+    expect(Value.Check(abortSchema, { wave_id: "wave-1" })).toBe(true);
+    expect(Value.Check(abortSchema, { all: true })).toBe(true);
+    expect(Value.Check(abortSchema, {})).toBe(false);
+    expect(Value.Check(abortSchema, { worker_ids: [] })).toBe(false);
+    expect(Value.Check(abortSchema, { all: false })).toBe(false);
+    expect(Value.Check(abortSchema, { worker_ids: ["worker-1"], all: true })).toBe(false);
+    expect(Value.Check(abortSchema, { workerIds: ["worker-1"] })).toBe(false);
+
+    expect(Value.Check(pi.tool("worker_close").parameters, { worker_id: "worker-1" })).toBe(
+      true,
+    );
+    expect(Value.Check(pi.tool("worker_close").parameters, { workerId: "worker-1" })).toBe(
+      false,
+    );
+  });
+
+  test("uses concise, nonduplicated prompt guidance with the required semantics", () => {
+    const { pi } = harness();
+    const bullets = pi.tools.flatMap((tool) => tool.promptGuidelines ?? []);
+
+    expect(new Set(bullets).size).toBe(bullets.length);
+    expect(pi.tool("orchestrate").description).toContain("1 to 12");
+    expect(pi.tool("orchestrate").promptSnippet).toContain("concurrent wave");
+    expect(pi.tool("orchestrate").promptGuidelines?.[0]).toContain("complete brief");
+    expect(pi.tool("orchestration_status").description).toContain("Never poll");
+    expect(pi.tool("orchestration_status").promptGuidelines?.[0]).toContain("never poll");
+    expect(pi.tool("worker_send").promptGuidelines?.[0]).toContain("ready reusable");
+    expect(pi.tool("worker_abort").description).toContain("active");
+    expect(pi.tool("worker_abort").promptGuidelines?.[0]).toContain("worker_close");
+    expect(pi.tool("worker_close").description).toContain("ready reusable");
+  });
+
+  test("constructs the complete runtime context and selects async mode by tool call ID", async () => {
+    const { pi, runtime, context, catalog, catalogCalls, dispatchCalls, modes } = harness();
+    modes.set("orchestrate-call", "async");
+    const tasks = [{ worker: "scout", title: "Inspect", instructions: "Inspect." }];
+    const controller = new AbortController();
+
+    const result = await invoke(
+      pi,
+      "orchestrate",
+      "orchestrate-call",
+      { tasks },
+      context,
+      controller.signal,
+    );
+
+    expect(dispatchCalls).toEqual(["orchestrate-call"]);
+    expect(catalogCalls).toEqual([context]);
+    expect(runtime.orchestrateCalls).toHaveLength(1);
+    expect(runtime.orchestrateCalls[0]).toEqual({
+      context: {
+        ownerSessionId: "owner-session",
+        cwd: "/workspace",
+        agentDir: getAgentDir(),
+        parentSessionFile: "/sessions/parent.jsonl",
+        projectTrusted: true,
+        catalog,
+        parentModel: context.model,
+        modelRegistry: context.modelRegistry,
+      },
+      tasks,
+      mode: "async",
+      signal: undefined,
+    });
+    expect(result.terminate).toBe(true);
+    expect(result.details).toBe(runtime.acceptedWave);
+    expect(result.content[0]).toMatchObject({ type: "text" });
+    expect(result.content[0]?.type === "text" && result.content[0].text).toContain(
+      "wave-accepted",
+    );
+  });
+
+  test("returns inline aggregate results without termination", async () => {
+    const { pi, runtime, context, modes } = harness();
+    modes.set("inline-call", "inline");
+    const controller = new AbortController();
+
+    const result = await invoke(
+      pi,
+      "orchestrate",
+      "inline-call",
+      {
+        tasks: [{ worker: "scout", title: "Inspect", instructions: "Inspect." }],
+      },
+      context,
+      controller.signal,
+    );
+
+    expect(runtime.orchestrateCalls[0]?.mode).toBe("inline");
+    expect(runtime.orchestrateCalls[0]?.signal).toBe(controller.signal);
+    controller.abort();
+    expect(runtime.orchestrateCalls[0]?.signal?.aborted).toBe(true);
+    expect(result).not.toHaveProperty("terminate");
+    expect(result.details).toBe(runtime.completedWave);
+    expect(result.content[0]?.type === "text" && result.content[0].text).toContain(
+      "Inspection complete.",
+    );
+  });
+
+  test("worker_send validates its branded boundary and follows mode termination semantics", async () => {
+    const { pi, runtime, context, modes } = harness();
+    modes.set("send-async", "async");
+    modes.set("send-inline", "inline");
+    const controller = new AbortController();
+
+    const asyncResult = await invoke(
+      pi,
+      "worker_send",
+      "send-async",
+      { worker_id: "worker-ready", instructions: "Continue." },
+      context,
+      controller.signal,
+    );
+    const inlineResult = await invoke(
+      pi,
+      "worker_send",
+      "send-inline",
+      { worker_id: "worker-ready", instructions: "Finish." },
+      context,
+      controller.signal,
+    );
+
+    expect(runtime.sendCalls.map(({ workerId, instructions, mode, signal }) => ({
+      workerId,
+      instructions,
+      mode,
+      signal,
+    }))).toEqual([
+      {
+        workerId: "worker-ready",
+        instructions: "Continue.",
+        mode: "async",
+        signal: undefined,
+      },
+      {
+        workerId: "worker-ready",
+        instructions: "Finish.",
+        mode: "inline",
+        signal: controller.signal,
+      },
+    ]);
+    expect(runtime.sendCalls[0]?.context.ownerSessionId).toBe("owner-session");
+    expect(asyncResult.terminate).toBe(true);
+    expect(inlineResult).not.toHaveProperty("terminate");
+
+    await expect(
+      invoke(
+        pi,
+        "worker_send",
+        "send-blank",
+        { worker_id: "   ", instructions: "Continue." },
+        context,
+      ),
+    ).rejects.toThrow("worker_id must not be blank");
+    expect(runtime.sendCalls).toHaveLength(2);
+  });
+
+  test("status forwards only the current owner and returns catalog diagnostics plus snapshot", async () => {
+    const { pi, runtime, context, catalogCalls } = harness();
+
+    const result = await invoke(pi, "orchestration_status", "status-call", {}, context);
+
+    expect(runtime.snapshotCalls).toEqual(["owner-session"]);
+    expect(catalogCalls).toEqual([context]);
+    expect(result).not.toHaveProperty("terminate");
+    const details = result.details as {
+      catalog: { workers: Array<Record<string, unknown>>; diagnostics: unknown[] };
+      snapshot: { waves: Array<Record<string, unknown>>; workers: Array<Record<string, unknown>> };
+    };
+    expect(details.catalog.diagnostics).toHaveLength(1);
+    expect(details.catalog.workers[0]).not.toHaveProperty("systemPrompt");
+    expect(details.snapshot.workers[0]).toMatchObject({
+      worker_id: "worker-owned",
+      worker: "scout",
+      owner_session_id: "owner-session",
+      wave_id: "wave-owned",
+      title: "Inspect",
+      lifecycle: "reusable",
+      status: "ready",
+      usage: expect.anything(),
+    });
+    expect(details.snapshot.workers[0]).toHaveProperty("activity");
+    expect(details.snapshot.workers[0]).not.toHaveProperty("instructions");
+    expect(JSON.stringify(result)).not.toContain("Inspect the runtime.");
+    expect(result.content[0]?.type === "text" && result.content[0].text).toContain(
+      "ignored invalid worker",
+    );
+    expect(result.content[0]?.type === "text" && result.content[0].text).toContain(
+      "worker-owned",
+    );
+    expect(result.content[0]?.type === "text" && result.content[0].text).not.toContain(
+      "Inspect the runtime.",
+    );
+  });
+
+  test("maps each exclusive abort target and forwards owner isolation", async () => {
+    const { pi, runtime, context } = harness();
+
+    await invoke(
+      pi,
+      "worker_abort",
+      "abort-workers",
+      { worker_ids: ["worker-1", "worker-2"] },
+      context,
+    );
+    await invoke(
+      pi,
+      "worker_abort",
+      "abort-wave",
+      { wave_id: "wave-1" },
+      context,
+    );
+    await invoke(pi, "worker_abort", "abort-all", { all: true }, context);
+
+    expect(runtime.abortCalls).toEqual([
+      { ownerSessionId: "owner-session", target: { workerIds: ["worker-1", "worker-2"] } },
+      { ownerSessionId: "owner-session", target: { waveId: "wave-1" } },
+      { ownerSessionId: "owner-session", target: { all: true } },
+    ]);
+
+    await expect(
+      invoke(pi, "worker_abort", "abort-blank", { wave_id: "  " }, context),
+    ).rejects.toThrow("wave_id must not be blank");
+    await expect(
+      invoke(pi, "worker_abort", "abort-blank-worker", { worker_ids: [" "] }, context),
+    ).rejects.toThrow("worker_id must not be blank");
+    await expect(
+      invoke(
+        pi,
+        "worker_abort",
+        "abort-ambiguous",
+        { worker_ids: ["worker-1"], all: true },
+        context,
+      ),
+    ).rejects.toThrow("exactly one target");
+    await expect(
+      invoke(pi, "worker_abort", "abort-empty", { worker_ids: [] }, context),
+    ).rejects.toThrow("at least one worker ID");
+    expect(runtime.abortCalls).toHaveLength(3);
+  });
+
+  test("closes an owner-scoped ready reusable worker", async () => {
+    const { pi, runtime, context } = harness();
+
+    const result = await invoke(
+      pi,
+      "worker_close",
+      "close-call",
+      { worker_id: "worker-ready" },
+      context,
+    );
+
+    expect(runtime.closeCalls).toEqual([
+      { ownerSessionId: "owner-session", workerId: "worker-ready" },
+    ]);
+    expect(result.details).toEqual({ workerId: "worker-ready" });
+    expect(result).not.toHaveProperty("terminate");
+
+    await expect(
+      invoke(pi, "worker_close", "close-blank", { worker_id: "\t" }, context),
+    ).rejects.toThrow("worker_id must not be blank");
+    expect(runtime.closeCalls).toHaveLength(1);
+  });
+
+  test("throws execution failures instead of returning fake error results", async () => {
+    for (const name of [
+      "orchestrate",
+      "orchestration_status",
+      "worker_send",
+      "worker_abort",
+      "worker_close",
+    ] as const) {
+      const { pi, runtime, context } = harness();
+      const runtimeMethod =
+        name === "orchestration_status" ? "snapshot" : name.replace("worker_", "");
+      const error = new Error(`${name} failed`);
+      runtime.failures[runtimeMethod as keyof FakeRuntime["failures"]] = error;
+      const params = {
+        orchestrate: {
+          tasks: [{ worker: "scout", title: "Inspect", instructions: "Inspect." }],
+        },
+        orchestration_status: {},
+        worker_send: { worker_id: "worker-ready", instructions: "Continue." },
+        worker_abort: { all: true },
+        worker_close: { worker_id: "worker-ready" },
+      }[name];
+
+      await expect(invoke(pi, name, `${name}-call`, params, context)).rejects.toBe(error);
+    }
+  });
+});
