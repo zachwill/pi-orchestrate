@@ -1,7 +1,10 @@
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type {
   ExtensionAPI,
   ExtensionContext,
+  Theme,
 } from "@earendil-works/pi-coding-agent";
+import { Container, Text } from "@earendil-works/pi-tui";
 import {
   formatSize,
   getAgentDir,
@@ -110,6 +113,12 @@ export function registerOrchestrationTools(
       "Use orchestrate for one independent worker wave, with a complete brief for every task.",
     ],
     parameters: orchestrateSchema,
+    renderCall(args, theme) {
+      return renderDispatchCall(theme, args.tasks);
+    },
+    renderResult(result, { isPartial }, theme) {
+      return renderOrchestrationResult(result, isPartial, theme);
+    },
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
       const mode = deps.getDispatchMode(toolCallId);
       const runtimeContext = await buildRuntimeContext(ctx, deps);
@@ -163,6 +172,12 @@ export function registerOrchestrationTools(
       "Use orchestration_status only for diagnostics or recovery; never poll it for completion.",
     ],
     parameters: statusSchema,
+    renderCall(_args, theme) {
+      return new Text(theme.fg("toolTitle", theme.bold("orchestration_status")), 0, 0);
+    },
+    renderResult(result, { isPartial }, theme) {
+      return renderSimpleResult(result, isPartial ? "Reading orchestration state…" : "Orchestration state ready", theme);
+    },
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const ownerSessionId = requireNonblank(
         "owner session ID",
@@ -195,6 +210,12 @@ export function registerOrchestrationTools(
       "Use worker_send only for follow-up work on an owned ready reusable worker.",
     ],
     parameters: workerSendSchema,
+    renderCall(args, theme) {
+      return renderWorkerMessageCall(theme, "worker_send", args.worker_id, args.instructions);
+    },
+    renderResult(result, { isPartial }, theme) {
+      return renderOrchestrationResult(result, isPartial, theme);
+    },
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
       const workerId = asWorkerId(params.worker_id);
       const mode = deps.getDispatchMode(toolCallId);
@@ -250,6 +271,17 @@ export function registerOrchestrationTools(
       "Use worker_abort only for active work; use worker_close for a ready reusable worker.",
     ],
     parameters: workerAbortSchema,
+    renderCall(args, theme) {
+      const target = "wave_id" in args
+        ? args.wave_id
+        : "worker_ids" in args
+          ? `${args.worker_ids.length} worker${args.worker_ids.length === 1 ? "" : "s"}`
+          : "all workers";
+      return renderCompactCall(theme, "worker_abort", target);
+    },
+    renderResult(result, { isPartial }, theme) {
+      return renderSimpleResult(result, isPartial ? "Stopping workers…" : "✓ Workers stopped", theme);
+    },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const ownerSessionId = requireNonblank(
         "owner session ID",
@@ -279,6 +311,12 @@ export function registerOrchestrationTools(
       "Use worker_close when an owned ready reusable worker is finished.",
     ],
     parameters: workerCloseSchema,
+    renderCall(args, theme) {
+      return renderCompactCall(theme, "worker_close", args.worker_id);
+    },
+    renderResult(result, { isPartial }, theme) {
+      return renderSimpleResult(result, isPartial ? "Closing worker…" : "✓ Worker closed", theme);
+    },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const ownerSessionId = requireNonblank(
         "owner session ID",
@@ -556,4 +594,111 @@ function readableDetails(title: string, details: unknown): string {
   if (!truncation.truncated) return content;
 
   return `${truncation.content}\n\n[Output truncated: ${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}. Full structured details remain available.]`;
+}
+
+function renderDispatchCall(
+  theme: Theme,
+  tasks: readonly { worker: string; title: string }[],
+): Container {
+  const container = new Container();
+  const count = tasks.length;
+  container.addChild(
+    new Text(
+      theme.fg("toolTitle", theme.bold("orchestrate ")) +
+        theme.fg("muted", `${count} worker${count === 1 ? "" : "s"}`),
+      0,
+      0,
+    ),
+  );
+
+  const visibleTasks = tasks.slice(0, 6);
+  for (const task of visibleTasks) {
+    container.addChild(
+      new Text(
+        `${theme.fg("accent", "→")} ${theme.fg("muted", task.worker)} · ${theme.fg("dim", task.title)}`,
+        0,
+        0,
+      ),
+    );
+  }
+  if (tasks.length > visibleTasks.length) {
+    container.addChild(new Text(theme.fg("dim", `… ${tasks.length - visibleTasks.length} more`), 0, 0));
+  }
+  return container;
+}
+
+function renderWorkerMessageCall(
+  theme: Theme,
+  tool: string,
+  workerId: string,
+  instructions: string,
+): Container {
+  const container = new Container();
+  container.addChild(
+    new Text(
+      theme.fg("toolTitle", theme.bold(`${tool} `)) + theme.fg("muted", workerId),
+      0,
+      0,
+    ),
+  );
+  const firstLine = instructions.split("\n").find((line) => line.trim())?.trim();
+  if (firstLine) {
+    container.addChild(new Text(`${theme.fg("accent", "→")} ${theme.fg("dim", firstLine)}`, 0, 0));
+  }
+  return container;
+}
+
+function renderCompactCall(theme: Theme, tool: string, target: string): Text {
+  return new Text(
+    theme.fg("toolTitle", theme.bold(`${tool} `)) + theme.fg("muted", target),
+    0,
+    0,
+  );
+}
+
+function renderOrchestrationResult(
+  result: AgentToolResult<unknown>,
+  isPartial: boolean,
+  theme: Theme,
+): Text {
+  if (isPartial) return new Text(theme.fg("warning", "Sending work…"), 0, 0);
+
+  const details = result.details;
+  if (isRecord(details) && Array.isArray(details.workerIds)) {
+    const count = details.workerIds.length;
+    return new Text(
+      theme.fg("success", `✓ Sent to ${count} worker${count === 1 ? "" : "s"}`) +
+        theme.fg("dim", " · replies return automatically"),
+      0,
+      0,
+    );
+  }
+  if (isRecord(details) && Array.isArray(details.results)) {
+    const count = details.results.length;
+    return new Text(
+      theme.fg("success", `✓ ${count} worker${count === 1 ? " replied" : "s replied"}`),
+      0,
+      0,
+    );
+  }
+  return renderSimpleResult(result, firstResultLine(result) || "Work sent", theme);
+}
+
+function renderSimpleResult(
+  result: AgentToolResult<unknown>,
+  message: string,
+  theme: Theme,
+): Text {
+  const failed = "isError" in result && result.isError === true;
+  return new Text(theme.fg(failed ? "error" : "success", failed ? firstResultLine(result) || message : message), 0, 0);
+}
+
+function firstResultLine(result: AgentToolResult<unknown>): string | undefined {
+  const first = result.content[0];
+  if (first?.type !== "text") return undefined;
+  return first.text.split("\n").find((line) => line.trim())?.trim();
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }

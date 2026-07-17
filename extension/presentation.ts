@@ -6,6 +6,7 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import {
+  Box,
   Container,
   Markdown,
   Spacer,
@@ -28,6 +29,9 @@ import type { OrchestratorRuntime, RuntimeSnapshot } from "./runtime.js";
 export const ORCHESTRATION_PRESENTATION_KEY = "pi-orchestrate";
 export const MAX_RESULT_PREVIEW_LINES = 5;
 export const MAX_WIDGET_WORKERS = 8;
+
+const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const SPINNER_INTERVAL_MS = 80;
 
 export type PresentationRuntime = Pick<
   OrchestratorRuntime,
@@ -54,6 +58,10 @@ interface StatusBinding {
   readonly ctx: ExtensionContext;
 }
 
+interface RenderRequester {
+  requestRender(): void;
+}
+
 const ACTIVE_STATUSES: ReadonlySet<WorkerStatus> = new Set([
   "starting",
   "running",
@@ -74,9 +82,9 @@ export function registerOrchestrationPresentation(pi: ExtensionAPI): void {
     (message, { expanded }, theme) => {
       const details = readDeliveryDetails(message.details);
       const content = messageText(message.content);
-
-      if (expanded) return expandedResult(content, details, theme);
-      return new BoundedLines(collapsedResultLines(content, details, theme));
+      return expanded
+        ? expandedResult(content, details, theme)
+        : collapsedResult(content, details, theme);
     },
   );
 }
@@ -85,7 +93,7 @@ export function formatResultStatusSummary(details: unknown): string {
   const parsed = readDeliveryDetails(details);
   if (!parsed) return "Result details unavailable";
 
-  const resultWord = parsed.results.length === 1 ? "result" : "results";
+  const resultWord = parsed.results.length === 1 ? "reply" : "replies";
   if (parsed.results.length === 0) return `0 ${resultWord}`;
 
   const counts = new Map<string, number>();
@@ -97,7 +105,7 @@ export function formatResultStatusSummary(details: unknown): string {
   const statusOrder = ["completed", "ready", "failed", "aborted", "closed", "unknown"];
   const statuses = statusOrder.flatMap((status) => {
     const count = counts.get(status);
-    return count === undefined ? [] : [`${count} ${status}`];
+    return count === undefined ? [] : [`${count} ${resultStatusLabel(status)}`];
   });
   return `${parsed.results.length} ${resultWord} · ${statuses.join(" · ")}`;
 }
@@ -115,13 +123,13 @@ export function formatResultPreviews(
 
   const visibleResults = parsed.results.slice(0, limit);
   const previews = visibleResults.map((result) => {
-    const label = `${statusIcon(result.status)} ${result.worker} — ${result.title} · ${result.status}`;
+    const label = `${statusIcon(result.status)} ${result.worker} ← ${result.title}`;
     const outcome = outcomePreview(result);
-    return outcome ? `${label}: ${outcome}` : label;
+    return outcome ? `${label} — ${outcome}` : `${label} · ${resultStatusLabel(result.status)}`;
   });
 
   if (parsed.results.length > limit && previews.length > 0) {
-    previews[previews.length - 1] = `… ${parsed.results.length - limit + 1} more results`;
+    previews[previews.length - 1] = `… ${parsed.results.length - limit + 1} more replies`;
   }
   return previews;
 }
@@ -140,12 +148,11 @@ export function formatWorkerUsage(usage: Partial<WorkerUsage> | undefined): stri
 
 export function formatWorkerStatusLine(worker: WorkerRecord): string {
   const metadata = [
-    worker.worker,
     workerStateLabel(worker),
     formatContextCost(worker.usage),
   ].filter((part): part is string => Boolean(part));
 
-  return `${worker.title} · ${metadata.join(" · ")} · ${worker.id}`;
+  return `${worker.worker} ${workerDirection(worker.status)} ${worker.title} · ${metadata.join(" · ")}`;
 }
 
 export function formatFooterStatus(snapshot: RuntimeSnapshot): string | undefined {
@@ -153,7 +160,10 @@ export function formatFooterStatus(snapshot: RuntimeSnapshot): string | undefine
   const ready = snapshot.workers.filter((worker) => worker.status === "ready").length;
   if (active === 0 && ready === 0) return undefined;
 
-  return `Orchestrate: ${active} active · ${ready} ready`;
+  const parts = [];
+  if (active > 0) parts.push(`${active} working`);
+  if (ready > 0) parts.push(`${ready} ready`);
+  return `Workers: ${parts.join(" · ")}`;
 }
 
 export class StatusController {
@@ -218,8 +228,7 @@ export class StatusController {
   }
 
   private present(ctx: ExtensionContext, snapshot: RuntimeSnapshot): void {
-    const footer = formatFooterStatus(snapshot);
-    ctx.ui.setStatus(ORCHESTRATION_PRESENTATION_KEY, footer);
+    ctx.ui.setStatus(ORCHESTRATION_PRESENTATION_KEY, formatFooterStatus(snapshot));
 
     if (ctx.mode !== "tui") return;
     if (widgetWorkerCount(snapshot) === 0) {
@@ -229,7 +238,7 @@ export class StatusController {
 
     ctx.ui.setWidget(
       ORCHESTRATION_PRESENTATION_KEY,
-      (_tui, theme) => new WorkerStatusComponent(snapshot, theme),
+      (tui, theme) => new WorkerStatusComponent(snapshot, theme, tui),
       { placement: "aboveEditor" },
     );
   }
@@ -253,28 +262,28 @@ export function createStatusController(runtime: PresentationRuntime): StatusCont
   return new StatusController(runtime);
 }
 
-class BoundedLines implements Component {
-  constructor(private readonly lines: readonly string[]) {}
-
-  render(width: number): string[] {
-    const boundedWidth = Math.max(1, width);
-    return this.lines.map((line) => truncateToWidth(line, boundedWidth, "…"));
-  }
-
-  invalidate(): void {}
-}
-
 interface WaveGroup {
   readonly wave: WaveRecord;
   readonly workers: readonly WorkerRecord[];
   readonly settled: number;
 }
 
-class WorkerStatusComponent implements Component {
+export class WorkerStatusComponent implements Component {
+  private frameIndex = 0;
+  private readonly timer: ReturnType<typeof setInterval> | undefined;
+
   constructor(
     private readonly snapshot: RuntimeSnapshot,
     private readonly theme: Theme,
-  ) {}
+    private readonly tui?: RenderRequester,
+  ) {
+    if (!snapshot.workers.some((worker) => ACTIVE_STATUSES.has(worker.status))) return;
+    this.timer = setInterval(() => {
+      this.frameIndex = (this.frameIndex + 1) % SPINNER_FRAMES.length;
+      this.tui?.requestRender();
+    }, SPINNER_INTERVAL_MS);
+    (this.timer as unknown as { unref?: () => void }).unref?.();
+  }
 
   render(width: number): string[] {
     const boundedWidth = Math.max(1, width);
@@ -286,15 +295,15 @@ class WorkerStatusComponent implements Component {
     let remaining = MAX_WIDGET_WORKERS;
     let shown = 0;
 
-    for (const group of groups) {
-      if (remaining === 0) break;
+    groups.forEach((group, index) => {
+      if (remaining === 0) return;
       const visibleWorkers = group.workers.slice(0, remaining);
-      if (visibleWorkers.length === 0) continue;
-      lines.push(this.waveHeader(group));
+      if (visibleWorkers.length === 0) return;
+      lines.push(this.waveHeader(group, groups.length > 1 ? index + 1 : undefined));
       for (const worker of visibleWorkers) lines.push(this.workerLine(worker, boundedWidth));
       shown += visibleWorkers.length;
       remaining -= visibleWorkers.length;
-    }
+    });
 
     if (remaining > 0) {
       const visibleReady = ready.slice(0, remaining);
@@ -313,54 +322,68 @@ class WorkerStatusComponent implements Component {
 
   invalidate(): void {}
 
-  private waveHeader(group: WaveGroup): string {
+  dispose(): void {
+    if (this.timer !== undefined) clearInterval(this.timer);
+  }
+
+  private waveHeader(group: WaveGroup, waveNumber?: number): string {
+    const label = waveNumber === undefined ? "Workers" : `Workers · wave ${waveNumber}`;
     return this.theme.fg(
       "toolTitle",
-      this.theme.bold(
-        `Wave ${group.wave.id} · ${group.settled}/${group.wave.workerIds.length} settled`,
-      ),
+      this.theme.bold(`${label} · ${group.settled}/${group.wave.workerIds.length} replied`),
     );
   }
 
   private workerLine(worker: WorkerRecord, width: number): string {
-    const state = workerStateLabel(worker);
-    const title = `${statusIcon(worker.status)} ${this.theme.fg("text", this.theme.bold(worker.title))}`;
+    const icon = this.workerIcon(worker.status);
     const workerType = this.theme.fg("muted", worker.worker);
-    const activity = this.theme.fg("text", state);
-    const context = isPositiveNumber(worker.usage.contextTokens)
-      ? this.theme.fg("dim", `${formatCompactNumber(worker.usage.contextTokens)} ctx`)
-      : undefined;
-    const cost = isPositiveNumber(worker.usage.cost)
-      ? this.theme.fg("dim", `$${worker.usage.cost.toFixed(4)}`)
-      : undefined;
-    const id = this.theme.fg("muted", String(worker.id));
+    const direction = this.theme.fg(ACTIVE_STATUSES.has(worker.status) ? "accent" : "success", workerDirection(worker.status));
+    const title = this.theme.fg("text", this.theme.bold(worker.title));
+    const activity = this.theme.fg("text", workerStateLabel(worker));
+    const usage = formatContextCost(worker.usage);
+    const dimUsage = usage ? this.theme.fg("dim", usage) : undefined;
+    const identity = `${icon} ${workerType} ${direction} ${title}`;
     const variants = [
-      [title, workerType, activity, context, cost, id],
-      [title, workerType, activity, context, id],
-      [title, workerType, activity, id],
-      [title, activity, id],
+      [identity, activity, dimUsage],
+      [identity, activity],
+      [identity],
     ].map((parts) => parts.filter((part): part is string => Boolean(part)).join(" · "));
     const fitting = variants.find((line) => visibleWidth(line) <= width);
     if (fitting) return fitting;
 
-    const suffix = ` · ${activity} · ${id}`;
-    const titleWidth = Math.max(1, width - visibleWidth(suffix));
-    if (titleWidth > 1) return `${truncateToWidth(title, titleWidth, "…")}${suffix}`;
-    return truncateToWidth(`${statusIcon(worker.status)} ${id}`, width, "…");
+    const suffix = ` · ${activity}`;
+    const identityWidth = Math.max(1, width - visibleWidth(suffix));
+    return `${truncateToWidth(identity, identityWidth, "…")}${suffix}`;
+  }
+
+  private workerIcon(status: WorkerStatus): string {
+    if (ACTIVE_STATUSES.has(status)) {
+      return this.theme.fg("warning", SPINNER_FRAMES[this.frameIndex] ?? SPINNER_FRAMES[0]);
+    }
+    const color = status === "failed" || status === "aborted" ? "error" : "success";
+    return this.theme.fg(color, statusIcon(status));
   }
 }
 
-function collapsedResultLines(
+function collapsedResult(
   content: string,
   details: SafeDetails | undefined,
   theme: Theme,
-): string[] {
-  const waveId = details?.id ?? "unknown wave";
-  const heading = `${theme.fg("toolTitle", theme.bold("Worker results"))} ${theme.fg("dim", `· ${waveId}`)}`;
-  const summary = theme.fg("muted", formatResultStatusSummary(details));
-  const previews = formatResultPreviews(details, content).map((line) => theme.fg("customMessageText", line));
-  const hint = theme.fg("dim", keyHint("app.tools.expand", "to expand results"));
-  return [heading, summary, ...previews, hint];
+): Component {
+  const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+  const count = details?.results.length;
+  const heading = count === undefined
+    ? "Worker replies"
+    : `${count} ${count === 1 ? "worker replied" : "workers replied"}`;
+  box.addChild(new Text(theme.fg("success", theme.bold(`✓ ${heading}`)), 0, 0));
+  box.addChild(new Text(theme.fg("muted", formatResultStatusSummary(details)), 0, 0));
+
+  const previews = formatResultPreviews(details, content);
+  if (previews.length > 0) box.addChild(new Spacer(1));
+  for (const line of previews) box.addChild(new Text(theme.fg("customMessageText", line), 0, 0));
+  box.addChild(new Spacer(1));
+  box.addChild(new Text(theme.fg("dim", keyHint("app.tools.expand", "to expand replies")), 0, 0));
+  return box;
 }
 
 function expandedResult(
@@ -368,44 +391,41 @@ function expandedResult(
   details: SafeDetails | undefined,
   theme: Theme,
 ): Component {
-  const container = new Container();
-  const waveId = details?.id ?? "unknown wave";
-  container.addChild(
-    new Text(
-      `${theme.fg("toolTitle", theme.bold("Worker results"))} ${theme.fg("dim", `· ${waveId}`)}`,
-      0,
-      0,
-    ),
-  );
-  container.addChild(new Text(theme.fg("muted", formatResultStatusSummary(details)), 0, 0));
-  container.addChild(new Spacer(1));
+  const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+  const count = details?.results.length;
+  const heading = count === undefined
+    ? "Worker replies"
+    : `${count} ${count === 1 ? "worker replied" : "workers replied"}`;
+  box.addChild(new Text(theme.fg("success", theme.bold(`✓ ${heading}`)), 0, 0));
+  box.addChild(new Text(theme.fg("muted", formatResultStatusSummary(details)), 0, 0));
+  box.addChild(new Spacer(1));
 
   if (!details) {
-    container.addChild(new Markdown(content, 0, 0, getMarkdownTheme()));
-    container.addChild(new Spacer(1));
-    container.addChild(new Text(theme.fg("dim", "Structured worker metadata unavailable"), 0, 0));
-    return container;
+    box.addChild(new Markdown(content, 0, 0, getMarkdownTheme()));
+    box.addChild(new Spacer(1));
+    box.addChild(new Text(theme.fg("dim", "Structured worker metadata unavailable"), 0, 0));
+    return box;
   }
 
-  container.addChild(new Markdown(reconstructOutcomeMarkdown(details), 0, 0, getMarkdownTheme()));
-  container.addChild(new Spacer(1));
-  container.addChild(new Text(theme.fg("toolTitle", theme.bold("Worker details")), 0, 0));
+  box.addChild(new Markdown(reconstructOutcomeMarkdown(details), 0, 0, getMarkdownTheme()));
+  box.addChild(new Spacer(1));
+  box.addChild(new Text(theme.fg("toolTitle", theme.bold("Worker details")), 0, 0));
 
   for (const result of details.results) {
     const usage = formatWorkerUsage(result.usage) ?? "unavailable";
     const session = result.sessionFile ?? "unavailable";
-    container.addChild(new Text(theme.fg("text", `${result.worker} — ${result.title}`), 0, 0));
-    container.addChild(
+    box.addChild(new Text(theme.fg("text", `${result.worker} — ${result.title}`), 0, 0));
+    box.addChild(
       new Text(
         `${theme.fg("muted", "ID")} ${result.workerId} · ${theme.fg("muted", "status")} ${result.status}`,
         0,
         0,
       ),
     );
-    container.addChild(new Text(theme.fg("dim", `usage ${usage}`), 0, 0));
-    container.addChild(new Text(theme.fg("dim", `session ${session}`), 0, 0));
+    box.addChild(new Text(theme.fg("dim", `usage ${usage}`), 0, 0));
+    box.addChild(new Text(theme.fg("dim", `session ${session}`), 0, 0));
   }
-  return container;
+  return box;
 }
 
 function readDeliveryDetails(value: unknown): SafeDetails | undefined {
@@ -460,8 +480,7 @@ function outcomePreview(result: SafeResult): string | undefined {
     ? firstNonEmptyLines(outcome.assistantText ?? "", 1)[0]
     : undefined;
   const message = "message" in outcome ? outcome.message?.trim() : undefined;
-  if (result.status === "failed") return message;
-  if (result.status === "aborted") return message;
+  if (result.status === "failed" || result.status === "aborted") return message;
   return assistantText;
 }
 
@@ -565,9 +584,14 @@ const TOOL_ACTIVITY: Readonly<Record<string, string>> = {
 
 function workerStateLabel(worker: Pick<WorkerRecord, "status" | "activity">): string {
   if (worker.status === "starting" || worker.status === "stopping") return worker.status;
+  if (worker.status === "completed") return "replied";
   if (worker.status !== "running") return worker.status;
   if (!worker.activity?.trim()) return "thinking";
   return TOOL_ACTIVITY[worker.activity] ?? worker.activity;
+}
+
+function workerDirection(status: WorkerStatus): "→" | "←" {
+  return ACTIVE_STATUSES.has(status) ? "→" : "←";
 }
 
 function formatContextCost(usage: Partial<WorkerUsage> | undefined): string | undefined {
@@ -595,6 +619,23 @@ function formatCompactNumber(value: number): string {
 
 function trimDecimal(value: number): string {
   return value.toFixed(1).replace(/\.0$/, "");
+}
+
+function resultStatusLabel(status: string): string {
+  switch (status) {
+    case "completed":
+      return "completed";
+    case "ready":
+      return "ready";
+    case "failed":
+      return "failed";
+    case "aborted":
+      return "aborted";
+    case "closed":
+      return "closed";
+    default:
+      return "unknown";
+  }
 }
 
 function statusIcon(status: string): string {

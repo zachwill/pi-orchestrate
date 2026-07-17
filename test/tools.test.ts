@@ -370,8 +370,8 @@ describe("registerOrchestrationTools", () => {
       expect(tool.parameters).toEqual(
         expectedSchemas[tool.name as keyof typeof expectedSchemas],
       );
-      expect(tool.renderCall).toBeUndefined();
-      expect(tool.renderResult).toBeUndefined();
+      expect(tool.renderCall).toBeFunction();
+      expect(tool.renderResult).toBeFunction();
     }
 
     const names = pi.tools.map((tool) => tool.name);

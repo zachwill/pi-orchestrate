@@ -7,7 +7,6 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type Component } from "@earendil-works/pi-tui";
-import { readFileSync } from "node:fs";
 import type { RuntimeSnapshot } from "../extension/runtime.ts";
 import type { WaveRecord, WorkerRecord, WorkerStatus } from "../extension/domain.ts";
 import {
@@ -15,6 +14,7 @@ import {
   MAX_WIDGET_WORKERS,
   ORCHESTRATION_PRESENTATION_KEY,
   StatusController,
+  WorkerStatusComponent,
   formatFooterStatus,
   formatResultPreviews,
   formatResultStatusSummary,
@@ -230,16 +230,16 @@ async function settle(): Promise<void> {
 describe("pure result formatting", () => {
   test("summarizes statuses and keeps ordered previews to five lines", () => {
     expect(formatResultStatusSummary(resultDetails(4))).toBe(
-      "4 results · 1 completed · 1 ready · 1 failed · 1 aborted",
+      "4 replies · 1 completed · 1 ready · 1 failed · 1 aborted",
     );
 
     const previews = formatResultPreviews(resultDetails(7));
     expect(previews).toHaveLength(MAX_RESULT_PREVIEW_LINES);
-    expect(previews[0]).toContain("✓ scout — Task 1 · completed: Result body 1");
-    expect(previews[1]).toContain("✗ worker — Task 2 · failed: Tests failed");
-    expect(previews[2]).toContain("■ scout — Task 3 · aborted: Stopped");
-    expect(previews[3]).toContain("○ worker — Task 4 · ready: Waiting for follow-up");
-    expect(previews[4]).toBe("… 3 more results");
+    expect(previews[0]).toContain("✓ scout ← Task 1 — Result body 1");
+    expect(previews[1]).toContain("✗ worker ← Task 2 — Tests failed");
+    expect(previews[2]).toContain("■ scout ← Task 3 — Stopped");
+    expect(previews[3]).toContain("○ worker ← Task 4 — Waiting for follow-up");
+    expect(previews[4]).toBe("… 3 more replies");
   });
 
   test("handles malformed details with a bounded content fallback", () => {
@@ -272,17 +272,17 @@ describe("worker activity presentation", () => {
     const line = formatWorkerStatusLine(
       worker("worker-activity", "running", { activity }),
     );
-    expect(line).toStartWith(`Human title worker-activity · scout · ${expected}`);
+    expect(line).toStartWith(`scout → Human title worker-activity · ${expected}`);
     expect(line).toContain("· 12.3k ctx · $0.0123");
     expect(line).not.toMatch(/ · \d+[smh](?: | ·)/);
-    expect(line).toEndWith("· worker-activity");
+    expect(line).not.toContain("worker-activity · scout");
   });
 
   test("starting and stopping override tool activity", () => {
     expect(formatWorkerStatusLine(worker("start", "starting", { activity: "bash" })))
-      .toContain("· scout · starting ·");
+      .toContain("scout → Human title start · starting ·");
     expect(formatWorkerStatusLine(worker("stop", "stopping", { activity: "read" })))
-      .toContain("· scout · stopping ·");
+      .toContain("scout → Human title stop · stopping ·");
   });
 
   test("footer has only active and ready counts and clears when both are zero", () => {
@@ -291,25 +291,27 @@ describe("worker activity presentation", () => {
       worker("starting", "starting"),
       worker("ready", "ready"),
       worker("done", "completed"),
-    ]))).toBe("Orchestrate: 2 active · 1 ready");
+    ]))).toBe("Workers: 2 working · 1 ready");
     expect(formatFooterStatus(snapshot([worker("ready", "ready")]))).toBe(
-      "Orchestrate: 0 active · 1 ready",
+      "Workers: 1 ready",
     );
     expect(formatFooterStatus(snapshot([worker("done", "completed")]))).toBeUndefined();
   });
 });
 
 describe("wave result renderer", () => {
-  test("collapsed rendering is neutral, ordered, bounded, and uses Pi's expansion hint", () => {
-    const plain = renderMessage(false, resultDetails(7)).map((line) => Bun.stripANSI(line));
-    expect(plain[0]).toStartWith("Worker results · wave-results");
-    expect(plain[0]).not.toMatch(/^[✓✗■●]/);
-    expect(plain[1]).toContain("7 results");
+  test("collapsed rendering makes returned worker replies prominent and bounded", () => {
+    const plain = renderMessage(false, resultDetails(7))
+      .map((line) => Bun.stripANSI(line).trim())
+      .filter(Boolean);
+    expect(plain[0]).toBe("✓ 7 workers replied");
+    expect(plain[1]).toContain("7 replies");
     expect(plain).toHaveLength(2 + MAX_RESULT_PREVIEW_LINES + 1);
-    expect(plain[2]).toContain("Task 1 · completed");
-    expect(plain[3]).toContain("Task 2 · failed: Tests failed");
-    expect(plain[4]).toContain("Task 3 · aborted: Stopped");
-    expect(plain.at(-1)).toContain("to expand results");
+    expect(plain[2]).toContain("scout ← Task 1 — Result body 1");
+    expect(plain[3]).toContain("worker ← Task 2 — Tests failed");
+    expect(plain[4]).toContain("scout ← Task 3 — Stopped");
+    expect(plain.at(-1)).toContain("to expand replies");
+    expect(plain.join("\n")).not.toContain("wave-results");
   });
 
   test("expanded rendering reconstructs full outcome Markdown instead of capped content", () => {
@@ -426,12 +428,12 @@ describe("StatusController", () => {
     controller.bind("owner", ui.ctx);
     await settle();
     const plain = Bun.stripANSI(latestWidget(ui).render(120).join("\n"));
-    expect(plain).toContain("Wave wave-a · 2/3 settled");
-    expect(plain).toContain("● Inspect code · scout · reading");
-    expect(plain).toContain("✓ Review tests · scout · completed");
-    expect(plain).toContain("○ Await follow-up · scout · ready");
-    expect(plain).toContain("Wave wave-b · 0/1 settled");
-    expect(plain).not.toMatch(/settled · \d+[smh]/);
+    expect(plain).toContain("Workers · wave 1 · 2/3 replied");
+    expect(plain).toContain("scout → Inspect code · reading");
+    expect(plain).toContain("✓ scout ← Review tests · replied");
+    expect(plain).toContain("○ scout ← Await follow-up · ready");
+    expect(plain).toContain("Workers · wave 2 · 0/1 replied");
+    expect(plain).not.toMatch(/replied · \d+[smh]/);
     expect(plain).toContain("running command");
     expect(plain).not.toContain("Ready ·");
     controller.dispose();
@@ -475,11 +477,11 @@ describe("StatusController", () => {
     await settle();
     const ready = Bun.stripANSI(latestWidget(ui).render(80).join("\n"));
     expect(ready).toContain("Ready · 1");
-    expect(ready).toContain("Reusable reviewer");
-    expect(ready).toContain("worker-ready");
+    expect(ready).toContain("scout ← Reusable reviewer · ready");
+    expect(ready).not.toContain("worker-ready");
     expect(ready).not.toContain("Finished task");
     expect(ready).not.toContain("Last result");
-    expect(ui.statuses.at(-1)).toBe("Orchestrate: 0 active · 1 ready");
+    expect(ui.statuses.at(-1)).toBe("Workers: 1 ready");
 
     current = snapshot([worker("worker-terminal", "completed")], [wave("wave-a", ["worker-terminal"], "complete")]);
     runtime.emit("owner");
@@ -489,7 +491,7 @@ describe("StatusController", () => {
     controller.dispose();
   });
 
-  test("keeps worker IDs and state visible while adapting detail at 120/80/50/32 columns", async () => {
+  test("keeps worker type, task, and state visible without UUID noise at common widths", async () => {
     const runtime = new RuntimeHarness();
     runtime.snapshotImpl = async () => snapshot(
       [worker("worker-alpha", "running", {
@@ -509,10 +511,10 @@ describe("StatusController", () => {
       const lines = component.render(width);
       expect(lines).toEqual(component.render(width));
       expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
-      const workerLine = Bun.stripANSI(lines.find((line) => line.includes("worker-alpha")) ?? "");
-      expect(workerLine).toContain("worker-alpha");
+      const workerLine = Bun.stripANSI(lines.find((line) => line.includes("scout")) ?? "");
+      expect(workerLine).toContain("scout →");
       expect(workerLine).toContain("searching");
-      expect(workerLine.indexOf("A long")).toBeLessThan(workerLine.indexOf("worker-alpha"));
+      expect(workerLine).not.toContain("worker-alpha");
     }
     controller.dispose();
   });
@@ -532,9 +534,23 @@ describe("StatusController", () => {
     controller.dispose();
   });
 
-  test("has no timer-driven refresh or animation", () => {
-    const source = readFileSync(new URL("../extension/presentation.ts", import.meta.url), "utf8");
-    expect(source).not.toMatch(/setInterval|setTimeout|requestAnimationFrame/);
+  test("animates active workers and stops requesting renders after disposal", async () => {
+    let renderRequests = 0;
+    const component = new WorkerStatusComponent(
+      snapshot([worker("animated", "running")], [wave("wave-1", ["animated"])]),
+      theme,
+      { requestRender: () => { renderRequests += 1; } },
+    );
+    const before = Bun.stripANSI(component.render(80)[1] ?? "");
+    await Bun.sleep(100);
+    const after = Bun.stripANSI(component.render(80)[1] ?? "");
+
+    expect(renderRequests).toBeGreaterThan(0);
+    expect(after).not.toBe(before);
+    component.dispose();
+    const requestsAtDispose = renderRequests;
+    await Bun.sleep(100);
+    expect(renderRequests).toBe(requestsAtDispose);
   });
 
   test("ignores stale owners and out-of-order refreshes, then cleans up once", async () => {
@@ -553,10 +569,10 @@ describe("StatusController", () => {
     ownerA.resolve(snapshot([worker("stale", "running")], [wave("wave-1", ["stale"])]));
     await settle();
 
-    expect(second.statuses).toEqual(["Orchestrate: 0 active · 1 ready"]);
+    expect(second.statuses).toEqual(["Workers: 1 ready"]);
     expect(first.statuses).toEqual([undefined]);
     controller.unbind("owner-a");
-    expect(second.statuses.at(-1)).toBe("Orchestrate: 0 active · 1 ready");
+    expect(second.statuses.at(-1)).toBe("Workers: 1 ready");
     controller.dispose();
     controller.dispose();
     expect(second.statuses.at(-1)).toBeUndefined();
@@ -581,7 +597,7 @@ describe("StatusController", () => {
     older.resolve(snapshot([worker("stale", "running")], [wave("wave-1", ["stale"])]));
     await settle();
 
-    expect(ui.statuses).toEqual(["Orchestrate: 0 active · 1 ready"]);
+    expect(ui.statuses).toEqual(["Workers: 1 ready"]);
     controller.dispose();
   });
 
@@ -596,7 +612,7 @@ describe("StatusController", () => {
 
     controller.bind("owner", ui.ctx);
     await settle();
-    expect(ui.statuses).toContain("Orchestrate: 1 active · 0 ready");
+    expect(ui.statuses).toContain("Workers: 1 working");
     expect(ui.widgets).toEqual([]);
     controller.dispose();
   });
