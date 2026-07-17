@@ -11,7 +11,7 @@ bun run typecheck
 pi install /Users/zachwill/code/pi-workers
 ```
 
-On first load, the extension copies the default `planner`, `investigator`, `scout`, and `worker` examples into `~/.pi/agent/pi-workers/agents/` if they do not already exist. It writes `~/.pi/agent/pi-workers/default-workers.json` as a one-time marker, so deleting those worker Markdown files later does not cause them to reappear. The package-owned files in `examples/agents/*.md` remain templates only; active workers are always loaded from user/project namespaces.
+On first load, the extension copies the default `investigator`, `scout`, and `worker` examples into `~/.pi/agent/pi-workers/agents/` if they do not already exist. It writes `~/.pi/agent/pi-workers/default-workers.json` as a one-time marker, so deleting those worker Markdown files later does not cause them to reappear. The package-owned files in `examples/agents/*.md` remain templates only; active workers are always loaded from user/project namespaces.
 
 ## Tools
 
@@ -28,7 +28,6 @@ Results are delivered as session-owned steering messages with custom types `pi-w
 The default workers are ordinary Markdown files after first load:
 
 ```txt
-~/.pi/agent/pi-workers/agents/planner.md
 ~/.pi/agent/pi-workers/agents/investigator.md
 ~/.pi/agent/pi-workers/agents/scout.md
 ~/.pi/agent/pi-workers/agents/worker.md

@@ -10,7 +10,7 @@ interface DefaultWorkerInstallState {
   skippedExisting: string[];
 }
 
-const defaultWorkerNames = ["planner.md", "investigator.md", "scout.md", "worker.md"];
+const defaultWorkerNames = ["investigator.md", "scout.md", "worker.md"];
 
 function readState(statePath: string): DefaultWorkerInstallState | undefined {
   if (!fs.existsSync(statePath)) return undefined;

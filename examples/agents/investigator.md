@@ -1,7 +1,7 @@
 ---
 name: investigator
 description: Deeper read-only worker for codebase digging and synthesis. Use when scout is too shallow or the question needs broader context.
-model: openai-codex/gpt-5.5
+model: openai-codex/gpt-5.6-sol
 thinking: medium
 tools: read, grep, find, ls, bash
 ---

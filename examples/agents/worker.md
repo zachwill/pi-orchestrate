@@ -1,7 +1,7 @@
 ---
 name: worker
 description: Implements bounded code changes, fixes, and refactors autonomously. Has full read-write access to the codebase.
-model: openai-codex/gpt-5.5
+model: openai-codex/gpt-5.6-sol
 thinking: medium
 ---
 

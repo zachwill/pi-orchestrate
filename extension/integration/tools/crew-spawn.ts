@@ -8,7 +8,7 @@ export function scoutScopeAdvisory(task: string): string | undefined {
   const text = task.toLowerCase();
   const broadIndicators = ["synthesis", "synthesize", "review", "audit", "planning", "plan", "strategy", "architecture", "cross-file", "across files", "broad"];
   if (!broadIndicators.some((indicator) => text.includes(indicator))) return undefined;
-  return "⚠ Scout advisory: scouts are for narrow discovery; use investigator or planner for broad synthesis, review, or planning.";
+  return "⚠ Scout advisory: scouts are for narrow discovery; use investigator for broad synthesis, review, or planning.";
 }
 
 export function registerCrewSpawnTool({ pi, runtime, extensionDir, notifyDiscoveryWarnings }: CrewToolDeps): void {
@@ -18,7 +18,7 @@ export function registerCrewSpawnTool({ pi, runtime, extensionDir, notifyDiscove
     description: "Spawn a non-blocking worker in an isolated child session. Accepts canonical `worker` and legacy `subagent` arguments.",
     parameters: Type.Object({ worker: Type.Optional(Type.String({ description: "Worker name from crew_list" })), subagent: Type.Optional(Type.String({ description: "Legacy alias for worker" })), task: Type.String({ description: "Task to delegate to the worker" }) }),
     promptSnippet: "Spawn a non-blocking worker. Use crew_list first to see available workers.",
-    promptGuidelines: ["crew_spawn: Spawn a discovered worker for one self-contained task.", "crew_spawn: Role boundaries: scout = narrow discovery only; investigator = broad/cross-file synthesis or review; planner = deterministic implementation specs.", "crew_spawn: Use the `worker` argument; `subagent` is accepted only for legacy compatibility.", "crew_spawn: Include constraints, relevant files, acceptance criteria, and expected output.", "crew_spawn: Results arrive as steering messages; do not poll crew_list."],
+    promptGuidelines: ["crew_spawn: Spawn a discovered worker for one self-contained task.", "crew_spawn: Role boundaries: scout = narrow discovery only; investigator = broad/cross-file synthesis or review; worker = bounded implementation.", "crew_spawn: Use the `worker` argument; `subagent` is accepted only for legacy compatibility.", "crew_spawn: Include constraints, relevant files, acceptance criteria, and expected output.", "crew_spawn: Results arrive as steering messages; do not poll crew_list."],
     prepareArguments(args) {
       const input = (args && typeof args === "object") ? args as { worker?: string; subagent?: string; task?: string } : {};
       return { ...input, worker: input.worker ?? input.subagent, task: input.task ?? "" };

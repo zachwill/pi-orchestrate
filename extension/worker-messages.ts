@@ -8,12 +8,6 @@ export interface WorkerPayload { id: string; workerName: string; sessionFile?: s
 export interface WorkerResultMessageDetails { workerId: string; workerName: string; sessionFile?: string; status: WorkerStatus; body?: string }
 
 function body(payload: WorkerPayload): string | undefined { return payload.status === "error" || payload.status === "aborted" ? (payload.error ?? payload.result) : (payload.result ?? payload.error); }
-export function workerResultAdvisory(payload: WorkerPayload): string | undefined {
-  if (payload.workerName !== "planner") return undefined;
-  if (payload.status === "done") return "🧭 Planner result delivered. Read the spec, then spawn a bounded worker, ask a named blocking question, implement directly if trivial, or explicitly stop.";
-  if (payload.status === "waiting") return "🧭 Planner is waiting. If the spec is usable, spawn a bounded worker or explicitly stop, and call crew_done when the waiting planner no longer needs input.";
-  return undefined;
-}
 export function resultTitle(details: { workerId: string; workerName: string; status: WorkerStatus }): string { return `Worker '${details.workerName}' (${details.workerId}) ${STATUS_LABEL[details.status]}`; }
 export function sendWorkerResult(payload: WorkerPayload, sendMessage: SendMessageFn, opts: { isIdle: boolean; triggerTurn: boolean }): void {
   const messageBody = body(payload);
