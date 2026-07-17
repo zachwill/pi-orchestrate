@@ -421,17 +421,22 @@ async function prepareChildModelRuntime(
   }
 
   const resolvedAuth = await options.modelRegistry.getApiKeyAndHeaders(initiallyResolvedModel);
+  const parentUsesOAuth = options.modelRegistry.isUsingOAuth(initiallyResolvedModel);
   if (resolvedAuth.ok) {
     if (resolvedAuth.headers) {
       modelRuntime.registerProvider(selected.provider, {
         headers: { ...resolvedAuth.headers },
       });
     }
-    if (resolvedAuth.apiKey) {
+    // OAuth resolution returns an access token through the compatibility API, but
+    // installing that token as a runtime API key masks the complete OAuth credential
+    // that the child already reads from the shared auth.json file.
+    if (resolvedAuth.apiKey && !parentUsesOAuth) {
       await modelRuntime.setRuntimeApiKey(selected.provider, resolvedAuth.apiKey);
     }
     // Pi 0.80.10 exposes resolved provider env here but has no public ModelRuntime
-    // runtime-env setter. Provider registrations, resolved headers, and API keys are copied.
+    // runtime-env setter. Provider registrations, resolved headers, and non-OAuth
+    // API keys are copied.
   }
 
   await refreshChildModelRuntime(modelRuntime, options.definition);

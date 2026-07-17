@@ -317,6 +317,7 @@ function registry(overrides: Partial<ModelRegistry> = {}): ModelRegistry {
     getRegisteredProviderIds: mock(() => []),
     getRegisteredProviderConfig: mock(() => undefined),
     getApiKeyAndHeaders: mock(async () => ({ ok: true } as const)),
+    isUsingOAuth: mock(() => false),
     ...overrides,
   } as unknown as ModelRegistry;
 }
@@ -476,6 +477,25 @@ describe("worker session factory", () => {
     ).rejects.toThrow('configured model "provider/missing" was not found');
     expect(missingHarness.loaderOptions).toHaveLength(0);
     expect(missingHarness.agentInputs).toHaveLength(0);
+  });
+
+  test("preserves shared OAuth credentials instead of masking them with a flattened access token", async () => {
+    const parentRegistry = registry({
+      getApiKeyAndHeaders: mock(async () => ({
+        ok: true as const,
+        apiKey: "resolved-oauth-access-token",
+      })),
+      isUsingOAuth: mock(() => true),
+    });
+    const h = harness();
+
+    await createWorkerSessionFactory(h.dependencies).create(
+      options({ modelRegistry: parentRegistry }),
+    );
+
+    expect(parentRegistry.isUsingOAuth).toHaveBeenCalledWith(h.runtime.models[0]);
+    expect(h.runtime.runtimeApiKeys).toEqual([]);
+    expect(h.runtime.refresh).toHaveBeenCalledTimes(2);
   });
 
   test("copies dynamic providers and selected auth through real Pi ModelRuntimes", async () => {
