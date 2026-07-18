@@ -128,7 +128,7 @@ export function createOrchestrationExtension(
       const groupedOrchestration =
         toolCalls.length > 1 &&
         toolCalls.every((toolCall) => toolCall.name === "orchestrate");
-      const group = groupedOrchestration
+      const synthesisGroup = groupedOrchestration
         ? { id: `orchestrate:${toolCalls[0]?.id ?? "group"}`, size: toolCalls.length }
         : undefined;
 
@@ -140,7 +140,9 @@ export function createOrchestrationExtension(
         dispatchDecisions.set(toolCall.id, {
           mode,
           ownerSessionId,
-          ...(toolCall.name === "orchestrate" && group ? { group } : {}),
+          ...(toolCall.name === "orchestrate" && synthesisGroup
+            ? { synthesisGroup }
+            : {}),
         });
       }
     });
@@ -148,11 +150,11 @@ export function createOrchestrationExtension(
     pi.on("tool_execution_end", (event) => {
       const decision = dispatchDecisions.get(event.toolCallId);
       dispatchDecisions.delete(event.toolCallId);
-      if (!event.isError || !decision?.group) return;
-      host.delivery.skipDispatchGroupMember(
+      if (!event.isError || !decision?.synthesisGroup) return;
+      host.delivery.skipSynthesisGroupMember(
         decision.ownerSessionId,
-        decision.group.id,
-        decision.group.size,
+        decision.synthesisGroup.id,
+        decision.synthesisGroup.size,
       );
     });
 

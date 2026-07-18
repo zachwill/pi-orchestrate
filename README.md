@@ -15,7 +15,7 @@ Pi packages execute with your system permissions. Review the package and worker 
 Pi Orchestrate adds exactly five tools:
 
 - `orchestrate` dispatches one task with `orchestrate({ worker, title, instructions })`. Send independent tasks as sibling `orchestrate` calls in the same assistant message.
-- `orchestration_status` inspects the trusted catalog, catalog diagnostics, waves, and worker states without exposing full task instructions.
+- `orchestration_status` inspects the trusted catalog, catalog diagnostics, runs, and worker states without exposing full task instructions.
 - `worker_send` sends follow-up instructions to an owned reusable worker in the `ready` state.
 - `worker_abort` stops owned active work that is no longer needed.
 - `worker_close` closes an owned reusable worker in the `ready` state.
@@ -26,11 +26,11 @@ Pi executes sibling tool calls concurrently, so independent `orchestrate` calls 
 
 A sole `orchestrate` call or a pure group of sibling `orchestrate` calls runs asynchronously. Pi accepts a pure group concurrently and yields the parent turn. Mixing `orchestrate` with another tool makes it inline and blocking. `worker_send` is asynchronous only as the sole tool call in its assistant message. Inline work receives the parent turn's cancellation signal. Accepted async work does not retain that signal and continues independently.
 
-Async responses enter the transcript individually as workers settle. For a sibling dispatch group, only the final response starts the parent's synthesis turn. The bottom widget is ephemeral and shows active work only; completed, failed, aborted, and reusable ready workers disappear immediately. Inline responses accumulate in the live tool output while the call blocks.
+Async worker responses enter the transcript individually as workers finish. An ungrouped response starts the parent's synthesis turn. Responses from sibling calls share one final synthesis turn. The bottom widget is ephemeral and shows active work only; completed, failed, aborted, and reusable ready workers disappear immediately. An inline call shows its single current response in the live tool output while it blocks.
 
 `orchestration_status` is for diagnostics and recovery, never a normal completion mechanism. Do not poll it for completion. If the owning session becomes inactive, its workers continue and completed results remain queued. Those results become available only when that exact owning session resumes; they are never delivered to another session.
 
-Worker IDs identify live worker sessions. A reusable worker keeps the same worker ID across `worker_send` follow-ups, with each follow-up result belonging to a new wave. One-shot workers finish as `completed`. Reusable workers deliver as `ready` and wait for `worker_send` or `worker_close`. Use `worker_abort` only for active work, not to close a ready worker.
+Each run owns exactly one worker generation. Worker IDs identify live worker sessions. A reusable worker keeps the same worker ID across `worker_send` follow-ups, with each follow-up result belonging to a new run. One-shot workers finish as `completed`. Reusable workers deliver as `ready`, remain available for follow-up, and wait for `worker_send` or `worker_close`. Use `worker_abort` only for active work by `worker_ids` or `all`, not to close a ready worker.
 
 ## Parent orchestration contract
 

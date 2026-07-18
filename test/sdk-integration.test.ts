@@ -31,9 +31,8 @@ import { createOrchestrationExtension } from "../extension/index.js";
 interface WorkerResultDetails {
   title: string;
   outcome: { assistantText?: string };
-  waveComplete: boolean;
-  dispatchGroupId?: string;
-  dispatchGroupSize?: number;
+  synthesisGroupId?: string;
+  synthesisGroupSize?: number;
   sessionFile?: string;
 }
 
@@ -41,7 +40,7 @@ type WorkerResultMessage = Extract<AgentMessage, { role: "custom" }> & {
   details: WorkerResultDetails;
 };
 type OrchestrateToolResultMessage = Extract<AgentMessage, { role: "toolResult" }> & {
-  details: { workerIds: unknown[] };
+  details: { worker_id: unknown; run_id: unknown };
 };
 
 const PROVIDER_ID = "pi-orchestrate-sdk-smoke";
@@ -214,14 +213,15 @@ function isWorkerResultMessage(message: AgentMessage): message is WorkerResultMe
   if (!details || typeof details !== "object") return false;
   if (!("title" in details) || typeof details.title !== "string") return false;
   if (!("outcome" in details) || !details.outcome || typeof details.outcome !== "object") return false;
-  return "waveComplete" in details && typeof details.waveComplete === "boolean";
+  return "workerId" in details && typeof details.workerId === "string";
 }
 
 function isOrchestrateToolResult(message: AgentMessage): message is OrchestrateToolResultMessage {
   if (message.role !== "toolResult" || message.toolName !== "orchestrate") return false;
   const details = message.details;
   return !!details && typeof details === "object" &&
-    "workerIds" in details && Array.isArray(details.workerIds);
+    "worker_id" in details && typeof details.worker_id === "string" &&
+    "run_id" in details && typeof details.run_id === "string";
 }
 
 function transcriptText(context: Context): string {
@@ -236,7 +236,7 @@ function providerKind(systemPrompt: string, transcript: string): ProviderRequest
     return transcript.includes("RESULT_ALPHA") ||
       transcript.includes("RESULT_BETA") ||
       transcript.includes("DETERMINISTIC_PROVIDER_FAILURE") ||
-      transcript.includes("Completed inline wave")
+      transcript.includes("Completed inline run")
       ? "parent-synthesis"
       : "parent-initial";
   }
@@ -275,7 +275,7 @@ function createProviderExtension(
         return streamToolCalls([
           {
             type: "toolCall",
-            id: "dispatch-wave",
+            id: "dispatch-run",
             name: "orchestrate",
             arguments: {
               worker: "scout",
@@ -633,7 +633,7 @@ describe("Pi 0.80.10 SDK integration", () => {
       expect(firstAssistant?.content.filter((part) => part.type === "toolCall")).toEqual([
         {
           type: "toolCall",
-          id: "dispatch-wave",
+          id: "dispatch-run",
           name: "orchestrate",
           arguments: {
             worker: "scout",
@@ -643,8 +643,8 @@ describe("Pi 0.80.10 SDK integration", () => {
         },
       ]);
       const acceptedResult = session.messages.find(isOrchestrateToolResult);
-      expect(textContent(acceptedResult?.content)).toContain("Accepted async wave");
-      expect(acceptedResult?.details.workerIds).toHaveLength(1);
+      expect(textContent(acceptedResult?.content)).toContain("Accepted async run");
+      expect(acceptedResult?.details.worker_id).toBeString();
 
       const workerMessages = session.messages.filter(isWorkerResultMessage);
       expect(workerMessages).toHaveLength(1);
@@ -652,7 +652,6 @@ describe("Pi 0.80.10 SDK integration", () => {
       expect(workerMessages[0]?.details).toMatchObject({
         title: "Alpha task",
         outcome: { assistantText: "RESULT_ALPHA" },
-        waveComplete: true,
       });
       expect(workerMessages[0]?.details.sessionFile).toContain(harness.root);
 
@@ -725,8 +724,8 @@ describe("Pi 0.80.10 SDK integration", () => {
       const acceptedResults = session.messages.filter(isOrchestrateToolResult);
       expect(acceptedResults).toHaveLength(2);
       expect(acceptedResults.every((result) =>
-        textContent(result.content).includes("Accepted async wave"))).toBe(true);
-      expect(acceptedResults.every((result) => result.details.workerIds.length === 1)).toBe(true);
+        textContent(result.content).includes("Accepted async run"))).toBe(true);
+      expect(acceptedResults.every((result) => typeof result.details.worker_id === "string")).toBe(true);
 
       const betaSettled = new Deferred();
       const unsubscribeSettlement = getProcessHost()!.runtime.subscribeSettlement((settlement) => {
@@ -753,10 +752,9 @@ describe("Pi 0.80.10 SDK integration", () => {
         .toContain("RESULT_ALPHA");
       expect(workerMessages.map((message) => textContent(message.content)).join("\n"))
         .toContain("RESULT_BETA");
-      expect(workerMessages.map((message) => message.details.waveComplete)).toEqual([true, true]);
       expect(workerMessages.map((message) => ({
-        id: message.details.dispatchGroupId,
-        size: message.details.dispatchGroupSize,
+        id: message.details.synthesisGroupId,
+        size: message.details.synthesisGroupSize,
       }))).toEqual([
         { id: "orchestrate:dispatch-alpha", size: 2 },
         { id: "orchestrate:dispatch-alpha", size: 2 },
@@ -787,8 +785,6 @@ describe("Pi 0.80.10 SDK integration", () => {
           status: "failed",
           message: "DETERMINISTIC_PROVIDER_FAILURE",
         },
-        remainingActive: 0,
-        waveComplete: true,
       });
       expect(textContent(workerMessages[0]?.content)).toContain("DETERMINISTIC_PROVIDER_FAILURE");
       expect(assistantTexts(session.messages).at(-1)).toBe("FAILURE_SYNTHESIS:true");
@@ -819,7 +815,7 @@ describe("Pi 0.80.10 SDK integration", () => {
       const toolResults = session.messages.filter((message) => message.role === "toolResult");
       const orchestrationResult = toolResults.find((message) => message.toolName === "orchestrate");
       const readResult = toolResults.find((message) => message.toolName === "read");
-      expect(textContent(orchestrationResult?.content)).toContain("Completed inline wave");
+      expect(textContent(orchestrationResult?.content)).toContain("Completed inline run");
       expect(textContent(orchestrationResult?.content)).toContain("RESULT_INLINE");
       expect(textContent(readResult?.content)).toContain("fixture-content");
       expect(harness.events.filter((event) => event === "parent:agent_start")).toHaveLength(1);

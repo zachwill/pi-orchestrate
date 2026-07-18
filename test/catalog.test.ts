@@ -114,14 +114,13 @@ describe("worker catalog discovery", () => {
     expect(workers(catalog).map((worker) => worker.name)).toEqual(["package", "shared"]);
   });
 
-  test("parses both lifecycles and rejects missing, invalid, and legacy lifecycle fields", () => {
+  test("parses both lifecycles and rejects missing or invalid lifecycle fields", () => {
     const fs = new FakeFileSystem();
     fs.addDirectory(packageDirectory, {
       "one-shot.md": definition("one-shot", "prompt"),
       "reusable.md": definition("reusable", "prompt", "", "reusable"),
       "invalid.md": definition("invalid", "prompt", "", "forever"),
       "missing.md": definition("missing", "prompt").replace("lifecycle: one-shot\n", ""),
-      "legacy.md": definition("legacy", "prompt").replace("lifecycle: one-shot", "persistent: false"),
     });
     fs.addDirectory(userDirectory, {});
 
@@ -131,9 +130,8 @@ describe("worker catalog discovery", () => {
       { name: "one-shot", lifecycle: "one-shot" },
       { name: "reusable", lifecycle: "reusable" },
     ]);
-    expect(catalog.diagnostics).toHaveLength(3);
+    expect(catalog.diagnostics).toHaveLength(2);
     expect(catalog.diagnostics.map((item) => item.message).join("\n")).toContain("lifecycle");
-    expect(catalog.diagnostics.map((item) => item.message).join("\n")).toContain("unknown frontmatter field");
   });
 
   test("accepts only strict, regular Markdown worker definitions", () => {
@@ -157,7 +155,7 @@ valid prompt`,
       "mismatch.md": definition("different", "prompt"),
       "missing-tools.md": definition("missing-tools", "prompt").replace("tools: read\n", ""),
       "symlink.md": { content: definition("symlink", "prompt"), kind: "symlink" },
-      "unknown.md": definition("unknown", "prompt", "alias: legacy\n"),
+      "unknown.md": definition("unknown", "prompt", "alias: other-name\n"),
       "ignored.json": "{}",
     });
     fs.addDirectory(userDirectory, {});

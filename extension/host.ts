@@ -5,8 +5,7 @@ import {
 } from "./runtime.js";
 import { createWorkerSessionFactory } from "./worker-session.js";
 
-const PROCESS_HOST_KEY = Symbol.for("@zachwill/pi-orchestrate/process-host/v2");
-const LEGACY_PROCESS_HOST_KEY = Symbol.for("@zachwill/pi-orchestrate/process-host/v1");
+const PROCESS_HOST_KEY = Symbol.for("@zachwill/pi-orchestrate/process-host/v3");
 
 export interface ProcessHost {
   readonly runtime: OrchestratorRuntime;
@@ -26,14 +25,8 @@ interface OwnedProcessHost extends AttachmentAwareProcessHost {
   destroyPromise?: Promise<void>;
 }
 
-interface LegacyProcessHost extends ProcessHost {
-  unsubscribeCompletion?: () => void;
-  unsubscribeSettlement?: () => void;
-}
-
 type ProcessGlobal = typeof globalThis & {
   [PROCESS_HOST_KEY]?: OwnedProcessHost;
-  [LEGACY_PROCESS_HOST_KEY]?: LegacyProcessHost;
 };
 
 function processGlobal(): ProcessGlobal {
@@ -48,8 +41,6 @@ export function createProcessHost(): ProcessHost {
   const global = processGlobal();
   const existing = global[PROCESS_HOST_KEY];
   if (existing) return existing;
-
-  retireLegacyProcessHost(global);
 
   const runtime = createOrchestratorRuntime({
     workerSessionFactory: createWorkerSessionFactory(),
@@ -113,31 +104,4 @@ export async function quitProcessHost(): Promise<void> {
   const host = getProcessHost();
   if (!host) return;
   await destroyProcessHost(host);
-}
-
-function retireLegacyProcessHost(global: ProcessGlobal): void {
-  const legacy = global[LEGACY_PROCESS_HOST_KEY];
-  if (!legacy) return;
-
-  delete global[LEGACY_PROCESS_HOST_KEY];
-  try {
-    legacy.unsubscribeCompletion?.();
-  } catch {
-    // A stale subscription cannot prevent installation of the current host.
-  }
-  try {
-    legacy.unsubscribeSettlement?.();
-  } catch {
-    // A stale subscription cannot prevent installation of the current host.
-  }
-  try {
-    legacy.delivery.close();
-  } catch {
-    // Legacy delivery cleanup is best-effort during reload migration.
-  }
-  try {
-    void legacy.runtime.shutdown().catch(() => undefined);
-  } catch {
-    // Legacy runtime shutdown is best-effort during reload migration.
-  }
 }

@@ -2,7 +2,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { initTheme, type ExtensionAPI, type ExtensionContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
 import { Result, Schema } from "effect";
 import { visibleWidth, type Component } from "@earendil-works/pi-tui";
-import type { WaveId, WorkerId, WorkerRecord, WorkerStatus } from "../extension/domain.ts";
+import type { RunId, WorkerId, WorkerRecord, WorkerStatus } from "../extension/domain.ts";
 import type { RuntimeSnapshot } from "../extension/runtime.ts";
 import {
   MAX_RESULT_PREVIEW_LINES,
@@ -24,17 +24,27 @@ const theme = { fg: (_: string, text: string) => text, bg: (_: string, text: str
 const usage = { input: 1200, output: 345, cacheRead: 12, cacheWrite: 3, cost: 0.0123, contextTokens: 12345, turns: 2 };
 
 function worker(id: string, status: WorkerStatus, overrides: Partial<WorkerRecord> = {}): WorkerRecord {
-  return { id: id as WorkerId, worker: "scout", ownerSessionId: "owner", waveId: "wave" as WaveId, title: `Task ${id}`, instructions: "Do it", lifecycle: status === "ready" ? "reusable" : "one-shot", status, usage, messageDirection: status === "starting" ? "to-model" : "from-model", startedAt: Date.now() - 78_000, ...overrides };
+  return { id: id as WorkerId, worker: "scout", ownerSessionId: "owner", runId: "run" as RunId, title: `Task ${id}`, instructions: "Do it", lifecycle: status === "ready" ? "reusable" : "one-shot", status, usage, messageDirection: status === "starting" ? "to-model" : "from-model", startedAt: Date.now() - 78_000, ...overrides };
 }
 function snapshot(workers: readonly WorkerRecord[]): RuntimeSnapshot {
-  return { workers, waves: [{ id: "wave" as WaveId, ownerSessionId: "owner", workerIds: workers.map((item) => item.id), mode: "async", state: "running", createdAt: Date.now() - 78_000 }] };
+  return {
+    workers,
+    runs: workers.length === 0 ? [] : [{
+      id: "run" as RunId,
+      ownerSessionId: "owner",
+      workerId: workers[0]!.id,
+      mode: "async",
+      state: "running",
+      createdAt: Date.now() - 78_000,
+    }],
+  };
 }
 function settlement(status: "completed" | "ready" | "failed" | "aborted" = "completed", text = "A useful worker response.") {
   return {
-    eventId: "event", sequence: 1, ownerSessionId: "owner", waveId: "wave", workerId: "worker-1", generation: 2,
+    eventId: "event", sequence: 1, ownerSessionId: "owner", runId: "run", workerId: "worker-1", generation: 2,
     mode: "async", worker: "scout", title: "Inspect code", lifecycle: status === "ready" ? "reusable" : "one-shot", status,
     outcome: status === "completed" || status === "ready" ? { status, assistantText: text } : { status, message: text, assistantText: "Partial evidence." },
-    usage, startedAt: 1000, settledAt: 6200, remainingActive: 0, waveSize: 1, waveComplete: true, sessionFile: "/sessions/worker.jsonl",
+    usage, startedAt: 1000, settledAt: 6200, sessionFile: "/sessions/worker.jsonl",
   };
 }
 function renderer(): MessageRenderer {
@@ -48,10 +58,10 @@ function renderResult(details: unknown, expanded: boolean, width: number, conten
 
 describe("per-worker result messages", () => {
   test.each([
-    ["completed", "✓ scout · Inspect code · 5s"],
-    ["ready", "✓ scout · Inspect code · 5s"],
-    ["failed", "✗ scout · Inspect code · 5s"],
-    ["aborted", "■ scout · Inspect code · aborted · 5s"],
+    ["completed", "✓ Inspect code · scout · 5s"],
+    ["ready", "✓ Inspect code · scout · ready for follow-up · 5s"],
+    ["failed", "✗ Inspect code · scout · failed · 5s"],
+    ["aborted", "■ Inspect code · scout · aborted · 5s"],
   ] as const)("renders truthful %s styling", (status, heading) => {
     const output = Bun.stripANSI(renderResult(settlement(status), false, 80).join("\n"));
     expect(output).toContain(heading);
@@ -59,11 +69,33 @@ describe("per-worker result messages", () => {
     if (status === "failed" || status === "aborted") expect(output).not.toContain("✓");
   });
 
+  test("italicizes the worker type after the result title", () => {
+    const italicTheme = {
+      ...theme,
+      italic: (text: string) => `<italic>${text}</italic>`,
+    } as Theme;
+    const component = renderer()(
+      {
+        role: "custom",
+        customType: "pi-orchestrate-worker-result",
+        content: "fallback",
+        display: true,
+        details: settlement(),
+        timestamp: 1,
+      },
+      { expanded: false },
+      italicTheme,
+    )!;
+
+    const output = Bun.stripANSI(component.render(80).join("\n"));
+    expect(output).toContain("✓ Inspect code · <italic>scout</italic> · 5s");
+  });
+
   test("expanded output reconstructs full response and adjacent metadata", () => {
     const text = `# Full response\n\n${"detail ".repeat(200)}TAIL`;
     const output = Bun.stripANSI(renderResult(settlement("completed", text), true, 50, "capped").join("\n"));
     expect(output).toContain("TAIL");
-    expect(output).toContain("worker ID worker-1 · wave ID wave");
+    expect(output).toContain("worker ID worker-1 · run ID run");
     expect(output).toContain("status completed · generation 2");
     expect(output).toContain("turns 2 · current context 12.3k");
     expect(output).toContain("session /sessions/worker.jsonl");
@@ -76,7 +108,7 @@ describe("per-worker result messages", () => {
       80,
     ).join("\n"));
 
-    expect(output).toContain("✓ scout · Inspect code · 5s");
+    expect(output).toContain("✓ Inspect code · scout · 5s");
     expect(output).toContain("Changed the worker bootstrap.");
     expect(output).not.toContain("Completed");
   });
@@ -110,16 +142,15 @@ describe("per-worker result messages", () => {
     ]) {
       const output = Bun.stripANSI(renderResult(details, false, 80).join("\n"));
       expect(output).toContain("details unavailable");
-      expect(output).not.toContain("✓ scout · Inspect code");
+      expect(output).not.toContain("✓ Inspect code · scout");
     }
   });
 
   test("keeps the canonical current fields through persisted decoding", () => {
     const current = {
       ...settlement(),
-      waveSize: 3,
-      dispatchGroupId: "dispatch-1",
-      dispatchGroupSize: 3,
+      synthesisGroupId: "synthesis-1",
+      synthesisGroupSize: 3,
       currentExtra: "ignored",
     };
     const decoded = decodePersistedWorkerSettlementDetails(current);
@@ -129,64 +160,43 @@ describe("per-worker result messages", () => {
     expect(decoded.success).toMatchObject({
       eventId: "event",
       sequence: 1,
-      remainingActive: 0,
-      waveSize: 3,
-      waveComplete: true,
-      dispatchGroupId: "dispatch-1",
-      dispatchGroupSize: 3,
+      synthesisGroupId: "synthesis-1",
+      synthesisGroupSize: 3,
       sessionFile: "/sessions/worker.jsonl",
     });
     expect(decoded.success).not.toHaveProperty("currentExtra");
 
     const missingCurrentField = { ...current };
-    Reflect.deleteProperty(missingCurrentField, "waveSize");
+    Reflect.deleteProperty(missingCurrentField, "eventId");
     expect(Result.isFailure(
       Schema.decodeUnknownResult(WorkerSettlementDetails)(missingCurrentField),
     )).toBe(true);
   });
 
-  test("normalizes legacy omissions and ignores excess envelope fields", () => {
-    const legacy = settlement();
-    Reflect.deleteProperty(legacy, "eventId");
-    Reflect.deleteProperty(legacy, "sequence");
-    Reflect.deleteProperty(legacy, "remainingActive");
-    Reflect.deleteProperty(legacy, "waveSize");
-    Reflect.deleteProperty(legacy, "waveComplete");
-    Reflect.deleteProperty(legacy, "sessionFile");
-
-    const decoded = decodePersistedWorkerSettlementDetails(legacy);
-    expect(Result.isSuccess(decoded)).toBe(true);
-    if (!Result.isSuccess(decoded)) throw new Error("Expected legacy settlement to decode");
-    expect(decoded.success).toMatchObject({
-      eventId: "legacy:wave:worker-1:2",
-      sequence: 0,
-      remainingActive: 0,
-      waveSize: 1,
-      waveComplete: true,
+  test("decodes only direct current settlements and falls back with full raw content", () => {
+    const withoutSession = settlement();
+    Reflect.deleteProperty(withoutSession, "sessionFile");
+    expect(Result.isSuccess(decodePersistedWorkerSettlementDetails(withoutSession))).toBe(true);
+    expect(Result.isFailure(decodePersistedWorkerSettlementDetails({
+      settlement: withoutSession,
+    }))).toBe(true);
+    expect(Result.isFailure(decodePersistedWorkerSettlementDetails({
+      ...withoutSession,
       sessionFile: undefined,
-    });
-
-    expect(Result.isSuccess(decodePersistedWorkerSettlementDetails({
-      ...legacy,
-      status: "failed",
-      outcome: { status: "failed", message: "old failure", assistantText: undefined },
-      failureStage: undefined,
-      dispatchGroupId: undefined,
-      dispatchGroupSize: undefined,
     }))).toBe(true);
 
-    const output = Bun.stripANSI(renderResult({
-      settlement: { ...legacy, legacyExtra: "ignored" },
-      envelopeExtra: true,
-    }, true, 80).join("\n"));
-    expect(output).toContain("✓ scout · Inspect code · 5s");
-    expect(output).toContain("session unavailable");
+    const content = "raw fallback line 1\nraw fallback line 2";
+    const output = Bun.stripANSI(renderResult({ settlement: withoutSession }, true, 80, content).join("\n"));
+    expect(output).toContain("details unavailable");
+    expect(output).toContain("raw fallback line 1");
+    expect(output).toContain("raw fallback line 2");
   });
 
   test("uses explicit startup failure stage and keeps ordinary zero-turn failures truthful", () => {
-    const ordinary = { ...settlement("failed"), usage: { ...usage, turns: 0 }, sessionFile: undefined };
-    expect(Bun.stripANSI(renderResult(ordinary, false, 80).join("\n"))).toContain("✗ scout · Inspect code · 5s");
-    expect(Bun.stripANSI(renderResult({ ...ordinary, failureStage: "startup" }, false, 80).join("\n"))).toContain("✗ scout · Inspect code · could not start · 5s");
+    const { sessionFile: _sessionFile, ...failedSettlement } = settlement("failed");
+    const ordinary = { ...failedSettlement, usage: { ...usage, turns: 0 } };
+    expect(Bun.stripANSI(renderResult(ordinary, false, 80).join("\n"))).toContain("✗ Inspect code · scout · failed · 5s");
+    expect(Bun.stripANSI(renderResult({ ...ordinary, failureStage: "startup" }, false, 80).join("\n"))).toContain("✗ Inspect code · scout · could not start · 5s");
   });
 
   test("keeps every line width-safe down to one column", () => {
@@ -200,12 +210,14 @@ describe("per-worker result messages", () => {
     let marker = "old";
     const mutableTheme = { ...theme, fg: (_: string, text: string) => `${marker}:${text}` } as Theme;
     const component = renderer()({ role: "custom", customType: "pi-orchestrate-worker-result", content: "fallback", display: true, details: settlement(), timestamp: 1 }, { expanded: false }, mutableTheme)!;
-    expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("old:✓ scout · Inspect code · 5s");
+    expect(Bun.stripANSI(component.render(80).join("\n"))).toContain(
+      "old:✓ Inspect code · old:scout · old:5s",
+    );
     marker = "new";
     component.invalidate();
     const refreshed = Bun.stripANSI(component.render(80).join("\n"));
-    expect(refreshed).toContain("new:✓ scout · Inspect code · 5s");
-    expect(refreshed).not.toContain("old:✓ scout · Inspect code · 5s");
+    expect(refreshed).toContain("new:✓ Inspect code · new:scout · new:5s");
+    expect(refreshed).not.toContain("old:✓ Inspect code");
   });
 });
 

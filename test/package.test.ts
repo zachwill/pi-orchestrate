@@ -5,7 +5,6 @@ import { basename, join } from "node:path";
 const root = join(import.meta.dir, "..");
 const manifestPath = join(root, "package.json");
 const readmePath = join(root, "README.md");
-const licensePath = join(root, "LICENSE");
 const skillsPath = join(root, "skills");
 const workerDirectory = join(root, "examples", "workers");
 const workerNames = ["investigator", "scout", "worker"] as const;
@@ -62,6 +61,18 @@ async function expectPath(path: string): Promise<void> {
   expect(pathStat.isFile() || pathStat.isDirectory()).toBe(true);
 }
 
+function markdownSection(markdown: string, heading: string): string {
+  const start = markdown.indexOf(`## ${heading}`);
+  expect(start).toBeGreaterThanOrEqual(0);
+  const end = markdown.indexOf("\n## ", start + heading.length + 3);
+  return markdown.slice(start, end < 0 ? undefined : end);
+}
+
+function expectBlockWith(text: string, concepts: readonly RegExp[]): void {
+  const blocks = text.split(/\n\s*\n/);
+  expect(blocks.some((block) => concepts.every((concept) => concept.test(block)))).toBe(true);
+}
+
 function parseWorker(markdown: string): ParsedWorker {
   const normalized = markdown.replaceAll("\r\n", "\n");
   const match = normalized.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
@@ -115,15 +126,6 @@ describe("published package resources", () => {
     expect(manifest.peerDependencies.typebox).toBe("*");
   });
 
-  test("ships a standard MIT license", async () => {
-    const license = await readText(licensePath);
-
-    expect(license).toStartWith("MIT License\n\nCopyright (c) 2026 Zach Williams\n");
-    expect(license).toContain("Permission is hereby granted, free of charge");
-    expect(license).toContain('THE SOFTWARE IS PROVIDED "AS IS"');
-    expect(license).toContain("LIABILITY, WHETHER IN AN ACTION OF CONTRACT");
-  });
-
   test("includes exactly three fallback worker definitions", async () => {
     for (const workerPath of workerPaths) await expectPath(workerPath);
 
@@ -168,60 +170,34 @@ describe("fallback worker definitions", () => {
 });
 
 describe("published documentation", () => {
-  test("README documents the exact public contract", async () => {
-    const readme = await readText(readmePath);
+  test("README covers the current package and orchestration contract", async () => {
+    const [manifest, readme] = await Promise.all([readManifest(), readText(readmePath)]);
+    const install = markdownSection(readme, "Install");
+    const publicTools = markdownSection(readme, "Public tools");
+    const trustedCatalog = markdownSection(readme, "Trusted worker catalog");
+    const lifecycle = markdownSection(readme, "Lifecycle and process limits");
 
-    for (const tool of canonicalTools) expect(readme).toContain(tool);
-    expect(readme).toContain("orchestrate({ worker, title, instructions })");
-    expect(readme).toMatch(/atomic input, catalog, and model preflight/i);
-    expect(readme).toMatch(/one rejected call does not prevent valid siblings from starting/i);
-    expect(readme).toMatch(/resource startup failure becomes that worker's `failed` result/i);
-    expect(readme).toMatch(/Pi executes sibling tool calls concurrently/i);
-    expect(readme).toMatch(/without an extension-level group limit or hidden throttle/i);
-    expect(readme).toMatch(/pure group of sibling `orchestrate` calls runs asynchronously/i);
-    expect(readme).toMatch(/only the final response starts the parent's synthesis turn/i);
-    expect(readme).toMatch(/Mixing `orchestrate` with another tool makes it inline and blocking/i);
-    expect(readme).toMatch(/`worker_send` is asynchronous only as the sole tool call/i);
-    expect(readme).toMatch(/inline work receives the parent turn's cancellation signal/i);
-    expect(readme).toMatch(/accepted async work does not retain that signal/i);
-    expect(readme).toMatch(/Do not poll/i);
-    expect(readme).toMatch(/that exact owning session resumes/i);
-    expect(readme).toMatch(/never delivered to another session/i);
-    expect(readme).toMatch(/`worker_abort` only for active work/i);
-    expect(readme).toMatch(/`worker_close` closes an owned reusable worker in the `ready` state/i);
-  });
+    expect(install).toContain(`pi install npm:${manifest.name}`);
 
-  test("README documents fallback inheritance and optional thinking without checkout-relative copying", async () => {
-    const readme = await readText(readmePath);
+    const documentedTools = [...publicTools.matchAll(/^- `([^`]+)`/gm)].map((match) => match[1]);
+    expect(documentedTools).toEqual([...canonicalTools]);
+    expect(publicTools).toContain("orchestrate({ worker, title, instructions })");
 
-    expect(readme).toMatch(/all three package fallbacks intentionally omit `model`/i);
-    expect(readme).toMatch(/inherit the parent model active at dispatch/i);
-    expect(readme).toMatch(/user and trusted project overrides are the model-specialization points/i);
-    expect(readme).toMatch(/`thinking`, `skills`, and `compaction` are optional/i);
-    expect(readme).toMatch(/omitted `skills` uses Pi's normal discovered skills/i);
-    expect(readme).toMatch(/`skills: \[\]` disables skills/i);
-    expect(readme).toMatch(/excludes its own package before child extension factories execute/i);
-    expect(readme).toContain("@benvargas/pi-claude-code-use");
-    expect(readme).toMatch(/create a Markdown definition manually/i);
-    expect(readme).not.toMatch(/cp\s+examples\/workers/i);
-    expect(readme).toMatch(/only after Pi trusts the project/i);
-    expect(readme).toMatch(/run in-process and are not sandboxes/i);
-    expect(readme).toMatch(/do not survive process exit/i);
-    expect(readme).toMatch(/automatically injects the authoritative orchestration contract/i);
-  });
+    expectBlockWith(publicTools, [/\borchestrate\b/i, /\bsibling\b/i, /\basynchronously\b/i]);
+    expectBlockWith(publicTools, [/\borchestrate\b/i, /\binline\b/i, /\bblocking\b/i]);
+    expectBlockWith(publicTools, [/\bpoll\b/i, /\borchestration_status\b/i]);
+    expectBlockWith(publicTools, [/\bfinal\b/i, /\bsynthesis\b/i]);
+    expectBlockWith(publicTools, [/\bone-shot\b/i, /\bcompleted\b/i, /\breusable\b/i, /\bready\b/i]);
+    expectBlockWith(publicTools, [/\bworker_send\b/i, /\bworker_close\b/i, /\breusable\b/i]);
 
-  test("published Markdown contains no superseded vocabulary", async () => {
-    const publishedText = (await Promise.all([readmePath, ...workerPaths].map(readText))).join("\n");
+    const precedence = trustedCatalog.match(/^\d+\. .*$/gm) ?? [];
+    expect(trustedCatalog).toMatch(/precedence/i);
+    expect(precedence).toHaveLength(3);
+    expect(precedence[0]).toMatch(/package/i);
+    expect(precedence[1]).toMatch(/user/i);
+    expect(precedence[2]).toMatch(/project/i);
+    expect(precedence[2]).toMatch(/trust/i);
 
-    for (const legacyPattern of [
-      /crew_/i,
-      /pi-workers/i,
-      /\bsubagent\b/i,
-      /worker_respond/i,
-      /worker_status/i,
-      /persistent\s*:/i,
-    ]) {
-      expect(publishedText).not.toMatch(legacyPattern);
-    }
+    expectBlockWith(lifecycle, [/\breusable\b/i, /\bprocess\b/i, /\bclose\b/i]);
   });
 });

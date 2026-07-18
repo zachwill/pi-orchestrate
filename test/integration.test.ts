@@ -7,7 +7,7 @@ import type {
 import { DeliveryCoordinator } from "../extension/delivery.js";
 import {
   createWorkerCatalog,
-  type WaveId,
+  type RunId,
   type WorkerCatalog,
   type WorkerDefinition,
   type WorkerId,
@@ -83,7 +83,7 @@ class FakePi {
 class FakeRuntime {
   readonly orchestrateCalls: Array<{
     context: OrchestrationContext;
-    tasks: readonly unknown[];
+    task: unknown;
     mode: string;
   }> = [];
   readonly sendCalls: Array<{ context: OrchestrationContext; mode: string }> = [];
@@ -94,20 +94,20 @@ class FakeRuntime {
 
   async orchestrate(
     context: OrchestrationContext,
-    _tasks: readonly unknown[],
+    task: unknown,
     mode: "async" | "inline",
     _signal?: AbortSignal,
     onSettlement?: (settlement: WorkerSettlement) => void,
   ): Promise<unknown> {
-    this.orchestrateCalls.push({ context, tasks: _tasks, mode });
+    this.orchestrateCalls.push({ context, task, mode });
     if (mode === "async") {
-      return { id: "wave-accepted", workerIds: ["worker-accepted"] };
+      return { id: "run-accepted", workerId: "worker-accepted" };
     }
     onSettlement?.(workerSettlement(context.ownerSessionId, {
       eventId: "inline-result",
       mode: "inline",
     }));
-    return inlineCompletedWave(context.ownerSessionId);
+    return inlineCompletedRun(context.ownerSessionId);
   }
 
   async send(
@@ -118,8 +118,8 @@ class FakeRuntime {
   ): Promise<unknown> {
     this.sendCalls.push({ context, mode });
     return mode === "async"
-      ? { id: "wave-send", workerIds: ["worker-ready"] }
-      : inlineCompletedWave(context.ownerSessionId);
+      ? { id: "run-send", workerId: "worker-ready" }
+      : inlineCompletedRun(context.ownerSessionId);
   }
 
   async abort(): Promise<void> {}
@@ -127,7 +127,7 @@ class FakeRuntime {
 
   async snapshot(ownerSessionId: string): Promise<RuntimeSnapshot> {
     this.snapshotOwners.push(ownerSessionId);
-    return { waves: [], workers: [] };
+    return { runs: [], workers: [] };
   }
 
   subscribeState(listener: (ownerSessionId: string) => void): () => void {
@@ -158,13 +158,13 @@ function definition(name = "scout"): WorkerDefinition {
   };
 }
 
-function inlineCompletedWave(ownerSessionId: string) {
+function inlineCompletedRun(ownerSessionId: string) {
   const settlement = workerSettlement(ownerSessionId, { mode: "inline" });
   return {
-    id: settlement.waveId,
+    id: settlement.runId,
     ownerSessionId,
     mode: "inline" as const,
-    results: [{
+    result: {
       workerId: settlement.workerId,
       worker: settlement.worker,
       title: settlement.title,
@@ -172,7 +172,7 @@ function inlineCompletedWave(ownerSessionId: string) {
       outcome: settlement.outcome,
       usage: settlement.usage,
       sessionFile: settlement.sessionFile,
-    }],
+    },
   };
 }
 
@@ -185,7 +185,7 @@ function workerSettlement(
     eventId: overrides.eventId ?? `${ownerSessionId}:${workerId}:1`,
     sequence: overrides.sequence ?? 1,
     ownerSessionId,
-    waveId: overrides.waveId ?? "wave-complete" as WaveId,
+    runId: overrides.runId ?? "run-complete" as RunId,
     workerId,
     generation: overrides.generation ?? 1,
     mode: overrides.mode ?? "async",
@@ -208,9 +208,6 @@ function workerSettlement(
     },
     startedAt: overrides.startedAt ?? 1,
     settledAt: overrides.settledAt ?? 2,
-    remainingActive: overrides.remainingActive ?? 0,
-    waveSize: overrides.waveSize ?? 1,
-    waveComplete: overrides.waveComplete ?? true,
     sessionFile: overrides.sessionFile ?? "/sessions/worker.jsonl",
   };
 }
@@ -342,7 +339,7 @@ describe("Pi Orchestrate extension integration", () => {
     expect((promptResult as { systemPrompt: string }).systemPrompt).toContain("trusted-scout");
     expect(runtime.orchestrateCalls[0]?.context.catalog).toBe(catalog);
     expect(runtime.orchestrateCalls[0]?.context.projectTrusted).toBe(true);
-    expect(runtime.orchestrateCalls[0]?.tasks).toEqual([orchestrationParams]);
+    expect(runtime.orchestrateCalls[0]?.task).toEqual(orchestrationParams);
   });
 
   test("classifies a pure dispatch async and clears its mode after tool execution", async () => {
@@ -423,11 +420,11 @@ describe("Pi Orchestrate extension integration", () => {
       "async",
       "async",
     ]);
-    expect(runtime.orchestrateCalls.slice(-2).map((call) => call.tasks)).toEqual([
-      [orchestrationParams],
-      [secondParams],
+    expect(runtime.orchestrateCalls.slice(-2).map((call) => call.task)).toEqual([
+      orchestrationParams,
+      secondParams,
     ]);
-    expect(runtime.orchestrateCalls.slice(-2).map((call) => call.context.dispatchGroup))
+    expect(runtime.orchestrateCalls.slice(-2).map((call) => call.context.synthesisGroup))
       .toEqual([
         { id: "orchestrate:first-dispatch", size: 2 },
         { id: "orchestrate:first-dispatch", size: 2 },
@@ -436,14 +433,16 @@ describe("Pi Orchestrate extension integration", () => {
       .toBe(true);
     expect(runtime.sendCalls).toEqual([]);
     expect(inlineUpdates).toEqual([{
-      content: [{ type: "text", text: "1 worker response(s) received." }],
+      content: [{ type: "text", text: "Worker response received." }],
       details: {
         mode: "inline",
-        settlements: [expect.objectContaining({
-          eventId: "inline-result",
-          mode: "inline",
-          workerId: "worker-complete",
-        })],
+        result: expect.objectContaining({
+          worker_id: "worker-complete",
+          title: "Inspect",
+          status: "completed",
+          started_at: 1,
+          settled_at: 2,
+        }),
       },
     }]);
     expect(inlineResult).not.toHaveProperty("terminate");
@@ -473,8 +472,8 @@ describe("Pi Orchestrate extension integration", () => {
     host.delivery.accept(workerSettlement("owner-group", {
       eventId: "group-result",
       sequence: 50,
-      dispatchGroupId: "orchestrate:group-valid",
-      dispatchGroupSize: 2,
+      synthesisGroupId: "orchestrate:group-valid",
+      synthesisGroupSize: 2,
     }));
     await pi.emit("tool_execution_end", {
       toolCallId: "group-valid",
@@ -510,8 +509,6 @@ describe("Pi Orchestrate extension integration", () => {
       sequence: 1,
       workerId: "worker-first" as WorkerId,
       title: "First",
-      remainingActive: 1,
-      waveComplete: false,
     }))).toBe(true);
     expect(host.delivery.accept(workerSettlement("owner-delivery", {
       eventId: "second",
@@ -695,26 +692,6 @@ describe("Pi Orchestrate extension integration", () => {
     releaseDestroy();
     await shutdown;
     expect(destroyFinished).toBe(true);
-  });
-
-  test("retires a legacy v1 process host before installing v2", async () => {
-    await quitProcessHost();
-    const legacyRuntime = new FakeRuntime();
-    const legacyDelivery = new DeliveryCoordinator();
-    let unsubscribed = 0;
-    const legacyKey = Symbol.for("@zachwill/pi-orchestrate/process-host/v1");
-    (globalThis as Record<symbol, unknown>)[legacyKey] = {
-      runtime: legacyRuntime,
-      delivery: legacyDelivery,
-      unsubscribeCompletion() { unsubscribed += 1; },
-    };
-
-    const current = createProcessHost();
-    expect(current.runtime).not.toBe(legacyRuntime as unknown as ProcessHost["runtime"]);
-    expect(unsubscribed).toBe(1);
-    expect(legacyRuntime.shutdownCalls).toBe(1);
-    expect((globalThis as Record<symbol, unknown>)[legacyKey]).toBeUndefined();
-    await quitProcessHost();
   });
 
   test("the versioned process host survives reloads and refuses quit while attached", async () => {

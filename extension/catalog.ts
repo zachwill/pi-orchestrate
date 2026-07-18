@@ -13,7 +13,11 @@ import type {
   WorkerDefinition,
   WorkerSourceKind,
 } from "./domain.js";
-import { isSupportedToolName, SUPPORTED_TOOL_NAMES } from "./domain.js";
+import {
+  createWorkerCatalog,
+  isSupportedToolName,
+  SUPPORTED_TOOL_NAMES,
+} from "./domain.js";
 
 const MAX_WORKER_BYTES = 64 * 1024;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -398,10 +402,7 @@ export function createWorkerCatalogDiscovery(fileSystem: CatalogFileSystem) {
       diagnostics.push(...discovered.diagnostics);
     }
 
-    const workers = [...workersByName.values()].sort((left, right) =>
-      compareText(left.name, right.name),
-    );
-    return { workers, diagnostics };
+    return createWorkerCatalog([...workersByName.values()], diagnostics);
   };
 }
 

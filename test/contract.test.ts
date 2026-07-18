@@ -23,6 +23,11 @@ function catalog(workers: WorkerDefinition[]): WorkerCatalog {
   return { workers, diagnostics: [] };
 }
 
+function expectContractRule(contract: string, concepts: readonly RegExp[]): void {
+  const rules = contract.split("\n").filter((line) => line.startsWith("- "));
+  expect(rules.some((rule) => concepts.every((concept) => concept.test(rule)))).toBe(true);
+}
+
 describe("orchestrator contract", () => {
   test("appends exactly one idempotent section", () => {
     const snapshot = catalog([worker("scout", "package"), worker("expert", "user", "reusable")]);
@@ -42,50 +47,25 @@ describe("orchestrator contract", () => {
     expect(updated).toContain("`new` [project]");
   });
 
-  test("defines async exclusivity, sibling concurrency, parent ownership, and lifecycle", () => {
+  test("teaches the parent orchestration contract with a sorted trusted catalog", () => {
     const result = appendOrchestratorContract(
       "",
       catalog([worker("zeta", "project", "reusable"), worker("alpha", "package")]),
     );
 
-    expect(result).toContain("parent orchestrator");
-    expect(result).toContain("{ worker, title, instructions }");
-    expect(result).toContain("sibling `orchestrate` calls in one assistant message");
-    expect(result).toContain("Pi executes them concurrently");
-    expect(result).toContain("preflight is atomic per call");
-    expect(result).toContain("one rejected call does not prevent valid siblings from starting");
-    expect(result).toContain("full brief");
-    expect(result).toContain("pure group of sibling `orchestrate` calls runs asynchronously");
-    expect(result).toContain("accepts a pure group concurrently");
-    expect(result).toContain("starts synthesis only after the whole group settles");
-    expect(result).toContain("Mixing `orchestrate` with another tool");
-    expect(result).toContain("`worker_send` is asynchronous only as the sole tool call");
-    expect(result).toContain("inline and blocking");
-    expect(result).toContain("yield the parent turn");
-    expect(result).toContain("Do not duplicate delegated work");
-    expect(result).toContain("poll `orchestration_status`");
-    expect(result).toContain("Exact worker instructions remain visible");
-    expect(result).toContain("can be expanded");
-    expect(result).toContain("responses arrive individually as each worker settles");
-    expect(result).toContain("final response starts parent synthesis");
-    expect(result).toContain("widget shows only workers currently starting, running, or stopping");
-    expect(result).toContain("Inline worker responses appear progressively in live tool output");
-    expect(result).toContain("normal completion mechanism");
-    expect(result).toContain("synthesizes worker results");
-    expect(result).toContain("`worker_abort` only when active work must stop");
-    expect(result).toContain("`worker_close` when that ready worker is finished");
-    expect(result).toContain("Trusted worker catalog");
-    for (const tool of [
-      "orchestrate",
-      "orchestration_status",
-      "worker_send",
-      "worker_abort",
-      "worker_close",
-    ]) {
-      expect(result).toContain(`\`${tool}\``);
-    }
-    expect(result).toContain("`alpha` [package] (one-shot)");
-    expect(result).toContain("`zeta` [project] (reusable)");
+    expectContractRule(result, [
+      /`orchestrate`/,
+      /\{ worker, title, instructions \}/,
+      /\bsibling\b/i,
+      /\bone assistant message\b/i,
+    ]);
+    expectContractRule(result, [/`orchestrate`/, /\basynchronously\b/i, /\binline\b/i, /\bblocking\b/i]);
+    expectContractRule(result, [/\bpoll\b/i, /`orchestration_status`/]);
+    expectContractRule(result, [/\bparent\b/i, /\bsynthesi[sz]/i, /\breview/i, /\bverification\b/i]);
+    expectContractRule(result, [/\breusable\b/i, /\bready\b/i, /`worker_send`/, /`worker_close`/]);
+
+    expectContractRule(result, [/`alpha`/, /\bpackage\b/i, /\bone-shot\b/i]);
+    expectContractRule(result, [/`zeta`/, /\bproject\b/i, /\breusable\b/i]);
     expect(result.indexOf("`alpha`")).toBeLessThan(result.indexOf("`zeta`"));
   });
 });

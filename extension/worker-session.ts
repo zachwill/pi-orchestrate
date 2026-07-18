@@ -561,6 +561,8 @@ const prepareChildModelRuntime = Effect.fn("WorkerSession.prepareChildModelRunti
     },
     catch: modelAcquisitionError("register-providers", "Worker model provider registration failed"),
   });
+  // Worker-session owns this pre-service refresh so dynamic parent providers exist
+  // before selected-model authentication is copied.
   yield* refreshModelRuntime(modelRuntime, options.definition);
 
   const model = yield* Effect.try({
@@ -768,6 +770,9 @@ const createWorkerSession = Effect.fn("WorkerSession.create")(function* (
     const { selected, modelRuntime } = yield* prepareChildModelRuntime(options, dependencies);
     const services = yield* acquireWorkerServices(options, dependencies, modelRuntime);
 
+    // createAgentSessionServices owns extension-provider registration and refresh, but
+    // Pi 0.80.10 discards that refresh result. Keep this worker-owned probe so provider
+    // errors and aborts remain typed acquisition failures before session creation.
     yield* refreshModelRuntime(modelRuntime, definition);
     const model = yield* Effect.try({
       try: () => {

@@ -32,7 +32,7 @@ function settlement(overrides: Partial<WorkerSettlement> = {}): WorkerSettlement
     eventId: `event-${settlementNumber}`,
     sequence: settlementNumber,
     ownerSessionId: "owner-a",
-    waveId: ids.waveId(),
+    runId: ids.runId(),
     workerId: ids.workerId(),
     generation: 1,
     mode: "async",
@@ -44,9 +44,6 @@ function settlement(overrides: Partial<WorkerSettlement> = {}): WorkerSettlement
     usage,
     startedAt: 100,
     settledAt: 200,
-    remainingActive: 0,
-    waveSize: 1,
-    waveComplete: true,
     sessionFile: "/sessions/worker.jsonl",
     ...overrides,
   };
@@ -87,41 +84,17 @@ function createBinding(
 }
 
 describe("DeliveryCoordinator worker settlements", () => {
-  test("delivers an intermediate result immediately without a turn and the final with one turn", () => {
+  test("treats an ungrouped async settlement as final", () => {
     const coordinator = new DeliveryCoordinator();
     const parent = createBinding("owner-a", 1);
     coordinator.bind(parent.binding);
-    const ids = createSequentialIdFactories(50);
-    const waveId = ids.waveId();
 
-    expect(coordinator.accept(settlement({
-      waveId,
-      workerId: ids.workerId(),
-      eventId: "wave-event-1",
-      sequence: 1,
-      remainingActive: 1,
-      waveComplete: false,
-    }))).toBe(true);
-    expect(parent.sent.map(({ options }) => options.triggerTurn)).toEqual([false]);
-
-    coordinator.accept(settlement({
-      waveId,
-      workerId: ids.workerId(),
-      eventId: "wave-event-2",
-      sequence: 2,
-      waveComplete: true,
-    }));
-
-    expect(parent.sent.map(({ message }) => message.customType)).toEqual([
-      "pi-orchestrate-worker-result",
-      "pi-orchestrate-worker-result",
-    ]);
-    expect(parent.sent.map(({ options }) => options.triggerTurn)).toEqual([false, true]);
-    expect(parent.sent[0]?.message.content).not.toContain(DELIVERY_PARENT_INSTRUCTIONS);
-    expect(parent.sent[1]?.message.content).toContain(DELIVERY_PARENT_INSTRUCTIONS);
+    expect(coordinator.accept(settlement({ eventId: "ungrouped", sequence: 1 }))).toBe(true);
+    expect(parent.sent[0]?.options.triggerTurn).toBe(true);
+    expect(parent.sent[0]?.message.content).toContain(DELIVERY_PARENT_INSTRUCTIONS);
   });
 
-  test("groups independent async waves behind one final synthesis boundary", () => {
+  test("groups independent async runs behind one final synthesis boundary", () => {
     const coordinator = new DeliveryCoordinator();
     const parent = createBinding("owner-a", 1);
     coordinator.bind(parent.binding);
@@ -129,8 +102,8 @@ describe("DeliveryCoordinator worker settlements", () => {
     coordinator.accept(settlement({
       eventId: "group-first",
       sequence: 3,
-      dispatchGroupId: "dispatch-group",
-      dispatchGroupSize: 2,
+      synthesisGroupId: "synthesis-group",
+      synthesisGroupSize: 2,
     }));
     expect(parent.sent.map(({ options }) => options.triggerTurn)).toEqual([false]);
     expect(parent.sent[0]?.message.content).not.toContain(DELIVERY_PARENT_INSTRUCTIONS);
@@ -138,36 +111,34 @@ describe("DeliveryCoordinator worker settlements", () => {
     coordinator.accept(settlement({
       eventId: "group-second",
       sequence: 4,
-      dispatchGroupId: "dispatch-group",
-      dispatchGroupSize: 2,
+      synthesisGroupId: "synthesis-group",
+      synthesisGroupSize: 2,
     }));
     expect(parent.sent.map(({ options }) => options.triggerTurn)).toEqual([false, true]);
     expect(parent.sent[1]?.message.content).toContain(DELIVERY_PARENT_INSTRUCTIONS);
     expect(parent.sent.map(({ message }) => message.details)).toEqual([
       expect.objectContaining({
-        waveSize: 1,
-        dispatchGroupId: "dispatch-group",
-        dispatchGroupSize: 2,
+        synthesisGroupId: "synthesis-group",
+        synthesisGroupSize: 2,
       }),
       expect.objectContaining({
-        waveSize: 1,
-        dispatchGroupId: "dispatch-group",
-        dispatchGroupSize: 2,
+        synthesisGroupId: "synthesis-group",
+        synthesisGroupSize: 2,
       }),
     ]);
   });
 
-  test("shrinks an async dispatch group when a sibling call fails preflight", () => {
+  test("shrinks an async synthesis group when a sibling call fails preflight", () => {
     const coordinator = new DeliveryCoordinator();
     const parent = createBinding("owner-a", 1, false);
     coordinator.bind(parent.binding);
     coordinator.accept(settlement({
       eventId: "group-valid",
       sequence: 5,
-      dispatchGroupId: "partial-group",
-      dispatchGroupSize: 2,
+      synthesisGroupId: "partial-group",
+      synthesisGroupSize: 2,
     }));
-    coordinator.skipDispatchGroupMember("owner-a", "partial-group", 2);
+    coordinator.skipSynthesisGroupMember("owner-a", "partial-group", 2);
 
     parent.setIdle(true);
     coordinator.markAgentSettled("owner-a", 1);
@@ -181,19 +152,19 @@ describe("DeliveryCoordinator worker settlements", () => {
     const coordinator = new DeliveryCoordinator();
     const parent = createBinding("owner-a", 1, false);
     coordinator.bind(parent.binding);
-    const firstWave = createSequentialIdFactories(100).waveId();
-    const secondWave = createSequentialIdFactories(200).waveId();
-    coordinator.accept(settlement({ eventId: "a1", sequence: 10, waveId: firstWave, waveComplete: false, remainingActive: 1 }));
-    coordinator.accept(settlement({ eventId: "b1", sequence: 11, waveId: secondWave, waveComplete: false, remainingActive: 1 }));
-    coordinator.accept(settlement({ eventId: "a2", sequence: 12, waveId: firstWave, waveComplete: true }));
-    coordinator.accept(settlement({ eventId: "b2", sequence: 13, waveId: secondWave, waveComplete: false, remainingActive: 1 }));
+    const firstRun = createSequentialIdFactories(100).runId();
+    const secondRun = createSequentialIdFactories(200).runId();
+    coordinator.accept(settlement({ eventId: "a1", sequence: 10, runId: firstRun}));
+    coordinator.accept(settlement({ eventId: "b1", sequence: 11, runId: secondRun}));
+    coordinator.accept(settlement({ eventId: "a2", sequence: 12, runId: firstRun}));
+    coordinator.accept(settlement({ eventId: "b2", sequence: 13, runId: secondRun}));
 
     parent.setIdle(true);
     coordinator.markAgentSettled("owner-a", 1);
 
-    expect(parent.sent.map(({ message }) => message.details.eventId)).toEqual(["a1", "b1", "a2"]);
-    expect(parent.sent.map(({ options }) => options.triggerTurn)).toEqual([false, false, true]);
-    expect(coordinator.pendingCount("owner-a")).toBe(1);
+    expect(parent.sent.map(({ message }) => message.details.eventId)).toEqual(["a1", "b1", "a2", "b2"]);
+    expect(parent.sent.map(({ options }) => options.triggerTurn)).toEqual([false, false, false, true]);
+    expect(coordinator.pendingCount("owner-a")).toBe(0);
   });
 
   test("preserves owner isolation and ignores stale binding generations", () => {
@@ -222,7 +193,7 @@ describe("DeliveryCoordinator worker settlements", () => {
     const parent = createBinding("owner-a", 1, false);
     parent.failOnAttempt(2);
     coordinator.bind(parent.binding);
-    const first = settlement({ eventId: "retry-1", sequence: 30, waveComplete: false, remainingActive: 1 });
+    const first = settlement({ eventId: "retry-1", sequence: 30});
     const second = settlement({ eventId: "retry-2", sequence: 31 });
     expect(coordinator.accept(first)).toBe(true);
     expect(coordinator.accept(first)).toBe(false);
@@ -249,23 +220,18 @@ describe("DeliveryCoordinator worker settlements", () => {
     expect(coordinator.pendingCount("owner-a")).toBe(0);
   });
 
-  test("fairly caps twelve large workers while preserving identity, excerpts, and final instructions", () => {
+  test("fairly caps twelve queued results while preserving identity and excerpts", () => {
     const coordinator = new DeliveryCoordinator();
     const parent = createBinding("owner-a", 1, false);
     coordinator.bind(parent.binding);
-    const waveId = createSequentialIdFactories(500).waveId();
-
     for (let index = 0; index < 12; index += 1) {
       coordinator.accept(settlement({
         eventId: `fair-${index}`,
         sequence: 100 + index,
-        waveId,
+        runId: createSequentialIdFactories(500 + index).runId(),
         workerId: `worker-fair-${index}` as WorkerSettlement["workerId"],
         title: `Fair worker ${index}`,
         outcome: { status: "completed", assistantText: `${index}:` + "x".repeat(30_000) },
-        remainingActive: 11 - index,
-        waveSize: 12,
-        waveComplete: index === 11,
       }));
     }
 
@@ -285,16 +251,16 @@ describe("DeliveryCoordinator worker settlements", () => {
     expect(parent.sent.at(-1)?.message.content).toEndWith(DELIVERY_PARENT_INSTRUCTIONS);
   });
 
-  test("caps a busy-owner batch across many completed waves", () => {
+  test("caps a busy owner's queued completed runs", () => {
     const coordinator = new DeliveryCoordinator();
     const parent = createBinding("owner-a", 1, false);
     coordinator.bind(parent.binding);
     for (let index = 0; index < 24; index += 1) {
       coordinator.accept(settlement({
-        eventId: `batch-${index}`,
+        eventId: `queued-${index}`,
         sequence: 200 + index,
-        workerId: `worker-batch-${index}` as WorkerSettlement["workerId"],
-        title: `Batch ${index}`,
+        workerId: `worker-queued-${index}` as WorkerSettlement["workerId"],
+        title: `Queued ${index}`,
         outcome: { status: "completed", assistantText: `${index}:` + "z".repeat(20_000) },
       }));
     }
@@ -336,7 +302,7 @@ describe("DeliveryCoordinator worker settlements", () => {
     expect(sent.map((item) => item.options.triggerTurn)).toEqual([true, true]);
   });
 
-  test("accepts reused worker and wave IDs when the settlement sequence advances", () => {
+  test("accepts reused worker and run IDs when the settlement sequence advances", () => {
     const coordinator = new DeliveryCoordinator();
     const parent = createBinding("owner-a", 1);
     coordinator.bind(parent.binding);

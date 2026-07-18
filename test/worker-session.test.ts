@@ -310,6 +310,7 @@ function harness(
         loaderDispose();
         throw error;
       }
+      await input.modelRuntime.refresh({ allowNetwork: false });
       return {
         cwd: input.cwd,
         agentDir: input.agentDir,
@@ -432,9 +433,6 @@ describe("worker session factory", () => {
       authPath: "/agent/auth.json",
       modelsPath: "/agent/models.json",
     }]);
-    expect(h.runtime.refresh).toHaveBeenCalledTimes(2);
-    expect(h.runtime.refresh).toHaveBeenNthCalledWith(1, { allowNetwork: false });
-    expect(h.runtime.refresh).toHaveBeenNthCalledWith(2, { allowNetwork: false });
     expect(h.agentInputs[0]!.model).toBe(h.runtime.models[0]!);
     expect(h.agentInputs[0]!.services.modelRuntime).toBe(h.runtime as unknown as ModelRuntime);
     expect(h.agentInputs[0]!.tools).toEqual(["read", "grep", "find", "ls"]);
@@ -705,7 +703,6 @@ describe("worker session factory", () => {
 
     expect(parentRegistry.isUsingOAuth).toHaveBeenCalledWith(h.runtime.models[0]);
     expect(h.runtime.runtimeApiKeys).toEqual([]);
-    expect(h.runtime.refresh).toHaveBeenCalledTimes(2);
   });
 
   test("copies dynamic providers and selected auth through real Pi ModelRuntimes", async () => {
@@ -906,7 +903,7 @@ describe("worker session factory", () => {
     });
   });
 
-  test("keeps initial and second refresh failures in the model acquisition taxonomy", async () => {
+  test("keeps worker-owned refresh probes in the model acquisition taxonomy", async () => {
     const initialRefresh = harness();
     initialRefresh.runtime.refresh.mockResolvedValueOnce({
       aborted: false,
@@ -928,23 +925,25 @@ describe("worker session factory", () => {
     expect(initialRefresh.loaderOptions).toHaveLength(0);
     expect(initialRefresh.agentInputs).toHaveLength(0);
 
-    const secondRefresh = harness();
-    secondRefresh.runtime.refresh
+    const postExtensionRefresh = harness();
+    postExtensionRefresh.runtime.refresh
+      .mockResolvedValueOnce({ aborted: false, errors: new Map() })
+      // createAgentSessionServices owns this refresh and does not expose its result.
       .mockResolvedValueOnce({ aborted: false, errors: new Map() })
       .mockResolvedValueOnce({ aborted: true, errors: new Map() });
-    let secondFailure: unknown;
+    let postExtensionFailure: unknown;
     try {
-      await createWorkerSessionFactory(secondRefresh.dependencies).create(options());
+      await createWorkerSessionFactory(postExtensionRefresh.dependencies).create(options());
     } catch (error) {
-      secondFailure = error;
+      postExtensionFailure = error;
     }
-    expect(secondFailure).toBeInstanceOf(WorkerModelAcquisitionError);
-    expect(secondFailure).toMatchObject({
+    expect(postExtensionFailure).toBeInstanceOf(WorkerModelAcquisitionError);
+    expect(postExtensionFailure).toMatchObject({
       _tag: "WorkerSession.ModelAcquisitionError",
       message: 'Worker "scout" child model refresh was aborted',
     });
-    expect(secondRefresh.agentInputs).toHaveLength(0);
-    expect(secondRefresh.loaderDispose).toHaveBeenCalledTimes(1);
+    expect(postExtensionRefresh.agentInputs).toHaveLength(0);
+    expect(postExtensionRefresh.loaderDispose).toHaveBeenCalledTimes(1);
   });
 
   test("fails before resource creation when neither worker nor parent supplies a model", async () => {

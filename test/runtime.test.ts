@@ -8,7 +8,7 @@ import {
   createSequentialIdFactories,
   createWorkerCatalog,
   type OrchestrateTaskInput,
-  type WaveId,
+  type RunId,
   type WorkerDefinition,
   type WorkerId,
   type WorkerMessageDirection,
@@ -16,12 +16,12 @@ import {
   type WorkerUsage,
 } from "../extension/domain.ts";
 import {
-  MAX_COMPLETED_WAVE_HISTORY,
+  MAX_COMPLETED_RUN_HISTORY,
   MAX_TERMINAL_WORKER_HISTORY,
   SHUTDOWN_CLEANUP_GRACE_MS,
   createOrchestratorRuntime,
   type BestEffortDeadline,
-  type CompletedWave,
+  type CompletedRun,
   type OrchestrationContext,
   type OrchestratorRuntimeOptions,
 } from "../extension/runtime.ts";
@@ -313,159 +313,53 @@ describe("orchestration admission and concurrency", () => {
     const owner = context("owner", [known, missingModel]);
 
     await expect(
-      orchestrator.orchestrate(owner, [task("known"), task("unknown")], "async"),
+      orchestrator.orchestrate(owner, task("unknown"), "async"),
     ).rejects.toThrow("Unknown worker");
     await expect(
-      orchestrator.orchestrate(owner, [task("known", " ")], "async"),
+      orchestrator.orchestrate(owner, task("known", " "), "async"),
     ).rejects.toThrow("title must not be blank");
     await expect(
       orchestrator.orchestrate(
         owner,
-        [task("known", "x".repeat(MAX_WORKER_TITLE_LENGTH + 1))],
+        task("known", "x".repeat(MAX_WORKER_TITLE_LENGTH + 1)),
         "async",
       ),
     ).rejects.toThrow("title must be at most");
     await expect(
       orchestrator.orchestrate(
         owner,
-        [task("known", "title", "x".repeat(MAX_WORKER_INSTRUCTIONS_LENGTH + 1))],
+        task("known", "title", "x".repeat(MAX_WORKER_INSTRUCTIONS_LENGTH + 1)),
         "async",
       ),
     ).rejects.toThrow("instructions must be at most");
     await expect(
-      orchestrator.orchestrate(owner, [task("known"), task("missing-model")], "async"),
+      orchestrator.orchestrate(owner, task("missing-model"), "async"),
     ).rejects.toThrow('configured model "provider/missing" was not found');
     await expect(
       orchestrator.orchestrate(
         context("owner", [known], { parentModel: undefined }),
-        [task("known")],
+        task("known"),
         "async",
       ),
     ).rejects.toThrow("no configured model and no parent model is available");
 
     expect(factory.creates.value).toBe(0);
-    expect(await orchestrator.snapshot("owner")).toEqual({ waves: [], workers: [] });
+    expect(await orchestrator.snapshot("owner")).toEqual({ runs: [], workers: [] });
 
-    const accepted = await orchestrator.orchestrate(owner, [task("known")], "async");
+    const accepted = await orchestrator.orchestrate(owner, task("known"), "async");
     expect({
       id: String(accepted.id),
-      workerIds: accepted.workerIds.map(String),
-    }).toEqual({ id: "wave-1", workerIds: ["worker-1"] });
+      workerId: String(accepted.workerId),
+    }).toEqual({ id: "run-1", workerId: "worker-1" });
     await tracker.starts.waitFor(1);
     handle.promptPlans[0]!.gate.resolve(undefined);
     await handle.disposed.promise;
     await orchestrator.shutdown();
   });
 
-  test("preflights every configured model before creating any session", async () => {
-    const tracker = new PromptTracker();
-    const factory = new FakeFactory([
-      { handle: new FakeHandle("unused", [], tracker) },
-    ]);
-    const configured = definition("configured", "one-shot", {
-      provider: "provider",
-      modelId: "available",
-    });
-    const unavailable = definition("unavailable", "one-shot", {
-      provider: "provider",
-      modelId: "unavailable",
-    });
-    const findCalls: string[] = [];
-    const registry = {
-      find(provider: string, id: string) {
-        findCalls.push(`${provider}/${id}`);
-        return id === "available" ? model(provider, id) : undefined;
-      },
-    } as unknown as ModelRegistry;
-    const orchestrator = runtime(factory);
-
-    await expect(
-      orchestrator.orchestrate(
-        context("owner", [configured, unavailable], { modelRegistry: registry }),
-        [task("configured"), task("unavailable")],
-        "async",
-      ),
-    ).rejects.toThrow("provider/unavailable");
-
-    expect(findCalls).toEqual(["provider/available", "provider/unavailable"]);
-    expect(factory.creates.value).toBe(0);
-    expect(await orchestrator.snapshot("owner")).toEqual({ waves: [], workers: [] });
-    await orchestrator.shutdown();
-  });
-
-  test("starts all twelve prompts before any prompt completes", async () => {
-    const tracker = new PromptTracker();
-    const workers = Array.from({ length: 12 }, (_, index) => definition(`worker-${index}`));
-    const plans = workers.map((worker) => ({
-      handle: new FakeHandle(
-        worker.name,
-        [promptPlan({ status: "completed", assistantText: worker.name })],
-        tracker,
-      ),
-    }));
-    const factory = new FakeFactory(plans);
-    const orchestrator = runtime(factory);
-    const completion = new Deferred<CompletedWave>();
-    orchestrator.subscribeCompletion((wave) => completion.resolve(wave));
-
-    await orchestrator.orchestrate(
-      context("owner", workers),
-      workers.map((worker) => task(worker.name)),
-      "async",
-    );
-    await factory.creates.waitFor(12);
-    await tracker.starts.waitFor(12);
-
-    expect(factory.creates.value).toBe(12);
-    expect(tracker.maximumActive).toBe(12);
-    expect(plans.every((plan) => plan.handle.promptPlans[0]!.gate)).toBe(true);
-
-    for (const plan of plans) plan.handle.promptPlans[0]!.gate.resolve(undefined);
-
-    await completion.promise;
-    expect(tracker.maximumActive).toBe(12);
-    await orchestrator.shutdown();
-  });
 });
 
-describe("completion, reusable workers, and wave ownership", () => {
-  test("returns ordered results and marks async waves complete without claiming delivery", async () => {
-    const tracker = new PromptTracker();
-    const workers = [definition("alpha"), definition("beta"), definition("gamma")];
-    const plans = workers.map((worker) => ({
-      handle: new FakeHandle(
-        worker.name,
-        [promptPlan({ status: "completed", assistantText: `result-${worker.name}` })],
-        tracker,
-      ),
-    }));
-    const orchestrator = runtime(new FakeFactory(plans));
-    const completion = new Deferred<CompletedWave>();
-    orchestrator.subscribeCompletion((wave) => completion.resolve(wave));
-
-    const accepted = await orchestrator.orchestrate(
-      context("owner", workers),
-      workers.map((worker) => task(worker.name)),
-      "async",
-    );
-    await tracker.starts.waitFor(3);
-    plans[2]!.handle.promptPlans[0]!.gate.resolve(undefined);
-    plans[1]!.handle.promptPlans[0]!.gate.resolve(undefined);
-    plans[0]!.handle.promptPlans[0]!.gate.resolve(undefined);
-
-    const completed = await completion.promise;
-    expect(completed.results.map((item) => item.worker)).toEqual(["alpha", "beta", "gamma"]);
-    expect(completed.results.map((item) => item.workerId)).toEqual([...accepted.workerIds]);
-    expect(completed.results.map((item) => item.outcome.status)).toEqual([
-      "completed",
-      "completed",
-      "completed",
-    ]);
-    expect((await orchestrator.snapshot("owner")).waves[0]?.state).toBe("complete");
-    expect((await orchestrator.snapshot("owner")).waves[0]).not.toHaveProperty("delivered");
-    await orchestrator.shutdown();
-  });
-
+describe("completion, reusable workers, and run ownership", () => {
   test("keeps one worker ID across reusable ready, send, and close", async () => {
     const tracker = new PromptTracker();
     const first = promptPlan({ status: "ready", assistantText: "first" });
@@ -475,13 +369,13 @@ describe("completion, reusable workers, and wave ownership", () => {
     const orchestrator = runtime(factory);
     const owner = context("owner", [definition("reusable", "reusable")]);
 
-    const initial = orchestrator.orchestrate(owner, [task("reusable")], "inline");
+    const initial = orchestrator.orchestrate(owner, task("reusable"), "inline");
     await tracker.starts.waitFor(1);
     handle.emitMessageDirection("from-model");
     first.gate.resolve(undefined);
-    const firstWave = await initial;
-    const workerId = firstWave.results[0]!.workerId;
-    expect(firstWave.results[0]?.status).toBe("ready");
+    const firstRun = await initial;
+    const workerId = firstRun.result.workerId;
+    expect(firstRun.result?.status).toBe("ready");
     expect(handle.disposeCalls).toBe(0);
 
     const followUp = orchestrator.send(owner, workerId, "Follow up", "inline");
@@ -492,9 +386,9 @@ describe("completion, reusable workers, and wave ownership", () => {
     expect(running.workers[0]?.outcome).toBeUndefined();
     second.gate.resolve(undefined);
 
-    const secondWave = await followUp;
-    expect(secondWave.results[0]?.workerId).toBe(workerId);
-    expect(secondWave.results[0]?.outcome).toEqual({ status: "ready", assistantText: "second" });
+    const secondRun = await followUp;
+    expect(secondRun.result?.workerId).toBe(workerId);
+    expect(secondRun.result?.outcome).toEqual({ status: "ready", assistantText: "second" });
     expect(factory.creates.value).toBe(1);
     expect(handle.prompts).toEqual(["Instructions for reusable", "Follow up"]);
 
@@ -512,9 +406,9 @@ describe("completion, reusable workers, and wave ownership", () => {
     await orchestrator.shutdown();
   });
 
-  test("bounds completed wave history across repeated reusable responses", async () => {
+  test("bounds completed run history across repeated reusable responses", async () => {
     const tracker = new PromptTracker();
-    const responseCount = MAX_COMPLETED_WAVE_HISTORY + 1;
+    const responseCount = MAX_COMPLETED_RUN_HISTORY + 1;
     const handle = new FakeHandle(
       "reusable-history",
       Array.from({ length: responseCount }, (_, index) =>
@@ -524,21 +418,21 @@ describe("completion, reusable workers, and wave ownership", () => {
     const orchestrator = runtime(new FakeFactory([{ handle }]));
     const owner = context("owner", [definition("reusable", "reusable")]);
 
-    const initial = await orchestrator.orchestrate(owner, [task("reusable")], "inline");
-    const workerId = initial.results[0]!.workerId;
+    const initial = await orchestrator.orchestrate(owner, task("reusable"), "inline");
+    const workerId = initial.result.workerId;
     for (let index = 1; index < responseCount; index += 1) {
       await orchestrator.send(owner, workerId, `Follow up ${index}`, "inline");
     }
 
     const snapshot = await orchestrator.snapshot("owner");
-    expect(snapshot.waves).toHaveLength(MAX_COMPLETED_WAVE_HISTORY);
+    expect(snapshot.runs).toHaveLength(MAX_COMPLETED_RUN_HISTORY);
     expect(snapshot.workers).toHaveLength(1);
     expect(snapshot.workers[0]).toMatchObject({ id: workerId, status: "ready" });
     expect(handle.prompts).toHaveLength(responseCount);
     await orchestrator.shutdown();
   });
 
-  test("retains ready workers and bounds terminal worker and completed wave history globally", async () => {
+  test("retains ready workers and bounds terminal worker and completed run history globally", async () => {
     const tracker = new PromptTracker();
     const reusableHandle = new FakeHandle(
       "reusable",
@@ -557,15 +451,15 @@ describe("completion, reusable workers, and wave ownership", () => {
     const oneShot = definition("one-shot");
     const owner = context("owner", [reusable, oneShot]);
 
-    const reusableWave = await orchestrator.orchestrate(owner, [task("reusable")], "inline");
-    const reusableId = reusableWave.results[0]!.workerId;
+    const reusableRun = await orchestrator.orchestrate(owner, task("reusable"), "inline");
+    const reusableId = reusableRun.result.workerId;
     for (let index = 0; index < 101; index += 1) {
-      await orchestrator.orchestrate(owner, [task("one-shot", `Work ${index}`)], "inline");
+      await orchestrator.orchestrate(owner, task("one-shot", `Work ${index}`), "inline");
     }
 
     const snapshot = await orchestrator.snapshot("owner");
-    expect(snapshot.waves).toHaveLength(MAX_COMPLETED_WAVE_HISTORY);
-    expect(String(snapshot.waves[0]?.id)).toBe("wave-3");
+    expect(snapshot.runs).toHaveLength(MAX_COMPLETED_RUN_HISTORY);
+    expect(String(snapshot.runs[0]?.id)).toBe("run-3");
     expect(snapshot.workers).toHaveLength(MAX_TERMINAL_WORKER_HISTORY + 1);
     expect(snapshot.workers.some((worker) => worker.id === reusableId && worker.status === "ready")).toBe(true);
     expect(snapshot.workers.some((worker) => worker.id === "worker-2")).toBe(false);
@@ -579,41 +473,7 @@ describe("completion, reusable workers, and wave ownership", () => {
 });
 
 describe("per-worker settlement observability", () => {
-  test("emits settlement and compatibility completion before pruning under terminal-history pressure", async () => {
-    const tracker = new PromptTracker();
-    const plans = Array.from({ length: MAX_TERMINAL_WORKER_HISTORY + 12 }, (_, index) => ({
-      handle: new FakeHandle(
-        `pressure-${index}`,
-        [promptPlan({ status: "completed", assistantText: `result-${index}` }, true)],
-        tracker,
-      ),
-    }));
-    const orchestrator = runtime(new FakeFactory(plans));
-    const owner = context("owner", [definition("worker")]);
-
-    for (let index = 0; index < MAX_TERMINAL_WORKER_HISTORY; index += 1) {
-      await orchestrator.orchestrate(owner, [task("worker", `Prefill ${index}`)], "inline");
-    }
-
-    const settlements: import("../extension/runtime.ts").WorkerSettlement[] = [];
-    const completions: CompletedWave[] = [];
-    orchestrator.subscribeSettlement((event) => settlements.push(event));
-    orchestrator.subscribeCompletion((wave) => completions.push(wave));
-    const tasks = Array.from({ length: 12 }, (_, index) => task("worker", `Pressure ${index}`));
-    await orchestrator.orchestrate(owner, tasks, "async");
-    while (settlements.length < 12) await Promise.resolve();
-
-    expect(settlements).toHaveLength(12);
-    expect(settlements.at(-1)?.waveComplete).toBe(true);
-    expect(completions).toHaveLength(1);
-    expect(completions[0]?.results).toHaveLength(12);
-    expect((await orchestrator.snapshot("owner")).workers).toHaveLength(
-      MAX_TERMINAL_WORKER_HISTORY,
-    );
-    await orchestrator.shutdown();
-  });
-
-  test("permits pruned worker and wave IDs to be reused with new settlement identities", async () => {
+  test("permits pruned worker and run IDs to be reused with new settlement identities", async () => {
     const tracker = new PromptTracker();
     const count = MAX_TERMINAL_WORKER_HISTORY + 2;
     const plans = Array.from({ length: count }, (_, index) => ({
@@ -623,11 +483,11 @@ describe("per-worker settlement observability", () => {
         tracker,
       ),
     }));
-    let nextWave = 0;
+    let nextRun = 0;
     let nextWorker = 0;
     const orchestrator = runtime(new FakeFactory(plans), {
       idFactories: {
-        waveId: () => `wave-${nextWave++ % (MAX_COMPLETED_WAVE_HISTORY + 1)}` as WaveId,
+        runId: () => `run-${nextRun++ % (MAX_COMPLETED_RUN_HISTORY + 1)}` as RunId,
         workerId: () => `worker-${nextWorker++ % (MAX_TERMINAL_WORKER_HISTORY + 1)}` as WorkerId,
       },
     });
@@ -636,66 +496,13 @@ describe("per-worker settlement observability", () => {
     const owner = context("owner", [definition("worker")]);
 
     for (let index = 0; index < count; index += 1) {
-      await orchestrator.orchestrate(owner, [task("worker", `Reuse ${index}`)], "inline");
+      await orchestrator.orchestrate(owner, task("worker", `Reuse ${index}`), "inline");
     }
 
     expect(events[0]?.workerId).toBe(events.at(-1)?.workerId);
-    expect(events[0]?.waveId).toBe(events.at(-1)?.waveId);
+    expect(events[0]?.runId).toBe(events.at(-1)?.runId);
     expect(events[0]?.eventId).not.toBe(events.at(-1)?.eventId);
     expect(events.at(-1)?.sequence).toBe(count);
-    await orchestrator.shutdown();
-  });
-
-  test("emits each settlement immediately in completion order and marks only the last wave result final", async () => {
-    const tracker = new PromptTracker();
-    const alpha = new FakeHandle(
-      "alpha-settlement",
-      [promptPlan({ status: "completed", assistantText: "alpha result" })],
-      tracker,
-    );
-    const beta = new FakeHandle(
-      "beta-settlement",
-      [promptPlan({ status: "completed", assistantText: "beta result" })],
-      tracker,
-    );
-    const orchestrator = runtime(new FakeFactory([{ handle: alpha }, { handle: beta }]));
-    const settlements: import("../extension/runtime.ts").WorkerSettlement[] = [];
-    orchestrator.subscribeSettlement((event) => settlements.push(event));
-
-    const accepted = await orchestrator.orchestrate(
-      context("owner", [definition("alpha"), definition("beta")]),
-      [task("alpha"), task("beta")],
-      "async",
-    );
-    await tracker.starts.waitFor(2);
-    alpha.promptPlans[0]!.gate.resolve(undefined);
-    await alpha.disposed.promise;
-
-    expect(settlements).toHaveLength(1);
-    expect(settlements[0]).toMatchObject({
-      ownerSessionId: "owner",
-      waveId: accepted.id,
-      workerId: accepted.workerIds[0],
-      generation: 1,
-      mode: "async",
-      status: "completed",
-      remainingActive: 1,
-      waveSize: 2,
-      waveComplete: false,
-      startedAt: 1_700_000_000_000,
-      settledAt: 1_700_000_000_000,
-      sessionFile: "/sessions/alpha-settlement.jsonl",
-    });
-    expect(Object.isFrozen(settlements[0])).toBe(true);
-    expect(Object.isFrozen(settlements[0]?.outcome)).toBe(true);
-    expect(Object.isFrozen(settlements[0]?.usage)).toBe(true);
-
-    beta.promptPlans[0]!.gate.resolve(undefined);
-    await beta.disposed.promise;
-    expect(settlements.map((event) => event.worker)).toEqual(["alpha", "beta"]);
-    expect(settlements.map((event) => event.sequence)).toEqual([1, 2]);
-    expect(settlements.map((event) => event.waveComplete)).toEqual([false, true]);
-    expect(new Set(settlements.map((event) => event.eventId)).size).toBe(2);
     await orchestrator.shutdown();
   });
 
@@ -710,10 +517,10 @@ describe("per-worker settlement observability", () => {
     const global: import("../extension/runtime.ts").WorkerSettlement[] = [];
     orchestrator.subscribeSettlement((event) => global.push(event));
 
-    const initial = orchestrator.orchestrate(owner, [task("reusable")], "inline", undefined, (event) => local.push(event));
+    const initial = orchestrator.orchestrate(owner, task("reusable"), "inline", undefined, (event) => local.push(event));
     await tracker.starts.waitFor(1);
     first.gate.resolve(undefined);
-    const workerId = (await initial).results[0]!.workerId;
+    const workerId = (await initial).result.workerId;
 
     const followUp = orchestrator.send(owner, workerId, "follow up", "inline", undefined, (event) => local.push(event));
     await tracker.starts.waitFor(2);
@@ -743,7 +550,7 @@ describe("per-worker settlement observability", () => {
     failedRuntime.subscribeSettlement((event) => failed.push(event));
     await failedRuntime.orchestrate(
       context("failed-owner", [definition("worker")]),
-      [task("worker")],
+      task("worker"),
       "async",
     );
     while (failed.length === 0) await Promise.resolve();
@@ -751,7 +558,6 @@ describe("per-worker settlement observability", () => {
     expect(failed[0]).toMatchObject({
       status: "failed",
       failureStage: "startup",
-      waveComplete: true,
     });
     expect(failed[0]?.outcome).toEqual({ status: "failed", message: "startup failed" });
     await failedRuntime.shutdown();
@@ -764,18 +570,17 @@ describe("per-worker settlement observability", () => {
     abortedRuntime.subscribeSettlement((event) => aborted.push(event));
     const accepted = await abortedRuntime.orchestrate(
       context("abort-owner", [definition("worker")]),
-      [task("worker")],
+      task("worker"),
       "async",
     );
     await tracker.starts.waitFor(1);
-    await abortedRuntime.abort("abort-owner", { workerIds: accepted.workerIds });
+    await abortedRuntime.abort("abort-owner", { workerIds: [accepted.workerId] });
     prompt.gate.resolve(undefined);
     await Promise.resolve();
     expect(aborted).toHaveLength(1);
     expect(aborted[0]).toMatchObject({
       status: "aborted",
       failureStage: "cancellation",
-      waveComplete: true,
     });
     await abortedRuntime.shutdown();
   });
@@ -805,12 +610,12 @@ describe("runtime state observability", () => {
 
     await orchestrator.orchestrate(
       context("owner-a", [definition("first")]),
-      [task("first")],
+      task("first"),
       "async",
     );
     await orchestrator.orchestrate(
       context("owner-b", [definition("second")]),
-      [task("second")],
+      task("second"),
       "async",
     );
     await tracker.starts.waitFor(2);
@@ -834,10 +639,12 @@ describe("runtime state observability", () => {
     expect(ownerA.workers[0]?.usage).toEqual(usage);
     expect(ownerA.workers[0]?.activity).toBe("read");
     expect(ownerA.workers[0]?.messageDirection).toBe("from-model");
-    expect(Object.isFrozen(ownerA)).toBe(true);
-    expect(Object.isFrozen(ownerA.workers)).toBe(true);
-    expect(Object.isFrozen(ownerA.workers[0])).toBe(true);
-    expect(Object.isFrozen(ownerA.workers[0]?.usage)).toBe(true);
+    try {
+      (ownerA.workers[0]!.usage as { input: number }).input = 999;
+    } catch {
+      // Frozen snapshots may reject mutation; fresh reads must remain authoritative either way.
+    }
+    expect((await orchestrator.snapshot("owner-a")).workers[0]?.usage.input).toBe(12);
     const ownerBWorker = (await orchestrator.snapshot("owner-b")).workers[0];
     expect(ownerBWorker?.usage).toEqual(EMPTY_USAGE);
     expect(ownerBWorker?.activity).toBeUndefined();
@@ -864,15 +671,15 @@ describe("ownership, cancellation, and shutdown", () => {
     const worker = definition("reusable", "reusable");
     const ownerA = context("owner-a", [worker]);
     const ownerB = context("owner-b", [worker]);
-    const accepted = await orchestrator.orchestrate(ownerA, [task("reusable")], "async");
+    const accepted = await orchestrator.orchestrate(ownerA, task("reusable"), "async");
 
-    expect(await orchestrator.snapshot("owner-b")).toEqual({ waves: [], workers: [] });
+    expect(await orchestrator.snapshot("owner-b")).toEqual({ runs: [], workers: [] });
     await expect(
-      orchestrator.send(ownerB, accepted.workerIds[0]!, "intrude", "async"),
+      orchestrator.send(ownerB, accepted.workerId, "intrude", "async"),
     ).rejects.toThrow("not owned");
-    await expect(orchestrator.close("owner-b", accepted.workerIds[0]!)).rejects.toThrow("not owned");
+    await expect(orchestrator.close("owner-b", accepted.workerId)).rejects.toThrow("not owned");
     await expect(
-      orchestrator.abort("owner-b", { workerIds: accepted.workerIds }),
+      orchestrator.abort("owner-b", { workerIds: [accepted.workerId] }),
     ).rejects.toThrow("not owned");
 
     await orchestrator.abort("owner-a", { all: true });
@@ -890,17 +697,17 @@ describe("ownership, cancellation, and shutdown", () => {
     );
     const factory = new FakeFactory([{ handle, gate: createGate }]);
     const orchestrator = runtime(factory);
-    const completion = new Deferred<CompletedWave>();
-    orchestrator.subscribeCompletion((wave) => completion.resolve(wave));
+    const settlement = new Deferred<import("../extension/runtime.ts").WorkerSettlement>();
+    orchestrator.subscribeSettlement((event) => settlement.resolve(event));
 
     const accepted = await orchestrator.orchestrate(
       context("owner", [definition("late")]),
-      [task("late")],
+      task("late"),
       "async",
     );
     await factory.creates.waitFor(1);
-    await orchestrator.abort("owner", { waveId: accepted.id });
-    expect((await completion.promise).results[0]?.status).toBe("aborted");
+    await orchestrator.abort("owner", { workerIds: [accepted.workerId] });
+    expect((await settlement.promise).status).toBe("aborted");
 
     createGate.resolve(undefined);
     await handle.disposed.promise;
@@ -916,24 +723,24 @@ describe("ownership, cancellation, and shutdown", () => {
     const handle = new FakeHandle("running", [prompt], tracker);
     handle.abortGate = new Deferred();
     const orchestrator = runtime(new FakeFactory([{ handle }]));
-    const completion = new Deferred<CompletedWave>();
-    orchestrator.subscribeCompletion((wave) => completion.resolve(wave));
+    const settlement = new Deferred<import("../extension/runtime.ts").WorkerSettlement>();
+    orchestrator.subscribeSettlement((event) => settlement.resolve(event));
 
     const accepted = await orchestrator.orchestrate(
       context("owner", [definition("running")]),
-      [task("running")],
+      task("running"),
       "async",
     );
     await tracker.starts.waitFor(1);
     handle.emitActivity("read");
     expect((await orchestrator.snapshot("owner")).workers[0]?.activity).toBe("read");
-    const aborting = orchestrator.abort("owner", { workerIds: accepted.workerIds });
+    const aborting = orchestrator.abort("owner", { workerIds: [accepted.workerId] });
     await expectPending(aborting);
     expect(handle.abortCalls).toBe(1);
 
     handle.abortGate.resolve(undefined);
     await aborting;
-    expect((await completion.promise).results[0]?.status).toBe("aborted");
+    expect((await settlement.promise).status).toBe("aborted");
     handle.emitStaleActivity("bash");
     prompt.gate.resolve(undefined);
     await Promise.resolve();
@@ -951,7 +758,7 @@ describe("ownership, cancellation, and shutdown", () => {
     const orchestrator = runtime(new FakeFactory([{ handle }]));
     const owner = context("owner", [definition("reusable", "reusable")]);
 
-    const initial = orchestrator.orchestrate(owner, [task("reusable")], "inline");
+    const initial = orchestrator.orchestrate(owner, task("reusable"), "inline");
     await tracker.starts.waitFor(1);
     prompt.gate.resolve(undefined);
     await initial;
@@ -964,7 +771,7 @@ describe("ownership, cancellation, and shutdown", () => {
       status: "closed",
       outcome: { status: "closed" },
     });
-    await expect(orchestrator.orchestrate(owner, [task("reusable")], "async")).rejects.toThrow(
+    await expect(orchestrator.orchestrate(owner, task("reusable"), "async")).rejects.toThrow(
       "shutting down",
     );
   });
@@ -1092,41 +899,6 @@ describe("keyed scheduling and reentrant reusable sends", () => {
     expect(finalizerRuns).toBe(1);
   });
 
-  test("completion listeners can synchronously send the next reusable generation", async () => {
-    const tracker = new PromptTracker();
-    const first = promptPlan({ status: "ready", assistantText: "first" });
-    const second = promptPlan({ status: "ready", assistantText: "second" });
-    const handle = new FakeHandle("completion-reentrant", [first, second], tracker);
-    const orchestrator = runtime(new FakeFactory([{ handle }]));
-    const owner = context("owner", [definition("reusable", "reusable")]);
-    let followUp: Promise<CompletedWave> | undefined;
-
-    orchestrator.subscribeCompletion((wave) => {
-      if (wave.id !== "wave-1") return;
-      followUp = orchestrator.send(
-        owner,
-        wave.results[0]!.workerId,
-        "Completion follow-up",
-        "inline",
-      );
-    });
-
-    await orchestrator.orchestrate(owner, [task("reusable")], "async");
-    await tracker.starts.waitFor(1);
-    first.gate.resolve(undefined);
-    await tracker.starts.waitFor(2);
-
-    expect(handle.prompts).toEqual(["Instructions for reusable", "Completion follow-up"]);
-    second.gate.resolve(undefined);
-    const completed = await followUp!;
-    expect(completed.results[0]?.outcome).toEqual({
-      status: "ready",
-      assistantText: "second",
-    });
-    await orchestrator.close("owner", completed.results[0]!.workerId);
-    await orchestrator.shutdown();
-  });
-
   test("state listeners can synchronously send the next reusable generation", async () => {
     const tracker = new PromptTracker();
     const first = promptPlan({ status: "ready", assistantText: "first" });
@@ -1134,9 +906,9 @@ describe("keyed scheduling and reentrant reusable sends", () => {
     const handle = new FakeHandle("state-reentrant", [first, second], tracker);
     const orchestrator = runtime(new FakeFactory([{ handle }]));
     const owner = context("owner", [definition("reusable", "reusable")]);
-    const accepted = await orchestrator.orchestrate(owner, [task("reusable")], "async");
+    const accepted = await orchestrator.orchestrate(owner, task("reusable"), "async");
     await tracker.starts.waitFor(1);
-    let followUp: Promise<CompletedWave> | undefined;
+    let followUp: Promise<CompletedRun> | undefined;
     let sent = false;
 
     orchestrator.subscribeState(() => {
@@ -1144,7 +916,7 @@ describe("keyed scheduling and reentrant reusable sends", () => {
       sent = true;
       followUp = orchestrator.send(
         owner,
-        accepted.workerIds[0]!,
+        accepted.workerId,
         "State follow-up",
         "inline",
       );
@@ -1154,8 +926,8 @@ describe("keyed scheduling and reentrant reusable sends", () => {
     await tracker.starts.waitFor(2);
     expect(handle.prompts).toEqual(["Instructions for reusable", "State follow-up"]);
     second.gate.resolve(undefined);
-    expect((await followUp!).results[0]?.status).toBe("ready");
-    await orchestrator.close("owner", accepted.workerIds[0]!);
+    expect((await followUp!).result?.status).toBe("ready");
+    await orchestrator.close("owner", accepted.workerId);
     await orchestrator.shutdown();
   });
 });
@@ -1172,13 +944,13 @@ describe("inline AbortSignal ownership", () => {
 
     for (const controller of controllers) {
       const rejectedReason = await orchestrator
-        .orchestrate(owner, [task("worker")], "inline", controller.signal)
+        .orchestrate(owner, task("worker"), "inline", controller.signal)
         .then(
           () => "unexpected success",
           (reason: unknown) => reason,
         );
       expect(rejectedReason).toBe(controller.signal.reason);
-      expect(await orchestrator.snapshot("owner")).toEqual({ waves: [], workers: [] });
+      expect(await orchestrator.snapshot("owner")).toEqual({ runs: [], workers: [] });
     }
     expect(controllers[0]!.signal.reason).toBeNull();
     expect(controllers[1]!.signal.reason).toBe(objectReason);
@@ -1208,7 +980,7 @@ describe("inline AbortSignal ownership", () => {
       const controller = new AbortController();
       const inline = orchestrator.orchestrate(
         owner,
-        [task("worker")],
+        task("worker"),
         "inline",
         controller.signal,
       );
@@ -1221,18 +993,18 @@ describe("inline AbortSignal ownership", () => {
       );
       expect(rejectedReason).toBe(controller.signal.reason);
       const snapshot = await orchestrator.snapshot("owner");
-      expect(snapshot.waves[index]).toMatchObject({ state: "complete" });
+      expect(snapshot.runs[index]).toMatchObject({ state: "complete" });
       expect(snapshot.workers[index]).toMatchObject({
         status: "aborted",
         outcome: { status: "aborted" },
       });
     }
-    expect((await orchestrator.snapshot("owner")).waves).toHaveLength(3);
+    expect((await orchestrator.snapshot("owner")).runs).toHaveLength(3);
     for (const plan of plans) plan.handle.promptPlans[0]!.gate.resolve(undefined);
     await orchestrator.shutdown();
   });
 
-  test("abort after inline admission cancels the exact wave and rejects after settlement", async () => {
+  test("abort after inline admission cancels the exact run and rejects after settlement", async () => {
     const tracker = new PromptTracker();
     const prompt = promptPlan({ status: "completed", assistantText: "late" });
     const handle = new FakeHandle("inline-abort", [prompt], tracker);
@@ -1243,7 +1015,7 @@ describe("inline AbortSignal ownership", () => {
 
     const inline = orchestrator.orchestrate(
       owner,
-      [task("worker")],
+      task("worker"),
       "inline",
       controller.signal,
     );
@@ -1252,7 +1024,7 @@ describe("inline AbortSignal ownership", () => {
 
     await expect(inline).rejects.toBe(reason);
     expect(await orchestrator.snapshot("owner")).toMatchObject({
-      waves: [{ state: "complete" }],
+      runs: [{ state: "complete" }],
       workers: [{ status: "aborted", outcome: { status: "aborted" } }],
     });
     prompt.gate.resolve(undefined);
@@ -1267,10 +1039,10 @@ describe("inline AbortSignal ownership", () => {
     const orchestrator = runtime(new FakeFactory([{ handle }]));
     const owner = context("owner", [definition("reusable", "reusable")]);
 
-    const initial = orchestrator.orchestrate(owner, [task("reusable")], "inline");
+    const initial = orchestrator.orchestrate(owner, task("reusable"), "inline");
     await tracker.starts.waitFor(1);
     first.gate.resolve(undefined);
-    const workerId = (await initial).results[0]!.workerId;
+    const workerId = (await initial).result.workerId;
     const controller = new AbortController();
     const followUp = orchestrator.send(
       owner,
@@ -1295,16 +1067,16 @@ describe("inline AbortSignal ownership", () => {
     const orchestrator = runtime(new FakeFactory([{ handle }]));
     const owner = context("owner", [definition("worker")]);
     const controller = new AbortController();
-    const completion = new Deferred<CompletedWave>();
-    orchestrator.subscribeCompletion((wave) => completion.resolve(wave));
+    const settlement = new Deferred<import("../extension/runtime.ts").WorkerSettlement>();
+    orchestrator.subscribeSettlement((event) => settlement.resolve(event));
 
-    await orchestrator.orchestrate(owner, [task("worker")], "async", controller.signal);
+    await orchestrator.orchestrate(owner, task("worker"), "async", controller.signal);
     await tracker.starts.waitFor(1);
     controller.abort();
     expect((await orchestrator.snapshot("owner")).workers[0]?.status).toBe("running");
 
     prompt.gate.resolve(undefined);
-    expect((await completion.promise).results[0]?.status).toBe("completed");
+    expect((await settlement.promise).status).toBe("completed");
     await orchestrator.shutdown();
   });
 });
@@ -1317,10 +1089,10 @@ describe("active-only aborts and bounded lifecycle barriers", () => {
     const orchestrator = runtime(new FakeFactory([{ handle }]));
     const owner = context("owner", [definition("reusable", "reusable")]);
 
-    const initial = orchestrator.orchestrate(owner, [task("reusable")], "inline");
+    const initial = orchestrator.orchestrate(owner, task("reusable"), "inline");
     await tracker.starts.waitFor(1);
     prompt.gate.resolve(undefined);
-    const workerId = (await initial).results[0]!.workerId;
+    const workerId = (await initial).result.workerId;
 
     await expect(orchestrator.abort("owner", { workerIds: [workerId] })).rejects.toThrow(
       "use worker_close",
@@ -1341,14 +1113,14 @@ describe("active-only aborts and bounded lifecycle barriers", () => {
     const orchestrator = runtime(new FakeFactory([{ handle }]));
     const accepted = await orchestrator.orchestrate(
       context("owner", [definition("worker")]),
-      [task("worker")],
+      task("worker"),
       "async",
     );
     await tracker.starts.waitFor(1);
 
-    const firstAbort = orchestrator.abort("owner", { workerIds: accepted.workerIds });
+    const firstAbort = orchestrator.abort("owner", { workerIds: [accepted.workerId] });
     await handle.abortStarts.waitFor(1);
-    const secondAbort = orchestrator.abort("owner", { workerIds: accepted.workerIds });
+    const secondAbort = orchestrator.abort("owner", { workerIds: [accepted.workerId] });
     await expectPending(firstAbort);
     await expectPending(secondAbort);
     expect(handle.abortCalls).toBe(1);
@@ -1380,12 +1152,12 @@ describe("active-only aborts and bounded lifecycle barriers", () => {
     });
     const accepted = await orchestrator.orchestrate(
       context("owner", [definition("worker")]),
-      [task("worker")],
+      task("worker"),
       "async",
     );
     await tracker.starts.waitFor(1);
 
-    const aborting = orchestrator.abort("owner", { workerIds: accepted.workerIds });
+    const aborting = orchestrator.abort("owner", { workerIds: [accepted.workerId] });
     await handle.abortStarts.waitFor(1);
     await expectPending(aborting);
     deadlineGate.resolve("timed-out");
@@ -1416,7 +1188,7 @@ describe("active-only aborts and bounded lifecycle barriers", () => {
 
     await orchestrator.orchestrate(
       context("owner", [definition("worker")]),
-      [task("worker")],
+      task("worker"),
       "async",
     );
     await orchestrator.shutdown();
@@ -1431,7 +1203,7 @@ describe("active-only aborts and bounded lifecycle barriers", () => {
 });
 
 describe("defect and cleanup supervision", () => {
-  test("an injected scheduler defect fails the current worker and completes its wave", async () => {
+  test("an injected scheduler defect fails the current worker and completes its run", async () => {
     let closeCalls = 0;
     const scheduler: WorkflowScheduler<WorkerId> = {
       start(_key, _workflow, onDefect) {
@@ -1449,11 +1221,11 @@ describe("defect and cleanup supervision", () => {
 
     const completed = await orchestrator.orchestrate(
       context("owner", [definition("worker")]),
-      [task("worker")],
+      task("worker"),
       "inline",
     );
 
-    expect(completed.results[0]).toMatchObject({
+    expect(completed.result).toMatchObject({
       status: "failed",
       outcome: { status: "failed", message: "workflow defect" },
     });
@@ -1472,13 +1244,13 @@ describe("defect and cleanup supervision", () => {
     const orchestrator = runtime(new FakeFactory([{ handle }]));
     const inline = orchestrator.orchestrate(
       context("owner", [definition("worker")]),
-      [task("worker")],
+      task("worker"),
       "inline",
     );
     await tracker.starts.waitFor(1);
     handle.promptPlans[0]!.gate.resolve(undefined);
 
-    expect((await inline).results[0]?.status).toBe("completed");
+    expect((await inline).result?.status).toBe("completed");
     expect(handle.disposeCalls).toBe(1);
     await orchestrator.shutdown();
   });

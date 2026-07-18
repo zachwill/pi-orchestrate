@@ -16,7 +16,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { Result } from "effect";
 import type { WorkerDeliveryDetails } from "./delivery.js";
-import type { WorkerOutcome, WorkerRecord, WorkerStatus, WorkerUsage } from "./domain.js";
+import type { WorkerOutcome, WorkerRecord, WorkerStatus } from "./domain.js";
 import type { OrchestratorRuntime, RuntimeSnapshot } from "./runtime.js";
 import {
   decodePersistedWorkerSettlementDetails,
@@ -62,40 +62,6 @@ export function registerOrchestrationPresentation(pi: ExtensionAPI): void {
     (message, { expanded }, theme) =>
       new WorkerResultComponent(messageText(message.content), message.details, expanded, theme),
   );
-}
-
-export function formatResultStatusSummary(details: unknown): string {
-  const result = readSettlement(details);
-  return result ? statusHeading(result) : "Worker result details unavailable";
-}
-
-export function formatResultPreviews(
-  details: unknown,
-  fallbackContent = "",
-  limit = MAX_RESULT_PREVIEW_LINES,
-): string[] {
-  if (limit <= 0) return [];
-  const result = readSettlement(details);
-  const body = result ? outcomeText(result.outcome) : fallbackContent;
-  return firstNonEmptyLines(body, limit);
-}
-
-export function formatWorkerUsage(usage: Partial<WorkerUsage> | undefined): string | undefined {
-  if (!usage) return undefined;
-  const parts = [
-    `${numberOrZero(usage.turns)}t`,
-    `${formatCompactNumber(numberOrZero(usage.contextTokens))} ctx`,
-    `↑${formatCompactNumber(numberOrZero(usage.input))}`,
-    `↓${formatCompactNumber(numberOrZero(usage.output))}`,
-    `R${formatCompactNumber(numberOrZero(usage.cacheRead))}`,
-    `W${formatCompactNumber(numberOrZero(usage.cacheWrite))}`,
-    `$${numberOrZero(usage.cost).toFixed(4)}`,
-  ];
-  return parts.join(" · ");
-}
-
-export function formatWorkerStatusLine(worker: WorkerRecord): string {
-  return `${worker.worker} → ${worker.title} · ${workerStateLabel(worker)} · ${formatTurnMarker(worker)} · ${formatCompactNumber(numberOrZero(worker.usage?.contextTokens))} ctx`;
 }
 
 export function formatFooterStatus(snapshot: RuntimeSnapshot): string | undefined {
@@ -242,11 +208,7 @@ export class WorkerStatusComponent implements Component {
   }
 
   private workerLine(worker: WorkerRecord, width: number): string {
-    const animation = worker.status === "starting"
-      ? WORKER_ANIMATIONS.starting
-      : worker.status === "stopping"
-        ? WORKER_ANIMATIONS.stopping
-        : WORKER_ANIMATIONS.running;
+    const animation = workerAnimation(worker.status);
     const glyph = this.theme.fg(
       animation.color,
       animation.frames[this.frameIndex % animation.frames.length] ?? animation.frames[0],
@@ -314,16 +276,19 @@ export class WorkerResultComponent implements Component {
       return box;
     }
 
-    const color = details.status === "failed" ? "error" : details.status === "aborted" ? "warning" : "success";
+    const color = resultColor(details.status);
     const elapsed = elapsedBetween(details.startedAt, details.settledAt);
-    const status = details.status === "aborted"
-      ? " · aborted"
-      : details.status === "failed" && details.failureStage === "startup"
-        ? " · could not start"
-        : "";
-    const header = `${statusIcon(details)} ${details.worker} · ${details.title}${status}${elapsed ? ` · ${elapsed}` : ""}`;
+    const qualifier = resultQualifier(details);
+    const title = this.theme.bold(details.title);
+    const workerType = this.theme.fg("muted", this.theme.italic(details.worker));
+    const suffix = [qualifier, elapsed].filter(Boolean).join(" · ");
+    const header = [
+      this.theme.fg(color, `${statusIcon(details)} ${title}`),
+      workerType,
+      ...(suffix ? [this.theme.fg(color, suffix)] : []),
+    ].join(" · ");
     const outcome = presentedOutcome(details);
-    box.addChild(new Text(this.theme.fg(color, this.theme.bold(header)), 0, 0));
+    box.addChild(new Text(header, 0, 0));
     if (outcome) {
       box.addChild(new Spacer(1));
       box.addChild(new WidthBoundComponent(
@@ -344,18 +309,30 @@ export class WorkerResultComponent implements Component {
 }
 
 function readSettlement(value: unknown): SafeSettlement | undefined {
-  const payload = isRecord(value) && isRecord(value.settlement)
-    ? value.settlement
-    : value;
-  const decoded = decodePersistedWorkerSettlementDetails(payload);
+  const decoded = decodePersistedWorkerSettlementDetails(value);
   return Result.isSuccess(decoded) ? decoded.success : undefined;
 }
 
-function statusHeading(result: SafeSettlement): string {
-  if (result.status === "failed") return result.failureStage === "startup" ? "could not start" : "failed";
+function workerAnimation(status: WorkerStatus) {
+  if (status === "starting") return WORKER_ANIMATIONS.starting;
+  if (status === "stopping") return WORKER_ANIMATIONS.stopping;
+  return WORKER_ANIMATIONS.running;
+}
+
+function resultColor(status: SafeSettlement["status"]): "success" | "error" | "warning" {
+  if (status === "failed") return "error";
+  if (status === "aborted") return "warning";
+  return "success";
+}
+
+function resultQualifier(result: SafeSettlement): string | undefined {
   if (result.status === "aborted") return "aborted";
-  if (result.status === "ready") return "response complete";
-  return "completed";
+  if (result.status === "failed" && result.failureStage === "startup") {
+    return "could not start";
+  }
+  if (result.status === "failed") return "failed";
+  if (result.status === "ready") return "ready for follow-up";
+  return undefined;
 }
 
 function statusIcon(result: SafeSettlement): string {
@@ -388,7 +365,7 @@ function presentedOutcome(result: SafeSettlement): string {
 
 function settlementMetadata(result: SafeSettlement): string[] {
   return [
-    `worker ID ${result.workerId} · wave ID ${result.waveId}`,
+    `worker ID ${result.workerId} · run ID ${result.runId}`,
     `status ${result.status} · generation ${result.generation}`,
     `turns ${numberOrZero(result.usage.turns)} · current context ${formatCompactNumber(numberOrZero(result.usage.contextTokens))}`,
     `input ${numberOrZero(result.usage.input)} · output ${numberOrZero(result.usage.output)} · cache read ${numberOrZero(result.usage.cacheRead)} · cache write ${numberOrZero(result.usage.cacheWrite)} · cost $${numberOrZero(result.usage.cost).toFixed(4)}`,
@@ -406,14 +383,6 @@ function activeWorkers(snapshot: RuntimeSnapshot): WorkerRecord[] {
   return snapshot.workers.filter((worker) => ACTIVE_STATUSES.has(worker.status));
 }
 
-const TOOL_ACTIVITY: Readonly<Record<string, string>> = { read: "reading", grep: "searching", find: "finding files", ls: "listing", bash: "running command", edit: "editing", write: "writing" };
-function workerStateLabel(worker: Pick<WorkerRecord, "status" | "activity">): string {
-  if (worker.status === "starting" || worker.status === "stopping") return worker.status;
-  if (worker.status !== "running") return worker.status;
-  if (!worker.activity?.trim()) return "working";
-  return TOOL_ACTIVITY[worker.activity] ?? worker.activity;
-}
-
 function formatTurnMarker(worker: Pick<WorkerRecord, "messageDirection" | "usage">): string {
   const direction = worker.messageDirection === "from-model" ? "↓" : "↑";
   return `${numberOrZero(worker.usage?.turns)}${direction}`;
@@ -426,9 +395,6 @@ function formatElapsed(milliseconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   return seconds % 60 === 0 ? `${minutes}m` : `${minutes}m ${seconds % 60}s`;
-}
-function firstNonEmptyLines(text: string, limit: number): string[] {
-  return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, limit);
 }
 function numberOrZero(value: unknown): number { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0; }
 function formatContextTokens(value: number): string {

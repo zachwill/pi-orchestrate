@@ -13,7 +13,7 @@ import type { TSchema } from "typebox";
 import * as Value from "typebox/value";
 import {
   createWorkerCatalog,
-  type WaveId,
+  type RunId,
   type WorkerCatalog,
   type WorkerDefinition,
   type WorkerId,
@@ -21,8 +21,8 @@ import {
 } from "../extension/domain.js";
 import type {
   AbortTarget,
-  AcceptedWave,
-  CompletedWave,
+  AcceptedRun,
+  CompletedRun,
   OrchestrationContext,
   OrchestratorRuntime,
   RuntimeSnapshot,
@@ -57,7 +57,7 @@ class FakePi {
 class FakeRuntime {
   readonly orchestrateCalls: Array<{
     context: OrchestrationContext;
-    tasks: readonly { worker: string; title: string; instructions: string }[];
+    task: { worker: string; title: string; instructions: string };
     mode: DispatchMode;
     signal?: AbortSignal;
   }> = [];
@@ -73,11 +73,11 @@ class FakeRuntime {
   readonly closeCalls: Array<{ ownerSessionId: string; workerId: WorkerId }> = [];
   readonly snapshotCalls: string[] = [];
 
-  acceptedWave: AcceptedWave = {
-    id: "wave-accepted" as WaveId,
-    workerIds: ["worker-accepted" as WorkerId],
+  acceptedRun: AcceptedRun = {
+    id: "run-accepted" as RunId,
+    workerId: "worker-accepted" as WorkerId,
   };
-  completedWave: CompletedWave = completedWave();
+  completedRun: CompletedRun = completedRun();
   snapshotResult: RuntimeSnapshot = snapshot();
   failures: Partial<
     Record<"orchestrate" | "send" | "abort" | "close" | "snapshot", Error>
@@ -85,16 +85,16 @@ class FakeRuntime {
 
   async orchestrate(
     context: OrchestrationContext,
-    tasks: readonly { worker: string; title: string; instructions: string }[],
+    task: { worker: string; title: string; instructions: string },
     mode: DispatchMode,
     signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedWave | CompletedWave> {
+  ): Promise<AcceptedRun | CompletedRun> {
     if (signal?.aborted) throw signal.reason;
-    this.orchestrateCalls.push({ context, tasks, mode, signal });
+    this.orchestrateCalls.push({ context, task, mode, signal });
     if (this.failures.orchestrate) throw this.failures.orchestrate;
     if (mode === "inline" && this.settlementToEmit) onSettlement?.(this.settlementToEmit);
-    return mode === "async" ? this.acceptedWave : this.completedWave;
+    return mode === "async" ? this.acceptedRun : this.completedRun;
   }
 
   async send(
@@ -104,12 +104,12 @@ class FakeRuntime {
     mode: DispatchMode,
     signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedWave | CompletedWave> {
+  ): Promise<AcceptedRun | CompletedRun> {
     if (signal?.aborted) throw signal.reason;
     this.sendCalls.push({ context, workerId, instructions, mode, signal });
     if (this.failures.send) throw this.failures.send;
     if (mode === "inline" && this.settlementToEmit) onSettlement?.(this.settlementToEmit);
-    return mode === "async" ? this.acceptedWave : this.completedWave;
+    return mode === "async" ? this.acceptedRun : this.completedRun;
   }
 
   async abort(ownerSessionId: string, target: AbortTarget): Promise<void> {
@@ -137,7 +137,7 @@ interface Harness {
   readonly catalogCalls: ExtensionContext[];
   readonly dispatchCalls: string[];
   readonly modes: Map<string, DispatchMode>;
-  readonly groups: Map<string, DispatchDecision["group"]>;
+  readonly synthesisGroups: Map<string, DispatchDecision["synthesisGroup"]>;
 }
 
 function harness(): Harness {
@@ -155,7 +155,7 @@ function harness(): Harness {
   const catalogCalls: ExtensionContext[] = [];
   const dispatchCalls: string[] = [];
   const modes = new Map<string, DispatchMode>();
-  const groups = new Map<string, DispatchDecision["group"]>();
+  const synthesisGroups = new Map<string, DispatchDecision["synthesisGroup"]>();
   const deps: OrchestrationToolDependencies = {
     runtime: runtime as unknown as OrchestratorRuntime,
     getCatalog(ctx) {
@@ -164,16 +164,25 @@ function harness(): Harness {
     },
     getDispatchDecision(toolCallId) {
       dispatchCalls.push(toolCallId);
-      const group = groups.get(toolCallId);
+      const synthesisGroup = synthesisGroups.get(toolCallId);
       return {
         mode: modes.get(toolCallId) ?? "async",
-        ...(group ? { group } : {}),
+        ...(synthesisGroup ? { synthesisGroup } : {}),
       };
     },
   };
 
   registerOrchestrationTools(pi as unknown as ExtensionAPI, deps);
-  return { pi, runtime, context, catalog, catalogCalls, dispatchCalls, modes, groups };
+  return {
+    pi,
+    runtime,
+    context,
+    catalog,
+    catalogCalls,
+    dispatchCalls,
+    modes,
+    synthesisGroups,
+  };
 }
 
 async function invoke(
@@ -266,32 +275,32 @@ const usage: WorkerUsage = {
   turns: 2,
 };
 
-function completedWave(): CompletedWave {
+function completedRun(): CompletedRun {
   return {
-    id: "wave-inline" as WaveId,
+    id: "run-inline" as RunId,
     ownerSessionId: "owner-session",
     mode: "inline",
-    results: [
-      {
-        workerId: "worker-inline" as WorkerId,
-        worker: "scout",
-        title: "Inspect",
-        status: "completed",
-        outcome: { status: "completed", assistantText: "Inspection complete." },
-        usage,
-        sessionFile: "/sessions/worker-inline.jsonl",
-      },
-    ],
+    result: {
+      workerId: "worker-inline" as WorkerId,
+      worker: "scout",
+      title: "Inspect",
+      status: "completed",
+      outcome: { status: "completed", assistantText: "Inspection complete." },
+      usage,
+      startedAt: 1_000,
+      settledAt: 6_000,
+      sessionFile: "/sessions/worker-inline.jsonl",
+    },
   };
 }
 
 function snapshot(): RuntimeSnapshot {
   return {
-    waves: [
+    runs: [
       {
-        id: "wave-owned" as WaveId,
+        id: "run-owned" as RunId,
         ownerSessionId: "owner-session",
-        workerIds: ["worker-owned" as WorkerId],
+        workerId: "worker-owned" as WorkerId,
         mode: "async",
         state: "running",
         createdAt: 123,
@@ -302,7 +311,7 @@ function snapshot(): RuntimeSnapshot {
         id: "worker-owned" as WorkerId,
         worker: "scout",
         ownerSessionId: "owner-session",
-        waveId: "wave-owned" as WaveId,
+        runId: "run-owned" as RunId,
         title: "Inspect",
         instructions: "Inspect the runtime.",
         lifecycle: "reusable",
@@ -316,69 +325,8 @@ function snapshot(): RuntimeSnapshot {
   };
 }
 
-const expectedSchemas = {
-  orchestrate: {
-    type: "object",
-    required: ["worker", "title", "instructions"],
-    properties: {
-      worker: { type: "string" },
-      title: { type: "string" },
-      instructions: { type: "string" },
-    },
-    additionalProperties: false,
-  },
-  orchestration_status: {
-    type: "object",
-    properties: {},
-    additionalProperties: false,
-  },
-  worker_send: {
-    type: "object",
-    required: ["worker_id", "instructions"],
-    properties: {
-      worker_id: { type: "string", minLength: 1 },
-      instructions: { type: "string" },
-    },
-    additionalProperties: false,
-  },
-  worker_abort: {
-    anyOf: [
-      {
-        type: "object",
-        required: ["worker_ids"],
-        properties: {
-          worker_ids: {
-            type: "array",
-            items: { type: "string", minLength: 1 },
-            minItems: 1,
-          },
-        },
-        additionalProperties: false,
-      },
-      {
-        type: "object",
-        required: ["wave_id"],
-        properties: { wave_id: { type: "string", minLength: 1 } },
-        additionalProperties: false,
-      },
-      {
-        type: "object",
-        required: ["all"],
-        properties: { all: { type: "boolean", const: true } },
-        additionalProperties: false,
-      },
-    ],
-  },
-  worker_close: {
-    type: "object",
-    required: ["worker_id"],
-    properties: { worker_id: { type: "string", minLength: 1 } },
-    additionalProperties: false,
-  },
-} as const;
-
 describe("registerOrchestrationTools", () => {
-  test("registers exactly the five canonical names and strict schemas", () => {
+  test("registers exactly the five canonical tools and renderers", () => {
     const { pi } = harness();
 
     expect(pi.tools.map((tool) => tool.name)).toEqual([
@@ -389,27 +337,19 @@ describe("registerOrchestrationTools", () => {
       "worker_close",
     ]);
     for (const tool of pi.tools) {
-      expect(tool.parameters).toEqual(
-        expectedSchemas[tool.name as keyof typeof expectedSchemas],
-      );
       expect(tool.renderCall).toBeFunction();
       expect(tool.renderResult).toBeFunction();
     }
 
     expect(pi.tool("orchestrate").executionMode).toBe("parallel");
 
-    const names = pi.tools.map((tool) => tool.name);
-    expect(names).not.toContain("worker_status");
-    expect(names).not.toContain("worker_respond");
-    expect(names).not.toContain("delegate");
   });
 
-  test("schemas reject malformed, ambiguous, and legacy arguments", () => {
+  test("schemas accept current inputs and reject malformed or ambiguous inputs", () => {
     const { pi } = harness();
     const validTask = { worker: "scout", title: "Inspect", instructions: "Inspect." };
 
     expect(Value.Check(pi.tool("orchestrate").parameters, validTask)).toBe(true);
-    expect(Value.Check(pi.tool("orchestrate").parameters, { tasks: [validTask] })).toBe(false);
     expect(Value.Check(pi.tool("orchestrate").parameters, [validTask])).toBe(false);
     expect(Value.Check(pi.tool("orchestrate").parameters, { ...validTask, extra: true })).toBe(false);
     expect(Value.Check(pi.tool("orchestrate").parameters, {
@@ -426,28 +366,16 @@ describe("registerOrchestrationTools", () => {
         instructions: "Continue.",
       }),
     ).toBe(true);
-    expect(
-      Value.Check(pi.tool("worker_send").parameters, {
-        workerId: "worker-1",
-        instructions: "Continue.",
-      }),
-    ).toBe(false);
-
     const abortSchema = pi.tool("worker_abort").parameters;
     expect(Value.Check(abortSchema, { worker_ids: ["worker-1"] })).toBe(true);
-    expect(Value.Check(abortSchema, { wave_id: "wave-1" })).toBe(true);
     expect(Value.Check(abortSchema, { all: true })).toBe(true);
     expect(Value.Check(abortSchema, {})).toBe(false);
     expect(Value.Check(abortSchema, { worker_ids: [] })).toBe(false);
     expect(Value.Check(abortSchema, { all: false })).toBe(false);
     expect(Value.Check(abortSchema, { worker_ids: ["worker-1"], all: true })).toBe(false);
-    expect(Value.Check(abortSchema, { workerIds: ["worker-1"] })).toBe(false);
 
     expect(Value.Check(pi.tool("worker_close").parameters, { worker_id: "worker-1" })).toBe(
       true,
-    );
-    expect(Value.Check(pi.tool("worker_close").parameters, { workerId: "worker-1" })).toBe(
-      false,
     );
   });
 
@@ -478,10 +406,10 @@ describe("registerOrchestrationTools", () => {
       catalogCalls,
       dispatchCalls,
       modes,
-      groups,
+      synthesisGroups,
     } = harness();
     modes.set("orchestrate-call", "async");
-    groups.set("orchestrate-call", { id: "dispatch-group", size: 2 });
+    synthesisGroups.set("orchestrate-call", { id: "synthesis-group", size: 2 });
     const task = { worker: "scout", title: "Inspect", instructions: "Inspect." };
     const controller = new AbortController();
 
@@ -507,17 +435,21 @@ describe("registerOrchestrationTools", () => {
         catalog,
         parentModel: context.model,
         modelRegistry: context.modelRegistry,
-        dispatchGroup: { id: "dispatch-group", size: 2 },
+        synthesisGroup: { id: "synthesis-group", size: 2 },
       },
-      tasks: [task],
+      task,
       mode: "async",
       signal: controller.signal,
     });
     expect(result.terminate).toBe(true);
-    expect(result.details).toBe(runtime.acceptedWave);
+    expect(result.details).toEqual({
+      mode: "async",
+      run_id: runtime.acceptedRun.id,
+      worker_id: runtime.acceptedRun.workerId,
+    });
     expect(result.content[0]).toMatchObject({ type: "text" });
     expect(result.content[0]?.type === "text" && result.content[0].text).toContain(
-      "wave-accepted",
+      "run-accepted",
     );
   });
 
@@ -544,7 +476,7 @@ describe("registerOrchestrationTools", () => {
     expect(runtime.orchestrateCalls).toHaveLength(0);
   });
 
-  test("returns inline aggregate results without termination", async () => {
+  test("returns one inline result without termination", async () => {
     const { pi, runtime, context, modes } = harness();
     modes.set("inline-call", "inline");
     const controller = new AbortController();
@@ -563,9 +495,26 @@ describe("registerOrchestrationTools", () => {
     controller.abort();
     expect(runtime.orchestrateCalls[0]?.signal?.aborted).toBe(true);
     expect(result).not.toHaveProperty("terminate");
-    expect(result.details).toBe(runtime.completedWave);
+    expect(result.details).toMatchObject({
+      mode: "inline",
+      run_id: runtime.completedRun.id,
+      result: {
+        worker_id: runtime.completedRun.result.workerId,
+        worker: "scout",
+        title: "Inspect",
+      },
+    });
     expect(result.content[0]?.type === "text" && result.content[0].text).toContain(
       "Inspection complete.",
+    );
+    const rendered = pi.tool("orchestrate").renderResult!(
+      result,
+      { isPartial: false, expanded: false },
+      themeForRendering(),
+      { lastComponent: undefined } as never,
+    );
+    expect(Bun.stripANSI(rendered.render(80).join("\n"))).toContain(
+      "✓ Inspect · scout · 5s",
     );
   });
 
@@ -650,7 +599,7 @@ describe("registerOrchestrationTools", () => {
     expect(runtime.sendCalls).toHaveLength(0);
   });
 
-  test("status forwards only the current owner and returns catalog diagnostics plus snapshot", async () => {
+  test("status forwards only the current owner and returns catalog diagnostics plus state", async () => {
     const { pi, runtime, context, catalogCalls } = harness();
 
     const result = await invoke(pi, "orchestration_status", "status-call", {}, context);
@@ -660,22 +609,23 @@ describe("registerOrchestrationTools", () => {
     expect(result).not.toHaveProperty("terminate");
     const details = result.details as {
       catalog: { workers: Array<Record<string, unknown>>; diagnostics: unknown[] };
-      snapshot: { waves: Array<Record<string, unknown>>; workers: Array<Record<string, unknown>> };
+      state: { runs: Array<Record<string, unknown>>; workers: Array<Record<string, unknown>> };
     };
     expect(details.catalog.diagnostics).toHaveLength(1);
     expect(details.catalog.workers[0]).not.toHaveProperty("systemPrompt");
-    expect(details.snapshot.workers[0]).toMatchObject({
+    expect(details.state.workers[0]).toMatchObject({
       worker_id: "worker-owned",
       worker: "scout",
       owner_session_id: "owner-session",
-      wave_id: "wave-owned",
+      run_id: "run-owned",
       title: "Inspect",
       lifecycle: "reusable",
       status: "ready",
       usage: expect.anything(),
     });
-    expect(details.snapshot.workers[0]).toHaveProperty("activity");
-    expect(details.snapshot.workers[0]).not.toHaveProperty("instructions");
+    expect(details.state.runs[0]).toMatchObject({ run_id: "run-owned" });
+    expect(details.state.workers[0]).toHaveProperty("activity");
+    expect(details.state.workers[0]).not.toHaveProperty("instructions");
     expect(JSON.stringify(result)).not.toContain("Inspect the runtime.");
     expect(result.content[0]?.type === "text" && result.content[0].text).toContain(
       "ignored invalid worker",
@@ -698,24 +648,12 @@ describe("registerOrchestrationTools", () => {
       { worker_ids: ["worker-1", "worker-2"] },
       context,
     );
-    await invoke(
-      pi,
-      "worker_abort",
-      "abort-wave",
-      { wave_id: "wave-1" },
-      context,
-    );
     await invoke(pi, "worker_abort", "abort-all", { all: true }, context);
 
     expect(runtime.abortCalls).toEqual([
       { ownerSessionId: "owner-session", target: { workerIds: ["worker-1" as WorkerId, "worker-2" as WorkerId] } },
-      { ownerSessionId: "owner-session", target: { waveId: "wave-1" as WaveId } },
       { ownerSessionId: "owner-session", target: { all: true } },
     ]);
-
-    await expect(
-      invoke(pi, "worker_abort", "abort-blank", { wave_id: "  " }, context),
-    ).rejects.toThrow("wave_id must not be blank");
     await expect(
       invoke(pi, "worker_abort", "abort-blank-worker", { worker_ids: [" "] }, context),
     ).rejects.toThrow("worker_id must not be blank");
@@ -731,7 +669,7 @@ describe("registerOrchestrationTools", () => {
     await expect(
       invoke(pi, "worker_abort", "abort-empty", { worker_ids: [] }, context),
     ).rejects.toThrow("at least one worker ID");
-    expect(runtime.abortCalls).toHaveLength(3);
+    expect(runtime.abortCalls).toHaveLength(2);
   });
 
   test("closes an owner-scoped ready reusable worker", async () => {
@@ -748,7 +686,7 @@ describe("registerOrchestrationTools", () => {
     expect(runtime.closeCalls).toEqual([
       { ownerSessionId: "owner-session", workerId: "worker-ready" as WorkerId },
     ]);
-    expect(result.details).toEqual({ workerId: "worker-ready" });
+    expect(result.details).toEqual({ worker_id: "worker-ready" });
     expect(result).not.toHaveProperty("terminate");
 
     await expect(
@@ -809,46 +747,28 @@ describe("registerOrchestrationTools", () => {
     expect(sendExpanded).toContain("TAIL  ");
 
     await invoke(pi, "orchestrate", "exact-storage", task, context);
-    expect(runtime.orchestrateCalls.at(-1)?.tasks).toEqual([task]);
+    expect(runtime.orchestrateCalls.at(-1)?.task).toEqual(task);
     await invoke(pi, "worker_send", "exact-send", { worker_id: "worker-1", instructions }, context);
     expect(runtime.sendCalls.at(-1)?.instructions).toBe(instructions);
   });
 
-  test("bounds 12 collapsed inline responses, expands all content, and reuses the component", () => {
-    const { pi } = harness();
-    const settlements = Array.from({ length: 12 }, (_, index) => ({
-      workerId: `worker-${index}`, worker: "scout", title: `T${index}`, status: "completed",
-      outcome: { status: "completed", assistantText: `${"long response ".repeat(100)}TAIL-${index}` },
-    }));
-    const result = { content: [{ type: "text", text: "done" }], details: { mode: "inline", settlements } } as AgentToolResult<unknown>;
-    const collapsed = pi.tool("orchestrate").renderResult!(result, { isPartial: true, expanded: false }, themeForRendering(), { lastComponent: undefined } as never);
-    const collapsedLines = collapsed.render(32);
-    expect(collapsedLines.length).toBeLessThanOrEqual(12 * 4 + 1);
-    expect(collapsedLines.every((line) => Bun.stringWidth(line) <= 32)).toBe(true);
-    for (let index = 0; index < 12; index += 1) expect(Bun.stripANSI(collapsedLines.join("\n"))).toContain(`T${index}`);
-    const updated = pi.tool("orchestrate").renderResult!(result, { isPartial: false, expanded: true }, themeForRendering(), { lastComponent: collapsed } as never);
-    expect(updated).toBe(collapsed);
-    const expanded = Bun.stripANSI(updated.render(32).join("\n"));
-    for (let index = 0; index < 12; index += 1) expect(expanded).toContain(`TAIL-${index}`);
-  });
-
   test("renders malformed inline details neutrally rather than as success", () => {
     const { pi } = harness();
-    const result = { content: [{ type: "text", text: "completed" }], details: { settlements: [{ worker: "scout", title: "Bad", status: "completed", outcome: { status: "failed", message: "no" } }] } } as AgentToolResult<unknown>;
+    const result = { content: [{ type: "text", text: "completed" }], details: { result: { worker: "scout", title: "Bad", status: "completed", outcome: { status: "failed", message: "no" } } } } as AgentToolResult<unknown>;
     const rendered = pi.tool("orchestrate").renderResult!(result, { isPartial: false, expanded: false }, themeForRendering(), { lastComponent: undefined } as never);
     const output = Bun.stripANSI(rendered.render(80).join("\n"));
     expect(output).toContain("details unavailable");
     expect(output).not.toContain("✓");
   });
 
-  test("publishes and renders cumulative inline settlement updates", async () => {
+  test("publishes and renders the current inline settlement update", async () => {
     const { pi, runtime, context, modes } = harness();
     modes.set("inline-partial", "inline");
     runtime.settlementToEmit = {
       eventId: "settlement-inline",
       sequence: 1,
       ownerSessionId: "owner-session",
-      waveId: "wave-inline" as WaveId,
+      runId: "run-inline" as RunId,
       workerId: "worker-inline" as WorkerId,
       generation: 1,
       mode: "inline",
@@ -860,9 +780,6 @@ describe("registerOrchestrationTools", () => {
       usage,
       startedAt: 1,
       settledAt: 2,
-      remainingActive: 0,
-      waveSize: 1,
-      waveComplete: true,
       sessionFile: "/sessions/worker-inline.jsonl",
     };
     const updates: unknown[] = [];
@@ -871,14 +788,14 @@ describe("registerOrchestrationTools", () => {
     const partial = updates[0] as AgentToolResult<unknown>;
     const rendered = pi.tool("orchestrate").renderResult!(partial, { isPartial: true, expanded: false }, themeForRendering(), { lastComponent: undefined } as never);
     const output = Bun.stripANSI(rendered.render(80).join("\n"));
-    expect(output).toContain("scout · Inspect · completed");
+    expect(output).toContain("✓ Inspect · scout · 0s");
     expect(output).toContain("Live complete response.");
-    expect(output).toContain("Waiting for remaining workers");
+    expect(output).toContain("Receiving worker response");
   });
 
   test("renders concrete neutral diagnostics", async () => {
     const { pi, runtime, context } = harness();
-    runtime.snapshotResult = { waves: [], workers: [] };
+    runtime.snapshotResult = { runs: [], workers: [] };
     const result = await invoke(pi, "orchestration_status", "status-render", {}, context);
     const rendered = pi.tool("orchestration_status").renderResult!(result, { isPartial: false, expanded: false }, themeForRendering(), {} as never);
     expect(Bun.stripANSI(rendered.render(80).join("\n"))).toContain("No active workers");

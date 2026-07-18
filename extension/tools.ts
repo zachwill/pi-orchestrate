@@ -23,8 +23,7 @@ import {
 import { Type } from "typebox";
 import {
   type CatalogDiagnostic,
-  type WaveId,
-  type WaveRecord,
+  type RunRecord,
   type WorkerCatalog,
   type WorkerDefinition,
   type WorkerId,
@@ -34,9 +33,9 @@ import {
 } from "./domain.js";
 import type {
   AbortTarget,
-  AcceptedWave,
+  AcceptedRun,
   CompletedResult,
-  CompletedWave,
+  CompletedRun,
   OrchestrationContext,
   OrchestratorRuntime,
   RuntimeSnapshot,
@@ -77,12 +76,6 @@ const workerAbortSchema = Type.Union([
   ),
   Type.Object(
     {
-      wave_id: Type.String({ minLength: 1 }),
-    },
-    STRICT_OBJECT,
-  ),
-  Type.Object(
-    {
       all: Type.Literal(true),
     },
     STRICT_OBJECT,
@@ -98,7 +91,7 @@ const workerCloseSchema = Type.Object(
 
 export interface DispatchDecision {
   readonly mode: "async" | "inline";
-  readonly group?: {
+  readonly synthesisGroup?: {
     readonly id: string;
     readonly size: number;
   };
@@ -134,46 +127,46 @@ export function registerOrchestrationTools(
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const decision = deps.getDispatchDecision(toolCallId);
       const mode = decision.mode;
-      const runtimeContext = await buildRuntimeContext(ctx, deps, decision.group);
+      const runtimeContext = await buildRuntimeContext(ctx, deps, decision.synthesisGroup);
       if (mode === "async") {
-        const acceptedWave = await deps.runtime.orchestrate(
+        const acceptedRun = await deps.runtime.orchestrate(
           runtimeContext,
-          [params],
+          params,
           "async",
           signal,
         );
-        const readable = acceptedWaveDetails(acceptedWave);
+        const readable = acceptedRunDetails(acceptedRun);
         return {
           content: [
             {
               type: "text",
-              text: readableDetails(`Accepted async wave ${readable.wave_id}.`, readable),
+              text: readableDetails(`Accepted async run ${readable.run_id}.`, readable),
             },
           ],
-          details: acceptedWave,
+          details: readable,
           terminate: true,
         };
       }
 
-      const completedWave = await deps.runtime.orchestrate(
+      const completedRun = await deps.runtime.orchestrate(
         runtimeContext,
-        [params],
+        params,
         "inline",
         signal,
         createInlineSettlementListener(onUpdate),
       );
-      const readable = completedWaveDetails(completedWave);
+      const readable = completedRunDetails(completedRun);
       return {
         content: [
           {
             type: "text",
             text: readableDetails(
-              `Completed inline wave ${readable.wave_id} with ${readable.results.length} result(s).`,
+              `Completed inline run ${readable.run_id}.`,
               readable,
             ),
           },
         ],
-        details: completedWave,
+        details: readable,
       };
     },
   });
@@ -237,27 +230,27 @@ export function registerOrchestrationTools(
       const mode = deps.getDispatchDecision(toolCallId).mode;
       const runtimeContext = await buildRuntimeContext(ctx, deps);
       if (mode === "async") {
-        const acceptedWave = await deps.runtime.send(
+        const acceptedRun = await deps.runtime.send(
           runtimeContext,
           workerId,
           params.instructions,
           "async",
           signal,
         );
-        const readable = acceptedWaveDetails(acceptedWave);
+        const readable = acceptedRunDetails(acceptedRun);
         return {
           content: [
             {
               type: "text",
-              text: readableDetails(`Accepted async wave ${readable.wave_id}.`, readable),
+              text: readableDetails(`Accepted async run ${readable.run_id}.`, readable),
             },
           ],
-          details: acceptedWave,
+          details: readable,
           terminate: true,
         };
       }
 
-      const completedWave = await deps.runtime.send(
+      const completedRun = await deps.runtime.send(
         runtimeContext,
         workerId,
         params.instructions,
@@ -265,18 +258,18 @@ export function registerOrchestrationTools(
         signal,
         createInlineSettlementListener(onUpdate),
       );
-      const readable = completedWaveDetails(completedWave);
+      const readable = completedRunDetails(completedRun);
       return {
         content: [
           {
             type: "text",
             text: readableDetails(
-              `Completed inline wave ${readable.wave_id} with ${readable.results.length} result(s).`,
+              `Completed inline run ${readable.run_id}.`,
               readable,
             ),
           },
         ],
-        details: completedWave,
+        details: readable,
       };
     },
   });
@@ -285,18 +278,16 @@ export function registerOrchestrationTools(
     name: "worker_abort",
     label: "Worker Abort",
     description:
-      "Abort owned active work by worker IDs, wave ID, or all active owned workers. Use worker_close for ready reusable workers.",
-    promptSnippet: "Abort active owned workers by worker IDs, wave ID, or all",
+      "Abort owned active work by worker IDs or all active owned workers. Use worker_close for ready reusable workers.",
+    promptSnippet: "Abort active owned workers by worker IDs or all",
     promptGuidelines: [
       "Use worker_abort only for active work; use worker_close for a ready reusable worker.",
     ],
     parameters: workerAbortSchema,
     renderCall(args, theme) {
-      const target = "wave_id" in args
-        ? args.wave_id
-        : "worker_ids" in args
-          ? `${args.worker_ids.length} worker${args.worker_ids.length === 1 ? "" : "s"}`
-          : "all workers";
+      const target = "worker_ids" in args
+        ? `${args.worker_ids.length} worker${args.worker_ids.length === 1 ? "" : "s"}`
+        : "all workers";
       return renderCompactCall(theme, "worker_abort", target);
     },
     renderResult(result, { isPartial }, theme) {
@@ -317,7 +308,7 @@ export function registerOrchestrationTools(
             text: readableDetails("Abort request completed.", readable),
           },
         ],
-        details: { target: target.runtime },
+        details: { target: target.external },
       };
     },
   });
@@ -352,7 +343,7 @@ export function registerOrchestrationTools(
             text: readableDetails(`Closed worker ${workerId}.`, readable),
           },
         ],
-        details: { workerId },
+        details: readable,
       };
     },
   });
@@ -361,7 +352,7 @@ export function registerOrchestrationTools(
 async function buildRuntimeContext(
   ctx: ExtensionContext,
   deps: OrchestrationToolDependencies,
-  dispatchGroup?: DispatchDecision["group"],
+  synthesisGroup?: DispatchDecision["synthesisGroup"],
 ): Promise<OrchestrationContext> {
   return {
     ownerSessionId: requireNonblank(
@@ -375,22 +366,20 @@ async function buildRuntimeContext(
     catalog: await deps.getCatalog(ctx),
     parentModel: ctx.model,
     modelRegistry: ctx.modelRegistry,
-    ...(dispatchGroup ? { dispatchGroup } : {}),
+    ...(synthesisGroup ? { synthesisGroup } : {}),
   };
 }
 
 function createInlineSettlementListener(
   onUpdate: ((result: AgentToolResult<unknown>) => void) | undefined,
 ): SettlementListener {
-  const settlements: WorkerSettlement[] = [];
   return (settlement) => {
-    settlements.push(settlement);
     onUpdate?.({
-      content: [{
-        type: "text",
-        text: `${settlements.length} worker response(s) received.`,
-      }],
-      details: { mode: "inline", settlements: [...settlements] },
+      content: [{ type: "text", text: "Worker response received." }],
+      details: {
+        mode: "inline",
+        result: inlineResultDetails(settlement),
+      },
     });
   };
 }
@@ -406,24 +395,15 @@ function asWorkerId(value: string): WorkerId {
   return requireNonblank("worker_id", value) as WorkerId;
 }
 
-function asWaveId(value: string): WaveId {
-  return requireNonblank("wave_id", value) as WaveId;
-}
-
 function abortTarget(params: {
   worker_ids?: string[];
-  wave_id?: string;
   all?: true;
 }): {
   runtime: AbortTarget;
-  external:
-    | { worker_ids: readonly WorkerId[] }
-    | { wave_id: WaveId }
-    | { all: true };
+  external: { worker_ids: readonly WorkerId[] } | { all: true };
 } {
   const selectedTargetCount = [
     params.worker_ids !== undefined,
-    params.wave_id !== undefined,
     params.all !== undefined,
   ].filter(Boolean).length;
   if (selectedTargetCount !== 1 || (params.all !== undefined && params.all !== true)) {
@@ -440,33 +420,26 @@ function abortTarget(params: {
       external: { worker_ids: workerIds },
     };
   }
-  if (params.wave_id !== undefined) {
-    const waveId = asWaveId(params.wave_id);
-    return {
-      runtime: { waveId },
-      external: { wave_id: waveId },
-    };
-  }
   return {
     runtime: { all: true },
     external: { all: true },
   };
 }
 
-function acceptedWaveDetails(wave: AcceptedWave) {
+function acceptedRunDetails(run: AcceptedRun) {
   return {
     mode: "async" as const,
-    wave_id: wave.id,
-    worker_ids: [...wave.workerIds],
+    run_id: run.id,
+    worker_id: run.workerId,
   };
 }
 
-function completedWaveDetails(wave: CompletedWave) {
+function completedRunDetails(run: CompletedRun) {
   return {
-    mode: wave.mode,
-    wave_id: wave.id,
-    owner_session_id: wave.ownerSessionId,
-    results: wave.results.map(completedResultDetails),
+    mode: run.mode,
+    run_id: run.id,
+    owner_session_id: run.ownerSessionId,
+    result: completedResultDetails(run.result),
   };
 }
 
@@ -478,7 +451,23 @@ function completedResultDetails(result: CompletedResult) {
     status: result.status,
     outcome: outcomeDetails(result.outcome),
     usage: usageDetails(result.usage),
+    started_at: result.startedAt,
+    settled_at: result.settledAt,
     session_file: result.sessionFile,
+  };
+}
+
+function inlineResultDetails(settlement: WorkerSettlement) {
+  return {
+    worker_id: settlement.workerId,
+    worker: settlement.worker,
+    title: settlement.title,
+    status: settlement.status,
+    outcome: outcomeDetails(settlement.outcome),
+    usage: usageDetails(settlement.usage),
+    started_at: settlement.startedAt,
+    settled_at: settlement.settledAt,
+    session_file: settlement.sessionFile,
   };
 }
 
@@ -488,8 +477,8 @@ function statusDetails(catalog: WorkerCatalog, snapshot: RuntimeSnapshot) {
       workers: catalog.workers.map(catalogWorkerDetails),
       diagnostics: catalog.diagnostics.map(diagnosticDetails),
     },
-    snapshot: {
-      waves: snapshot.waves.map(waveDetails),
+    state: {
+      runs: snapshot.runs.map(runDetails),
       workers: snapshot.workers.map(workerDetails),
     },
   };
@@ -529,14 +518,14 @@ function diagnosticDetails(diagnostic: CatalogDiagnostic) {
   };
 }
 
-function waveDetails(wave: WaveRecord) {
+function runDetails(run: RunRecord) {
   return {
-    wave_id: wave.id,
-    owner_session_id: wave.ownerSessionId,
-    worker_ids: [...wave.workerIds],
-    mode: wave.mode,
-    state: wave.state,
-    created_at: wave.createdAt,
+    run_id: run.id,
+    owner_session_id: run.ownerSessionId,
+    worker_id: run.workerId,
+    mode: run.mode,
+    state: run.state,
+    created_at: run.createdAt,
   };
 }
 
@@ -545,7 +534,7 @@ function workerDetails(worker: WorkerRecord) {
     worker_id: worker.id,
     worker: worker.worker,
     owner_session_id: worker.ownerSessionId,
-    wave_id: worker.waveId,
+    run_id: worker.runId,
     title: worker.title,
     lifecycle: worker.lifecycle,
     status: worker.status,
@@ -722,19 +711,18 @@ function renderOrchestrationResult(
   lastComponent: unknown,
 ): Component {
   const details = result.details;
-  if (isRecord(details) && typeof details.id === "string" && Array.isArray(details.workerIds) && details.workerIds.every((id) => typeof id === "string")) {
-    const count = details.workerIds.length;
-    return new WidthBoundComponent(new Text(theme.fg("success", `Sent to ${count} worker${count === 1 ? "" : "s"}`) + theme.fg("dim", " · responses arrive as they complete"), 0, 0));
+  if (isRecord(details) && typeof details.run_id === "string" && typeof details.worker_id === "string" && details.mode === "async") {
+    return new WidthBoundComponent(new Text(theme.fg("success", "Sent to worker") + theme.fg("dim", " · response arrives when complete"), 0, 0));
   }
-  const settlements = inlineSettlements(details);
-  if (settlements.length > 0) {
+  const inlineResult = readInlineResult(details);
+  if (inlineResult) {
     const component = lastComponent instanceof InlineResultComponent
       ? lastComponent
       : new InlineResultComponent(theme);
-    component.update(settlements, isPartial, expanded);
+    component.update(inlineResult, isPartial, expanded);
     return component;
   }
-  if (isRecord(details) && (Array.isArray(details.settlements) || Array.isArray(details.results) || "workerIds" in details)) {
+  if (isRecord(details) && ("result" in details || "worker_id" in details)) {
     return new WidthBoundComponent(new Text(theme.fg("warning", "Worker result details unavailable"), 0, 0));
   }
   if (isPartial) return new WidthBoundComponent(new Text(theme.fg("warning", "Sending work…"), 0, 0));
@@ -746,16 +734,17 @@ interface InlineSettlement {
   title: string;
   status: "completed" | "ready" | "failed" | "aborted";
   response: string;
+  elapsed?: string;
 }
 
 class InlineResultComponent implements Component {
-  private settlements: readonly InlineSettlement[] = [];
+  private result: InlineSettlement | undefined;
   private partial = false;
   private expanded = false;
   private child: Component = new Container();
   constructor(private readonly theme: Theme) {}
-  update(settlements: readonly InlineSettlement[], partial: boolean, expanded: boolean): void {
-    this.settlements = settlements;
+  update(result: InlineSettlement, partial: boolean, expanded: boolean): void {
+    this.result = result;
     this.partial = partial;
     this.expanded = expanded;
     this.rebuild();
@@ -766,33 +755,35 @@ class InlineResultComponent implements Component {
   private rebuild(): void {
     (this.child as Component & { dispose?: () => void }).dispose?.();
     const container = new Container();
-    for (const settlement of this.settlements) {
-      const failed = settlement.status === "failed";
-      const aborted = settlement.status === "aborted";
-      const color = failed ? "error" : aborted ? "warning" : "success";
-      const icon = failed ? "✗" : aborted ? "■" : "✓";
-      container.addChild(new WidthBoundComponent(new Text(this.theme.fg(color, this.theme.bold(`${icon} ${settlement.worker} · ${settlement.title} · ${settlement.status}`)), 0, 0), 1));
-      if (settlement.response) {
-        const markdown = new Markdown(settlement.response, this.expanded ? 2 : 0, 0, getMarkdownTheme());
-        container.addChild(new WidthBoundComponent(markdown, this.expanded ? undefined : 2));
-      }
-      container.addChild(new Spacer(1));
+    const result = this.result;
+    if (!result) {
+      this.child = container;
+      return;
     }
-    if (this.partial) container.addChild(new Text(this.theme.fg("warning", "Waiting for remaining workers…"), 0, 0));
-    else if (!this.expanded) container.addChild(new Text(this.theme.fg("dim", keyHint("app.tools.expand", "to inspect full responses")), 0, 0));
+    const appearance = inlineResultAppearance(result.status);
+    const suffix = [appearance.qualifier, result.elapsed].filter(Boolean).join(" · ");
+    const title = this.theme.bold(result.title);
+    const workerType = this.theme.fg("muted", this.theme.italic(result.worker));
+    const header = [
+      this.theme.fg(appearance.color, `${appearance.icon} ${title}`),
+      workerType,
+      ...(suffix ? [this.theme.fg(appearance.color, suffix)] : []),
+    ].join(" · ");
+    container.addChild(new WidthBoundComponent(new Text(header, 0, 0), 1));
+    if (result.response) {
+      const markdown = new Markdown(result.response, this.expanded ? 2 : 0, 0, getMarkdownTheme());
+      container.addChild(new WidthBoundComponent(markdown, this.expanded ? undefined : 2));
+    }
+    container.addChild(new Spacer(1));
+    if (this.partial) container.addChild(new Text(this.theme.fg("warning", "Receiving worker response…"), 0, 0));
+    else if (!this.expanded) container.addChild(new Text(this.theme.fg("dim", keyHint("app.tools.expand", "to inspect full response")), 0, 0));
     this.child = container;
   }
 }
 
-function inlineSettlements(details: unknown): InlineSettlement[] {
-  if (!isRecord(details)) return [];
-  const values = Array.isArray(details.settlements) ? details.settlements : Array.isArray(details.results) ? details.results : [];
-  const parsed: InlineSettlement[] = [];
-  for (const value of values) {
-    const settlement = readInlineSettlement(value);
-    if (settlement) parsed.push(settlement);
-  }
-  return parsed;
+function readInlineResult(details: unknown): InlineSettlement | undefined {
+  if (!isRecord(details)) return undefined;
+  return readInlineSettlement(details.result);
 }
 
 function readInlineSettlement(value: unknown): InlineSettlement | undefined {
@@ -803,27 +794,50 @@ function readInlineSettlement(value: unknown): InlineSettlement | undefined {
   const outcomeStatus = statuses.find((item) => item === outcome.status);
   if (!status || outcomeStatus !== status) return undefined;
   const message = outcome.message;
-  const camelAssistant = outcome.assistantText;
-  const snakeAssistant = outcome.assistant_text;
+  const assistantText = outcome.assistant_text;
   if (message !== undefined && typeof message !== "string") return undefined;
-  if (camelAssistant !== undefined && typeof camelAssistant !== "string") return undefined;
-  if (snakeAssistant !== undefined && typeof snakeAssistant !== "string") return undefined;
-  const assistantText = typeof camelAssistant === "string" ? camelAssistant : snakeAssistant;
+  if (assistantText !== undefined && typeof assistantText !== "string") return undefined;
   if ((status === "completed" || status === "ready") && typeof assistantText !== "string") return undefined;
   if (status === "failed" && typeof message !== "string") return undefined;
+  const startedAt = value.started_at;
+  const settledAt = value.settled_at;
+  const elapsed = typeof startedAt === "number" && typeof settledAt === "number" && settledAt >= startedAt
+    ? formatElapsed(settledAt - startedAt)
+    : undefined;
   return {
     worker: value.worker,
     title: value.title,
     status,
     response: [message, assistantText].filter((item): item is string => typeof item === "string" && item.length > 0).join("\n\n"),
+    ...(elapsed ? { elapsed } : {}),
   };
+}
+
+function inlineResultAppearance(status: InlineSettlement["status"]): {
+  readonly color: "success" | "error" | "warning";
+  readonly icon: "✓" | "✗" | "■";
+  readonly qualifier?: string;
+} {
+  if (status === "failed") return { color: "error", icon: "✗", qualifier: "failed" };
+  if (status === "aborted") return { color: "warning", icon: "■", qualifier: "aborted" };
+  if (status === "ready") {
+    return { color: "success", icon: "✓", qualifier: "ready for follow-up" };
+  }
+  return { color: "success", icon: "✓" };
+}
+
+function formatElapsed(milliseconds: number): string {
+  const seconds = Math.floor(milliseconds / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  return seconds % 60 === 0 ? `${minutes}m` : `${minutes}m ${seconds % 60}s`;
 }
 
 function renderDiagnosticsResult(result: AgentToolResult<unknown>, isPartial: boolean, theme: Theme): Text {
   if (isPartial) return new Text(theme.fg("muted", "Reading orchestration diagnostics…"), 0, 0);
   const details = result.details;
-  if (isRecord(details) && isRecord(details.snapshot) && Array.isArray(details.snapshot.workers)) {
-    const workers = details.snapshot.workers.filter(isRecord);
+  if (isRecord(details) && isRecord(details.state) && Array.isArray(details.state.workers)) {
+    const workers = details.state.workers.filter(isRecord);
     const active = workers.filter((worker) => ["starting", "running", "stopping"].includes(String(worker.status))).length;
     const ready = workers.filter((worker) => worker.status === "ready").length;
     const diagnostics = isRecord(details.catalog) && Array.isArray(details.catalog.diagnostics) ? details.catalog.diagnostics.length : 0;

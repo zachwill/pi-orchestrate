@@ -95,17 +95,17 @@ export interface OrchestrateTaskInput {
 }
 
 declare const workerIdBrand: unique symbol;
-declare const waveIdBrand: unique symbol;
+declare const runIdBrand: unique symbol;
 
 export type WorkerId = string & { readonly [workerIdBrand]: "WorkerId" };
-export type WaveId = string & { readonly [waveIdBrand]: "WaveId" };
+export type RunId = string & { readonly [runIdBrand]: "RunId" };
 
 export type WorkerIdFactory = () => WorkerId;
-export type WaveIdFactory = () => WaveId;
+export type RunIdFactory = () => RunId;
 
 export interface OrchestrateIdFactories {
   readonly workerId: WorkerIdFactory;
-  readonly waveId: WaveIdFactory;
+  readonly runId: RunIdFactory;
 }
 
 export function createRandomWorkerIdFactory(
@@ -114,10 +114,10 @@ export function createRandomWorkerIdFactory(
   return () => `worker-${randomId()}` as WorkerId;
 }
 
-export function createRandomWaveIdFactory(
+export function createRandomRunIdFactory(
   randomId: () => string = defaultRandomId,
-): WaveIdFactory {
-  return () => `wave-${randomId()}` as WaveId;
+): RunIdFactory {
+  return () => `run-${randomId()}` as RunId;
 }
 
 export function createRandomIdFactories(
@@ -125,7 +125,7 @@ export function createRandomIdFactories(
 ): OrchestrateIdFactories {
   return {
     workerId: createRandomWorkerIdFactory(randomId),
-    waveId: createRandomWaveIdFactory(randomId),
+    runId: createRandomRunIdFactory(randomId),
   };
 }
 
@@ -134,15 +134,15 @@ export function createSequentialWorkerIdFactory(startAt = 1): WorkerIdFactory {
   return () => `worker-${next++}` as WorkerId;
 }
 
-export function createSequentialWaveIdFactory(startAt = 1): WaveIdFactory {
+export function createSequentialRunIdFactory(startAt = 1): RunIdFactory {
   let next = startAt;
-  return () => `wave-${next++}` as WaveId;
+  return () => `run-${next++}` as RunId;
 }
 
 export function createSequentialIdFactories(startAt = 1): OrchestrateIdFactories {
   return {
     workerId: createSequentialWorkerIdFactory(startAt),
-    waveId: createSequentialWaveIdFactory(startAt),
+    runId: createSequentialRunIdFactory(startAt),
   };
 }
 
@@ -205,7 +205,6 @@ export type WorkerOutcome =
   | WorkerFailedOutcome
   | WorkerAbortedOutcome
   | WorkerClosedOutcome;
-export type TerminalWorkerOutcome = Exclude<WorkerOutcome, WorkerReadyOutcome>;
 export type WorkerStatus =
   | "starting"
   | "running"
@@ -219,13 +218,12 @@ export type TerminalWorkerStatus = Extract<
   WorkerStatus,
   "completed" | "failed" | "aborted" | "closed"
 >;
-export type WaveCompleteWorkerStatus = TerminalWorkerStatus | "ready";
 
 export interface WorkerRecord {
   readonly id: WorkerId;
   readonly worker: string;
   readonly ownerSessionId: string;
-  readonly waveId: WaveId;
+  readonly runId: RunId;
   readonly title: string;
   readonly instructions: string;
   readonly lifecycle: WorkerLifecycle;
@@ -239,18 +237,18 @@ export interface WorkerRecord {
   readonly sessionFile?: string;
 }
 
-export type WaveMode = "async" | "inline";
-export type WaveState = "running" | "complete";
+export type RunMode = "async" | "inline";
+export type RunState = "running" | "complete";
 
-export interface WaveRecord {
-  readonly id: WaveId;
+export interface RunRecord {
+  readonly id: RunId;
   readonly ownerSessionId: string;
-  readonly workerIds: readonly WorkerId[];
-  readonly mode: WaveMode;
-  readonly state: WaveState;
+  readonly workerId: WorkerId;
+  readonly mode: RunMode;
+  readonly state: RunState;
   readonly createdAt: number;
-  readonly dispatchGroupId?: string;
-  readonly dispatchGroupSize?: number;
+  readonly synthesisGroupId?: string;
+  readonly synthesisGroupSize?: number;
 }
 
 export class InvalidTransitionError extends Error {
@@ -267,10 +265,6 @@ export class InvalidTransitionError extends Error {
 
 export function isTerminalWorkerStatus(status: WorkerStatus): status is TerminalWorkerStatus {
   return status === "completed" || status === "failed" || status === "aborted" || status === "closed";
-}
-
-export function isTerminalWorkerOutcome(outcome: WorkerOutcome): outcome is TerminalWorkerOutcome {
-  return outcome.status !== "ready";
 }
 
 export function canTransitionWorkerStatus(
@@ -308,36 +302,6 @@ export function transitionWorkerStatus(
   return { ...worker, status, outcome: undefined };
 }
 
-export function isWorkerCompleteForWave(
-  status: WorkerStatus,
-): status is WaveCompleteWorkerStatus {
-  return status === "ready" || isTerminalWorkerStatus(status);
-}
-
-export function getWaveWorkersInOrder(
-  wave: WaveRecord,
-  workersById: ReadonlyMap<WorkerId, WorkerRecord>,
-): readonly WorkerRecord[] | undefined {
-  const workers: WorkerRecord[] = [];
-
-  for (const workerId of wave.workerIds) {
-    const worker = workersById.get(workerId);
-    if (!worker) return undefined;
-    workers.push(worker);
-  }
-
-  return workers;
-}
-
-export function isWaveComplete(
-  wave: WaveRecord,
-  workersById: ReadonlyMap<WorkerId, WorkerRecord>,
-): boolean {
-  const workers = getWaveWorkersInOrder(wave, workersById);
-  return workers !== undefined && workers.every((worker) => isWorkerCompleteForWave(worker.status));
-}
-
-export const MAX_TASKS_PER_WAVE = 12;
 export const MAX_WORKER_TITLE_LENGTH = 200;
 export const MAX_WORKER_INSTRUCTIONS_LENGTH = 100_000;
 export const CANCELLATION_GRACE_MS = 5_000;

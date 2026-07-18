@@ -35,7 +35,7 @@ interface BoundParent {
   agentRunning: boolean;
 }
 
-interface DispatchGroupState {
+interface SynthesisGroupState {
   expected: number;
   readonly acceptedEventIds: string[];
 }
@@ -44,8 +44,8 @@ export class DeliveryCoordinator {
   private readonly boundParents = new Map<string, BoundParent>();
   private readonly pendingSettlements: WorkerSettlement[] = [];
   private readonly flushingOwners = new Set<string>();
-  private readonly dispatchGroups = new Map<string, DispatchGroupState>();
-  private readonly finalDispatchGroupEvents = new Set<string>();
+  private readonly synthesisGroups = new Map<string, SynthesisGroupState>();
+  private readonly finalSynthesisGroupEvents = new Set<string>();
   private highestAcceptedSequence = 0;
 
   bind(binding: ParentBinding): void {
@@ -82,26 +82,26 @@ export class DeliveryCoordinator {
 
     this.highestAcceptedSequence = settlement.sequence;
     this.pendingSettlements.push(settlement);
-    this.acceptDispatchGroupSettlement(settlement);
+    this.acceptSynthesisGroupSettlement(settlement);
 
     const parent = this.boundParents.get(settlement.ownerSessionId);
     if (parent) this.flush(settlement.ownerSessionId, parent.binding.generation);
     return true;
   }
 
-  skipDispatchGroupMember(
+  skipSynthesisGroupMember(
     ownerSessionId: string,
-    dispatchGroupId: string,
-    dispatchGroupSize: number,
+    synthesisGroupId: string,
+    synthesisGroupSize: number,
   ): void {
-    const key = dispatchGroupKey(ownerSessionId, dispatchGroupId);
-    const state = this.dispatchGroups.get(key) ?? {
-      expected: dispatchGroupSize,
+    const key = synthesisGroupKey(ownerSessionId, synthesisGroupId);
+    const state = this.synthesisGroups.get(key) ?? {
+      expected: synthesisGroupSize,
       acceptedEventIds: [],
     };
     state.expected = Math.max(0, state.expected - 1);
-    this.dispatchGroups.set(key, state);
-    this.refreshDispatchGroupBoundary(key, state);
+    this.synthesisGroups.set(key, state);
+    this.refreshSynthesisGroupBoundary(key, state);
   }
 
   pendingCount(ownerSessionId: string): number {
@@ -114,13 +114,9 @@ export class DeliveryCoordinator {
     this.boundParents.clear();
     this.pendingSettlements.length = 0;
     this.flushingOwners.clear();
-    this.dispatchGroups.clear();
-    this.finalDispatchGroupEvents.clear();
+    this.synthesisGroups.clear();
+    this.finalSynthesisGroupEvents.clear();
     this.highestAcceptedSequence = 0;
-  }
-
-  close(): void {
-    this.clear();
   }
 
   private matchesBinding(
@@ -165,13 +161,9 @@ export class DeliveryCoordinator {
 
         const messagesRemaining = flushThrough - index + 1;
         const fairFlushBytes = Math.floor(flushBytesRemaining / messagesRemaining);
-        const fairWaveBytes = Math.floor(
-          MAX_DELIVERY_MARKDOWN_BYTES / Math.max(1, settlement.waveSize),
-        );
         const byteLimit = Math.max(0, Math.min(
           MAX_WORKER_DELIVERY_MARKDOWN_BYTES,
           fairFlushBytes,
-          fairWaveBytes,
           flushBytesRemaining,
         ));
         const triggerTurn = latestFinalIndex >= 0 && index === flushThrough;
@@ -191,7 +183,7 @@ export class DeliveryCoordinator {
         if (pendingIndex >= 0) this.pendingSettlements.splice(pendingIndex, 1);
 
         if (triggerTurn) {
-          this.finishDispatchGroup(settlement);
+          this.finishSynthesisGroup(settlement);
           parent.agentRunning = true;
           return;
         }
@@ -205,16 +197,16 @@ export class DeliveryCoordinator {
     settlement: WorkerSettlement,
     byteLimit: number,
   ): WorkerDeliveryMessage {
-    const heading = `## Worker result — ${settlement.worker}`;
+    const heading = `## Worker result — ${settlement.title} · ${settlement.worker}`;
     const metadata = [
       `Worker \`${settlement.workerId}\``,
-      `wave \`${settlement.waveId}\``,
+      `run \`${settlement.runId}\``,
       `status \`${settlement.status}\``,
     ].join(" · ");
     const body = renderOutcome(settlement.outcome);
     const content = body.length > 0
-      ? `${heading}\n\n### ${settlement.title}\n${metadata}\n\n${body}`
-      : `${heading}\n\n### ${settlement.title}\n${metadata}`;
+      ? `${heading}\n\n${metadata}\n\n${body}`
+      : `${heading}\n\n${metadata}`;
     const appendix = this.isFinalBoundary(settlement)
       ? `\n\n---\n\n${DELIVERY_PARENT_INSTRUCTIONS}`
       : "";
@@ -227,44 +219,44 @@ export class DeliveryCoordinator {
     });
   }
 
-  private acceptDispatchGroupSettlement(settlement: WorkerSettlement): void {
-    if (!settlement.dispatchGroupId || !settlement.dispatchGroupSize) return;
-    const key = dispatchGroupKey(settlement.ownerSessionId, settlement.dispatchGroupId);
-    const state = this.dispatchGroups.get(key) ?? {
-      expected: settlement.dispatchGroupSize,
+  private acceptSynthesisGroupSettlement(settlement: WorkerSettlement): void {
+    if (!settlement.synthesisGroupId || !settlement.synthesisGroupSize) return;
+    const key = synthesisGroupKey(settlement.ownerSessionId, settlement.synthesisGroupId);
+    const state = this.synthesisGroups.get(key) ?? {
+      expected: settlement.synthesisGroupSize,
       acceptedEventIds: [],
     };
     state.acceptedEventIds.push(settlement.eventId);
-    this.dispatchGroups.set(key, state);
-    this.refreshDispatchGroupBoundary(key, state);
+    this.synthesisGroups.set(key, state);
+    this.refreshSynthesisGroupBoundary(key, state);
   }
 
-  private refreshDispatchGroupBoundary(key: string, state: DispatchGroupState): void {
+  private refreshSynthesisGroupBoundary(key: string, state: SynthesisGroupState): void {
     if (state.expected === 0) {
-      this.dispatchGroups.delete(key);
+      this.synthesisGroups.delete(key);
       return;
     }
     if (state.acceptedEventIds.length !== state.expected) return;
     const finalEventId = state.acceptedEventIds.at(-1);
-    if (finalEventId) this.finalDispatchGroupEvents.add(finalEventId);
+    if (finalEventId) this.finalSynthesisGroupEvents.add(finalEventId);
   }
 
   private isFinalBoundary(settlement: WorkerSettlement): boolean {
-    if (!settlement.dispatchGroupId) return settlement.waveComplete;
-    return this.finalDispatchGroupEvents.has(settlement.eventId);
+    if (!settlement.synthesisGroupId) return true;
+    return this.finalSynthesisGroupEvents.has(settlement.eventId);
   }
 
-  private finishDispatchGroup(settlement: WorkerSettlement): void {
-    if (!settlement.dispatchGroupId) return;
-    this.dispatchGroups.delete(
-      dispatchGroupKey(settlement.ownerSessionId, settlement.dispatchGroupId),
+  private finishSynthesisGroup(settlement: WorkerSettlement): void {
+    if (!settlement.synthesisGroupId) return;
+    this.synthesisGroups.delete(
+      synthesisGroupKey(settlement.ownerSessionId, settlement.synthesisGroupId),
     );
-    this.finalDispatchGroupEvents.delete(settlement.eventId);
+    this.finalSynthesisGroupEvents.delete(settlement.eventId);
   }
 }
 
-function dispatchGroupKey(ownerSessionId: string, dispatchGroupId: string): string {
-  return `${ownerSessionId}\u0000${dispatchGroupId}`;
+function synthesisGroupKey(ownerSessionId: string, synthesisGroupId: string): string {
+  return `${ownerSessionId}\u0000${synthesisGroupId}`;
 }
 
 function capMarkdown(content: string, appendix: string, byteLimit: number): string {
