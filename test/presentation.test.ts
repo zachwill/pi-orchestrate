@@ -43,11 +43,13 @@ function renderResult(details: unknown, expanded: boolean, width: number, conten
 
 describe("per-worker result messages", () => {
   test.each([
-    ["completed", "✓ completed"], ["ready", "✓ response complete"], ["failed", "✗ failed"], ["aborted", "■ aborted"],
+    ["completed", "✓ scout · Inspect code · 5s"],
+    ["ready", "✓ scout · Inspect code · 5s"],
+    ["failed", "✗ scout · Inspect code · 5s"],
+    ["aborted", "■ scout · Inspect code · aborted · 5s"],
   ] as const)("renders truthful %s styling", (status, heading) => {
     const output = Bun.stripANSI(renderResult(settlement(status), false, 80).join("\n"));
     expect(output).toContain(heading);
-    expect(output).toContain("scout · Inspect code · 5s");
     expect(output).toContain("to expand");
     if (status === "failed" || status === "aborted") expect(output).not.toContain("✓");
   });
@@ -87,14 +89,14 @@ describe("per-worker result messages", () => {
     ]) {
       const output = Bun.stripANSI(renderResult(details, false, 80).join("\n"));
       expect(output).toContain("details unavailable");
-      expect(output).not.toContain("✓ completed");
+      expect(output).not.toContain("✓ scout · Inspect code");
     }
   });
 
   test("uses explicit startup failure stage and keeps ordinary zero-turn failures truthful", () => {
     const ordinary = { ...settlement("failed"), usage: { ...usage, turns: 0 }, sessionFile: undefined };
-    expect(Bun.stripANSI(renderResult(ordinary, false, 80).join("\n"))).toContain("✗ failed");
-    expect(Bun.stripANSI(renderResult({ ...ordinary, failureStage: "startup" }, false, 80).join("\n"))).toContain("✗ could not start");
+    expect(Bun.stripANSI(renderResult(ordinary, false, 80).join("\n"))).toContain("✗ scout · Inspect code · 5s");
+    expect(Bun.stripANSI(renderResult({ ...ordinary, failureStage: "startup" }, false, 80).join("\n"))).toContain("✗ scout · Inspect code · could not start · 5s");
   });
 
   test("keeps every line width-safe down to one column", () => {
@@ -108,12 +110,12 @@ describe("per-worker result messages", () => {
     let marker = "old";
     const mutableTheme = { ...theme, fg: (_: string, text: string) => `${marker}:${text}` } as Theme;
     const component = renderer()({ role: "custom", customType: "pi-orchestrate-worker-result", content: "fallback", display: true, details: settlement(), timestamp: 1 }, { expanded: false }, mutableTheme)!;
-    expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("old:✓ completed");
+    expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("old:✓ scout · Inspect code · 5s");
     marker = "new";
     component.invalidate();
     const refreshed = Bun.stripANSI(component.render(80).join("\n"));
-    expect(refreshed).toContain("new:✓ completed");
-    expect(refreshed).not.toContain("old:✓ completed");
+    expect(refreshed).toContain("new:✓ scout · Inspect code · 5s");
+    expect(refreshed).not.toContain("old:✓ scout · Inspect code · 5s");
   });
 });
 

@@ -302,8 +302,13 @@ export class WorkerResultComponent implements Component {
 
     const color = details.status === "failed" ? "error" : details.status === "aborted" ? "warning" : "success";
     const elapsed = elapsedBetween(details.startedAt, details.settledAt);
-    box.addChild(new Text(this.theme.fg(color, this.theme.bold(`${statusIcon(details)} ${statusHeading(details)}`)), 0, 0));
-    box.addChild(new Text(this.theme.fg("muted", `${details.worker} · ${details.title}${elapsed ? ` · ${elapsed}` : ""}`), 0, 0));
+    const status = details.status === "aborted"
+      ? " · aborted"
+      : details.status === "failed" && details.failureStage === "startup"
+        ? " · could not start"
+        : "";
+    const header = `${statusIcon(details)} ${details.worker} · ${details.title}${status}${elapsed ? ` · ${elapsed}` : ""}`;
+    box.addChild(new Text(this.theme.fg(color, this.theme.bold(header)), 0, 0));
     box.addChild(new Spacer(1));
     box.addChild(new WidthBoundComponent(new Markdown(outcomeText(details.outcome), 0, 0, getMarkdownTheme()), this.expanded ? undefined : MAX_RESULT_PREVIEW_LINES));
     if (!this.expanded) {
