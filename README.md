@@ -80,6 +80,7 @@ Frontmatter supports these fields:
 - `tools` and `lifecycle` are required. Grant the smallest useful tool set.
 - `model` is optional. When omitted, the worker inherits the parent model active when dispatched.
 - `thinking`, `skills`, and `compaction` are optional.
+- Omitted `skills` uses Pi's normal discovered skills. A nonempty `skills` list is an exact name allowlist, and `skills: []` disables skills.
 - `lifecycle` must be exactly `one-shot` or `reusable`.
 - The Markdown body must be nonempty.
 
@@ -92,5 +93,7 @@ Use one-shot workers for bounded investigation, review, and implementation. Use 
 ## Isolation, trust, and writes
 
 Worker sessions are isolated from the parent's conversational context, but they run in-process and are not sandboxes. They share the parent process's filesystem and environment permissions. Treat worker prompts, optional skills, models, and tool grants as trusted code.
+
+Workers use regular persisted Pi global settings, authentication, packages, extensions, skills, and context. Trusted projects also contribute their project settings and resources; untrusted projects do not. Extensions are active in print mode for the complete worker lifecycle, including resource discovery and provider request hooks. Pi Orchestrate excludes its own package before child extension factories execute, so workers remain direct children while other configured extensions—including provider integrations such as `@benvargas/pi-claude-code-use`—load normally. Worker definitions still provide the exact bounded tool allowlist.
 
 Pi Orchestrate performs no automatic filesystem writes. A worker writes only when its instructions and granted tools cause it to do so. Parallel workers must have non-overlapping write scopes, and the parent must inspect and verify their changes.

@@ -521,7 +521,7 @@ function catalogWorkerDetails(worker: WorkerDefinition) {
       file_path: worker.source.filePath,
     },
     tools: [...worker.tools],
-    skills: [...worker.skills],
+    skills: worker.skills === undefined ? undefined : [...worker.skills],
     model: worker.model
       ? { provider: worker.model.provider, model_id: worker.model.modelId }
       : undefined,

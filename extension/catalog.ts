@@ -21,9 +21,15 @@ const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "ma
 const RequiredText = Schema.Trim.check(Schema.isNonEmpty());
 const StringListInput = Schema.Union([Schema.String, Schema.Array(Schema.String)]);
 
-function commaList<Item extends Schema.Constraint & { readonly Encoded: string }>(item: Item) {
+function commaList<Item extends Schema.Constraint & { readonly Encoded: string }>(
+  item: Item,
+  allowEmpty = false,
+) {
+  const items = allowEmpty
+    ? Schema.Array(item)
+    : Schema.Array(item).check(Schema.isMinLength(1));
   return StringListInput.pipe(
-    Schema.decodeTo(Schema.Array(item).check(Schema.isMinLength(1)), {
+    Schema.decodeTo(items, {
       decode: SchemaGetter.transform((value) =>
         typeof value === "string" ? value.split(",").map((entry) => entry.trim()) : value,
       ),
@@ -64,7 +70,7 @@ const WorkerFrontmatter = Schema.Struct({
   model: Schema.optionalKey(ModelCoordinate),
   thinking: Schema.optionalKey(ThinkingLevel),
   tools: commaList(Schema.Literals(SUPPORTED_TOOL_NAMES)),
-  skills: Schema.optionalKey(commaList(Schema.NonEmptyString)),
+  skills: Schema.optionalKey(commaList(Schema.NonEmptyString, true)),
   compaction: Schema.optionalKey(Compaction),
   lifecycle: Schema.Literals(["one-shot", "reusable"]),
 });
@@ -222,7 +228,7 @@ function schemaDiagnostic(error: Schema.SchemaError, frontmatter: unknown): stri
     return "frontmatter field 'tools' must be a non-empty comma string or string array";
   }
   if (field === "skills") {
-    return "frontmatter field 'skills' must be a non-empty comma string or string array";
+    return "frontmatter field 'skills' must be a comma string or string array";
   }
   if (field === "compaction") {
     if (compactionFields.length > 0) {
@@ -272,7 +278,6 @@ function parseWorker(
 
   return {
     ...worker,
-    skills: worker.skills ?? [],
     systemPrompt: body,
     source: { kind: source, filePath },
   };

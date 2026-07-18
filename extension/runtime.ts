@@ -1259,7 +1259,12 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
   private disposeSession(session: WorkerSessionHandle): void {
     if (this.disposedSessions.has(session)) return;
     this.disposedSessions.add(session);
-    safelyCall(() => session.dispose());
+
+    try {
+      this.trackCleanup(session.dispose());
+    } catch {
+      // Cleanup is best-effort and cannot leave lifecycle state unsettled.
+    }
   }
 
   private trackCleanup(operation: Promise<void>): Promise<void> {

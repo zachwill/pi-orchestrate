@@ -257,6 +257,25 @@ prompt`,
     );
   });
 
+  test("distinguishes omitted, explicit empty, and nonempty skill selection", () => {
+    const fs = new FakeFileSystem();
+    fs.addDirectory(packageDirectory, {
+      "omitted.md": definition("omitted", "prompt"),
+      "empty.md": definition("empty", "prompt", "skills: []\n"),
+      "selected.md": definition("selected", "prompt", "skills: [alpha, beta]\n"),
+    });
+    fs.addDirectory(userDirectory, {});
+
+    const catalog = createWorkerCatalogDiscovery(fs)(options(false));
+
+    expect(catalog.diagnostics).toEqual([]);
+    expect(workers(catalog).map(({ name, skills }) => ({ name, skills }))).toEqual([
+      { name: "empty", skills: [] },
+      { name: "omitted", skills: undefined },
+      { name: "selected", skills: ["alpha", "beta"] },
+    ]);
+  });
+
   test("allows a worker to inherit the parent model", () => {
     const fs = new FakeFileSystem();
     fs.addDirectory(packageDirectory, {

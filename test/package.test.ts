@@ -195,6 +195,10 @@ describe("published documentation", () => {
     expect(readme).toMatch(/inherit the parent model active at dispatch/i);
     expect(readme).toMatch(/user and trusted project overrides are the model-specialization points/i);
     expect(readme).toMatch(/`thinking`, `skills`, and `compaction` are optional/i);
+    expect(readme).toMatch(/omitted `skills` uses Pi's normal discovered skills/i);
+    expect(readme).toMatch(/`skills: \[\]` disables skills/i);
+    expect(readme).toMatch(/excludes its own package before child extension factories execute/i);
+    expect(readme).toContain("@benvargas/pi-claude-code-use");
     expect(readme).toMatch(/create a Markdown definition manually/i);
     expect(readme).not.toMatch(/cp\s+examples\/workers/i);
     expect(readme).toMatch(/only after Pi trusts the project/i);

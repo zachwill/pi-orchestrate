@@ -13,6 +13,7 @@ import {
   DefaultResourceLoader,
   ModelRegistry,
   ModelRuntime,
+  SessionManager,
   type AgentSessionEvent,
   type ResourceLoader,
   SettingsManager,
@@ -21,6 +22,7 @@ import {
 import type { WorkerDefinition } from "../extension/domain.js";
 import {
   createWorkerSessionFactory,
+  isOrchestrationExtensionPath,
   WorkerAgentSessionAcquisitionError,
   type WorkerSessionDependencies,
   type WorkerSessionFactoryOptions,
@@ -110,6 +112,7 @@ class FakeSession {
   readonly prompt = mock(async (_task: string) => {});
   readonly abort = mock(async () => {});
   readonly dispose = mock(() => {});
+  readonly bindExtensions = mock(async (_bindings: { mode: "print" }) => {});
 
   private readonly listeners = new Set<(event: AgentSessionEvent) => void>();
   readonly unsubscribe = mock(() => {});
@@ -270,28 +273,73 @@ function harness(
     extendResources: () => {},
   } as unknown as ResourceLoader;
 
-  const dependencies: WorkerSessionDependencies = {
-    createResourceLoader(options) {
-      loaderOptions.push(options);
-      return loader;
+  const dependencies = {
+    createSettingsManager(input: {
+      cwd: string;
+      agentDir: string;
+      projectTrusted: boolean;
+      compaction: WorkerDefinition["compaction"];
+    }) {
+      settingsInputs.push({
+        settings: input.compaction === undefined
+          ? undefined
+          : { compaction: { ...input.compaction } },
+        options: { projectTrusted: input.projectTrusted },
+      });
+      return { kind: "settings-manager" } as unknown as SettingsManager;
     },
-    createSessionManager(input) {
+    async resolveExtensionPaths() {
+      return [];
+    },
+    createSessionManager(input: SessionManagerInput) {
       sessionManagerInputs.push(input);
       return { kind: "session-manager", entries: [] };
     },
-    createSettingsManager(settings, settingsOptions) {
-      settingsInputs.push({ settings, options: settingsOptions });
-      return { kind: "settings-manager" };
-    },
-    async createModelRuntime(input) {
+    async createModelRuntime(input: ModelRuntimeInput) {
       modelRuntimeInputs.push(input);
       return runtime as unknown as ModelRuntime;
     },
-    async createAgentSession(input) {
-      agentInputs.push(input);
+    async createServices(input: {
+      cwd: string;
+      agentDir: string;
+      settingsManager: SettingsManager;
+      modelRuntime: ModelRuntime;
+      resourceLoaderOptions: ResourceLoaderInput;
+    }) {
+      loaderOptions.push(input.resourceLoaderOptions);
+      try {
+        await loader.reload();
+      } catch (error) {
+        loader.dispose();
+        throw error;
+      }
+      return {
+        cwd: input.cwd,
+        agentDir: input.agentDir,
+        settingsManager: input.settingsManager,
+        modelRuntime: input.modelRuntime,
+        resourceLoader: loader,
+        diagnostics: [],
+      };
+    },
+    async createAgentSession(input: AgentSessionInput) {
+      agentInputs.push({
+        ...input,
+        modelRuntime: input.services.modelRuntime,
+        resourceLoader: input.services.resourceLoader,
+        settingsManager: input.services.settingsManager,
+      } as unknown as AgentSessionInput);
       return { session };
     },
-  };
+    createRuntime(input: { session: FakeSession }) {
+      return {
+        session: input.session,
+        async dispose() {
+          input.session.dispose();
+        },
+      };
+    },
+  } as unknown as WorkerSessionDependencies;
 
   return {
     session,
@@ -361,15 +409,15 @@ describe("worker session factory", () => {
     await factory.create(factoryOptions);
 
     expect(h.reload).toHaveBeenCalledTimes(1);
+    expect(h.session.bindExtensions).toHaveBeenCalledTimes(1);
+    expect(h.session.bindExtensions).toHaveBeenCalledWith({ mode: "print" });
     const loader = h.loaderOptions[0]!;
     expect(loader).toMatchObject({
-      cwd: "/project",
-      agentDir: "/agent",
+      additionalExtensionPaths: [],
       noExtensions: true,
       noSkills: false,
       noPromptTemplates: true,
       noThemes: true,
-      noContextFiles: false,
     });
     expect(loader.appendSystemPrompt[0]).toBe("Worker system prompt.");
     expect(loader.appendSystemPrompt[1]).toContain("direct child worker session");
@@ -403,6 +451,162 @@ describe("worker session factory", () => {
     expect("modelRegistry" in h.agentInputs[0]!).toBe(false);
   });
 
+  test("loads extension-contributed skills before validating an exact allowlist", async () => {
+    const loadedSkills = ["alpha"];
+    const h = harness(new FakeSession(), loadedSkills);
+    h.session.bindExtensions.mockImplementation(async () => {
+      loadedSkills.push("beta");
+    });
+
+    await createWorkerSessionFactory(h.dependencies).create(options());
+
+    expect(h.session.bindExtensions).toHaveBeenCalledTimes(1);
+  });
+
+  test("leaves normal skill discovery unfiltered when skills are omitted", async () => {
+    const h = harness();
+    await createWorkerSessionFactory(h.dependencies).create(
+      options({ definition: definition({ skills: undefined }) }),
+    );
+
+    expect(h.loaderOptions[0]!.noSkills).toBeUndefined();
+    expect(h.loaderOptions[0]!.skillsOverride).toBeUndefined();
+  });
+
+  test("filters pi-orchestrate paths before the resource loader can execute factories", async () => {
+    const h = harness();
+    h.dependencies.resolveExtensionPaths = async () => [
+      join(import.meta.dir, "..", "extension", "index.ts"),
+      "/configured/other-extension.ts",
+    ];
+
+    await createWorkerSessionFactory(h.dependencies).create(options());
+
+    expect(isOrchestrationExtensionPath(join(import.meta.dir, "..", "extension", "index.ts")))
+      .toBe(true);
+    expect(h.loaderOptions[0]!.additionalExtensionPaths).toEqual([
+      "/configured/other-extension.ts",
+    ]);
+  });
+
+  test("runs configured extension request hooks and shuts extensions down exactly once", async () => {
+    const root = await mkdtemp(join(tmpdir(), "pi-orchestrate-extension-lifecycle-"));
+    const agentDir = join(root, "agent");
+    const cwd = join(root, "project");
+    const extensionPath = join(root, "request-hook.js");
+    const stateKey = `__pi_orchestrate_extension_${crypto.randomUUID().replaceAll("-", "_")}`;
+    const state = { factories: 0, starts: 0, requests: 0, shutdowns: 0 };
+    const observedPayloads: unknown[] = [];
+    Object.assign(globalThis, { [stateKey]: state });
+
+    try {
+      await mkdir(agentDir, { recursive: true });
+      await mkdir(cwd, { recursive: true });
+      await Bun.write(
+        extensionPath,
+        `export default function requestHook(pi) {
+  const state = globalThis[${JSON.stringify(stateKey)}];
+  state.factories += 1;
+  pi.on("session_start", () => { state.starts += 1; });
+  pi.on("before_provider_request", (event) => {
+    state.requests += 1;
+    return { ...event.payload, transformedByExtension: true };
+  });
+  pi.on("session_shutdown", () => { state.shutdowns += 1; });
+}\n`,
+      );
+      await Bun.write(
+        join(agentDir, "settings.json"),
+        JSON.stringify({ extensions: [extensionPath] }),
+      );
+
+      const providerId = "extension-lifecycle";
+      const modelId = "extension-lifecycle-model";
+      const providerConfig: ProviderConfig = {
+        api: "openai-responses",
+        baseUrl: "memory://extension-lifecycle",
+        apiKey: "test-key",
+        models: [{
+          id: modelId,
+          name: "Extension Lifecycle Model",
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 10_000,
+          maxTokens: 1_000,
+        }],
+        streamSimple(selectedModel, _context, streamOptions) {
+          const stream = createAssistantMessageEventStream();
+          void (async () => {
+            const initialPayload = { source: "worker-provider" };
+            const payload = await streamOptions?.onPayload?.(initialPayload, selectedModel) ?? initialPayload;
+            observedPayloads.push(payload);
+            const output: AssistantMessage = {
+              role: "assistant",
+              content: [{ type: "text", text: "extension response" }],
+              api: selectedModel.api,
+              provider: selectedModel.provider,
+              model: selectedModel.id,
+              stopReason: "stop",
+              timestamp: Date.now(),
+              usage: {
+                input: 1,
+                output: 1,
+                cacheRead: 0,
+                cacheWrite: 0,
+                totalTokens: 2,
+                cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+              },
+            };
+            stream.push({ type: "start", partial: output });
+            stream.push({ type: "done", reason: "stop", message: output });
+            stream.end(output);
+          })();
+          return stream;
+        },
+      };
+      const parentRuntime = await ModelRuntime.create({
+        authPath: join(root, "parent-auth.json"),
+        modelsPath: null,
+        allowModelNetwork: false,
+      });
+      parentRuntime.registerProvider(providerId, providerConfig);
+      await parentRuntime.refresh({ allowNetwork: false });
+      const parentModel = parentRuntime.getModel(providerId, modelId)!;
+      const factory = createWorkerSessionFactory({
+        createSessionManager: ({ cwd: sessionCwd, parentSessionFile }) =>
+          SessionManager.create(sessionCwd, join(root, "sessions"), {
+            parentSession: parentSessionFile,
+          }),
+      });
+      const handle = await factory.create(options({
+        cwd,
+        agentDir,
+        parentSessionFile: undefined,
+        parentModel,
+        modelRegistry: new ModelRegistry(parentRuntime),
+        definition: definition({ skills: undefined }),
+      }));
+
+      expect(state).toEqual({ factories: 1, starts: 1, requests: 0, shutdowns: 0 });
+      expect(await handle.prompt("exercise the configured extension")).toEqual({
+        status: "completed",
+        assistantText: "extension response",
+      });
+      expect(observedPayloads).toEqual([{
+        source: "worker-provider",
+        transformedByExtension: true,
+      }]);
+      expect(state.requests).toBe(1);
+
+      await Promise.all([handle.dispose(), handle.dispose()]);
+      expect(state.shutdowns).toBe(1);
+    } finally {
+      Reflect.deleteProperty(globalThis, stateKey);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   test("loads no skills when none are selected and excludes context in untrusted projects", async () => {
     const h = harness();
     await createWorkerSessionFactory(h.dependencies).create(
@@ -410,7 +614,8 @@ describe("worker session factory", () => {
     );
 
     expect(h.settingsInputs[0]!.options).toEqual({ projectTrusted: false });
-    expect(h.loaderOptions[0]).toMatchObject({ noSkills: true, noContextFiles: true });
+    expect(h.loaderOptions[0]).toMatchObject({ noSkills: true });
+    expect(h.loaderOptions[0]!.agentsFilesOverride).toBeFunction();
     const filtered = h.loaderOptions[0]!.skillsOverride!({
       skills: [skill("alpha")],
       diagnostics: [],
@@ -486,7 +691,7 @@ describe("worker session factory", () => {
         }),
       ),
     ).rejects.toThrow('configured model "provider/missing" was not found');
-    expect(missingHarness.loaderOptions).toHaveLength(0);
+    expect(missingHarness.loaderOptions).toHaveLength(1);
     expect(missingHarness.agentInputs).toHaveLength(0);
   });
 
@@ -658,7 +863,7 @@ describe("worker session factory", () => {
       }]);
       expect(refreshNetworkModes.length).toBeGreaterThan(0);
       expect(refreshNetworkModes.every((allowNetwork) => allowNetwork === false)).toBe(true);
-      handle.dispose();
+      await handle.dispose();
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -703,8 +908,8 @@ describe("worker session factory", () => {
 
     expect(h.reload).toHaveBeenCalledTimes(1);
     expect(h.loaderDispose).toHaveBeenCalledTimes(1);
-    expect(h.sessionManagerInputs).toHaveLength(0);
-    expect(h.agentInputs).toHaveLength(0);
+    expect(h.sessionManagerInputs).toHaveLength(1);
+    expect(h.agentInputs).toHaveLength(1);
   });
 
   test("propagates trust to a real loader and excludes untrusted project context and skills", async () => {
@@ -733,24 +938,47 @@ describe("worker session factory", () => {
       const runtime = new FakeModelRuntime([model("parent", "selected")]);
       const sessions: FakeSession[] = [];
       const loaders: DefaultResourceLoader[] = [];
-      const dependencies: WorkerSessionDependencies = {
-        createResourceLoader(loaderOptions) {
-          const loader = new DefaultResourceLoader(loaderOptions);
-          loaders.push(loader);
-          return loader;
+      const dependencies = {
+        createSettingsManager(input: { projectTrusted: boolean; compaction: WorkerDefinition["compaction"] }) {
+          const settings = input.compaction === undefined
+            ? undefined
+            : { compaction: { ...input.compaction } };
+          return SettingsManager.inMemory(settings, { projectTrusted: input.projectTrusted });
+        },
+        async resolveExtensionPaths() {
+          return [];
         },
         createSessionManager: () => ({ entries: [] }),
-        createSettingsManager: (settings, settingsOptions) =>
-          SettingsManager.inMemory(settings, {
-            projectTrusted: settingsOptions.projectTrusted,
-          }),
         createModelRuntime: async () => runtime as unknown as ModelRuntime,
+        async createServices(input: {
+          cwd: string;
+          agentDir: string;
+          settingsManager: SettingsManager;
+          modelRuntime: ModelRuntime;
+          resourceLoaderOptions: ResourceLoaderInput;
+        }) {
+          const loader = new DefaultResourceLoader({
+            cwd: input.cwd,
+            agentDir: input.agentDir,
+            settingsManager: input.settingsManager,
+            ...input.resourceLoaderOptions,
+          });
+          loaders.push(loader);
+          await loader.reload();
+          return { ...input, resourceLoader: loader, diagnostics: [] };
+        },
         createAgentSession: async () => {
           const session = new FakeSession();
           sessions.push(session);
           return { session };
         },
-      };
+        createRuntime(input: { session: FakeSession }) {
+          return {
+            session: input.session,
+            async dispose() { input.session.dispose(); },
+          };
+        },
+      } as unknown as WorkerSessionDependencies;
       const factory = createWorkerSessionFactory(dependencies);
       const selectedDefinition = definition({
         skills: ["trust-shared", "ancestor-skill"],
@@ -767,7 +995,9 @@ describe("worker session factory", () => {
         "trust-shared",
       ]);
       expect(loaders[0]!.getSkills().skills[0]!.filePath).toBe(globalShared);
-      expect(loaders[0]!.getAgentsFiles().agentsFiles).toEqual([]);
+      expect(loaders[0]!.getAgentsFiles().agentsFiles.map((file) => file.path)).toEqual([
+        join(agentDir, "AGENTS.md"),
+      ]);
 
       const handle = await factory.create(options({
         cwd,
@@ -787,7 +1017,7 @@ describe("worker session factory", () => {
       expect(loaders[1]!.getAgentsFiles().agentsFiles.map((file) => file.path)).toEqual(
         expect.arrayContaining([join(projectRoot, "AGENTS.md"), join(cwd, "AGENTS.md")]),
       );
-      handle.dispose();
+      await handle.dispose();
       expect(sessions[0]!.dispose).toHaveBeenCalledTimes(1);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -812,6 +1042,16 @@ describe("worker session factory", () => {
       createWorkerSessionFactory(creationFailure.dependencies).create(options()),
     ).rejects.toThrow("session failed");
     expect(creationFailure.loaderDispose).toHaveBeenCalledTimes(1);
+
+    const runtimeFailure = harness();
+    runtimeFailure.dependencies.createRuntime = () => {
+      throw new Error("runtime failed");
+    };
+    await expect(
+      createWorkerSessionFactory(runtimeFailure.dependencies).create(options()),
+    ).rejects.toThrow("runtime failed");
+    expect(runtimeFailure.session.dispose).toHaveBeenCalledTimes(1);
+    expect(runtimeFailure.loaderDispose).toHaveBeenCalledTimes(1);
 
     const noDurability = harness(new FakeSession(""));
     await expect(
@@ -1059,7 +1299,7 @@ describe("worker session handle", () => {
     expect(updates).toEqual(["read", undefined]);
 
     h.session.startTool("find-1", "find");
-    handle.dispose();
+    await handle.dispose();
     h.session.endTool("find-1", "find");
     h.session.startTool("after-dispose", "write");
     expect(updates).toEqual(["read", undefined, "find"]);
@@ -1080,7 +1320,7 @@ describe("worker session handle", () => {
       throw new Error("session dispose failed");
     });
 
-    expect(() => handle.dispose()).not.toThrow();
+    await expect(handle.dispose()).resolves.toBeUndefined();
     h.session.startTool("after-dispose", "read");
 
     expect(activityUpdates).toEqual([]);
@@ -1103,8 +1343,7 @@ describe("worker session handle", () => {
     await abort;
     expect(abortSettled).toBe(true);
 
-    handle.dispose();
-    handle.dispose();
+    await Promise.all([handle.dispose(), handle.dispose()]);
     expect(h.session.unsubscribe).toHaveBeenCalledTimes(1);
     expect(h.session.dispose).toHaveBeenCalledTimes(1);
     expect(h.loaderDispose).toHaveBeenCalledTimes(1);

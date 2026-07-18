@@ -64,6 +64,30 @@ describe("per-worker result messages", () => {
     expect(output).toContain("session /sessions/worker.jsonl");
   });
 
+  test("renders a leading completion heading as an explicit success state", () => {
+    const colorTheme = {
+      ...theme,
+      fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
+    } as Theme;
+    const component = renderer()(
+      {
+        role: "custom",
+        customType: "pi-orchestrate-worker-result",
+        content: "fallback",
+        display: true,
+        details: settlement("completed", "## Completed\n\nChanged the worker bootstrap."),
+        timestamp: 1,
+      },
+      { expanded: true },
+      colorTheme,
+    )!;
+    const output = Bun.stripANSI(component.render(80).join("\n"));
+
+    expect(output).toContain("<success>✓ Completed</success>");
+    expect(output).toContain("Changed the worker bootstrap.");
+    expect(output).not.toContain("## Completed");
+  });
+
   test("caps collapsed content by rendered visual height and safely falls back", () => {
     const long = "word ".repeat(1000);
     const collapsed = renderResult(settlement("completed", long), false, 32);

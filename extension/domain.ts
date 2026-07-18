@@ -45,7 +45,7 @@ export interface WorkerDefinition {
   readonly systemPrompt: string;
   readonly lifecycle: WorkerLifecycle;
   readonly tools: readonly SupportedToolName[];
-  readonly skills: readonly string[];
+  readonly skills?: readonly string[];
   readonly model?: WorkerModel;
   readonly thinking?: ThinkingLevel;
   readonly compaction?: WorkerCompaction;

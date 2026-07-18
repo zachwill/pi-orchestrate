@@ -379,9 +379,19 @@ export class WorkerResultComponent implements Component {
         ? " · could not start"
         : "";
     const header = `${statusIcon(details)} ${details.worker} · ${details.title}${status}${elapsed ? ` · ${elapsed}` : ""}`;
+    const outcome = presentedOutcome(details);
     box.addChild(new Text(this.theme.fg(color, this.theme.bold(header)), 0, 0));
     box.addChild(new Spacer(1));
-    box.addChild(new WidthBoundComponent(new Markdown(outcomeText(details.outcome), 0, 0, getMarkdownTheme()), this.expanded ? undefined : MAX_RESULT_PREVIEW_LINES));
+    if (outcome.heading) {
+      box.addChild(new Text(this.theme.fg("success", this.theme.bold(outcome.heading)), 0, 0));
+      if (outcome.body) box.addChild(new Spacer(1));
+    }
+    if (outcome.body) {
+      box.addChild(new WidthBoundComponent(
+        new Markdown(outcome.body, 0, 0, getMarkdownTheme()),
+        this.expanded ? undefined : MAX_RESULT_PREVIEW_LINES,
+      ));
+    }
     if (!this.expanded) {
       box.addChild(new Spacer(1));
       box.addChild(new Text(this.theme.fg("dim", keyHint("app.tools.expand", "to expand")), 0, 0));
@@ -418,6 +428,24 @@ function outcomeText(outcome: WorkerOutcome): string {
   if (outcome.status === "failed") return outcome.assistantText ? `${outcome.message}\n\n${outcome.assistantText}` : outcome.message;
   if (outcome.status === "aborted") return [outcome.message || "Worker was aborted.", outcome.assistantText].filter(Boolean).join("\n\n");
   return "Worker session closed.";
+}
+
+function presentedOutcome(result: SafeSettlement): { heading?: string; body: string } {
+  const body = outcomeText(result.outcome);
+  if (result.status !== "completed" && result.status !== "ready") return { body };
+
+  const lines = body.split("\n");
+  const headingIndex = lines.findIndex((line) => line.trim() !== "");
+  if (headingIndex < 0 || !/^#{1,6}\s+(?:completed|complete|done)\s*#*\s*$/i.test(lines[headingIndex]!)) {
+    return { body };
+  }
+
+  lines.splice(headingIndex, 1);
+  while (lines[headingIndex]?.trim() === "") lines.splice(headingIndex, 1);
+  return {
+    heading: result.status === "ready" ? "✓ Response complete" : "✓ Completed",
+    body: lines.join("\n").trimEnd(),
+  };
 }
 
 function settlementMetadata(result: SafeSettlement): string[] {
