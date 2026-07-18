@@ -110,7 +110,7 @@ export function formatWorkerUsage(usage: Partial<WorkerUsage> | undefined): stri
 }
 
 export function formatWorkerStatusLine(worker: WorkerRecord): string {
-  return `${worker.worker} → ${worker.title} · ${workerStateLabel(worker)} · ${compactLiveUsage(worker.usage)}`;
+  return `${worker.worker} → ${worker.title} · ${workerStateLabel(worker)} · ${formatTurnMarker(worker)} · ${formatCompactNumber(numberOrZero(worker.usage?.contextTokens))} ctx`;
 }
 
 export function formatFooterStatus(snapshot: RuntimeSnapshot): string | undefined {
@@ -266,7 +266,7 @@ export class WorkerStatusComponent implements Component {
       animation.color,
       animation.frames[this.frameIndex % animation.frames.length] ?? animation.frames[0],
     );
-    const turns = `${numberOrZero(worker.usage?.turns)}t`;
+    const turns = formatTurnMarker(worker);
     const context = `${formatCompactNumber(numberOrZero(worker.usage?.contextTokens))} ctx`;
     const suffixFields = width >= 28 ? [turns, context] : width >= 12 ? [turns] : [];
     const requiredWidth = (fields: readonly string[]) => visibleWidth(`⠋  · ${fields.join(" · ")}`) + 10;
@@ -466,8 +466,9 @@ function workerStateLabel(worker: Pick<WorkerRecord, "status" | "activity">): st
   return TOOL_ACTIVITY[worker.activity] ?? worker.activity;
 }
 
-function compactLiveUsage(usage: Partial<WorkerUsage> | undefined): string {
-  return `${numberOrZero(usage?.turns)}t · ${formatCompactNumber(numberOrZero(usage?.contextTokens))} ctx`;
+function formatTurnMarker(worker: Pick<WorkerRecord, "turnDirection" | "usage">): string {
+  const direction = worker.turnDirection === "down" ? "↓" : "↑";
+  return `${numberOrZero(worker.usage?.turns)}${direction}`;
 }
 function elapsedBetween(start?: number, end?: number): string | undefined {
   return start !== undefined && end !== undefined && end >= start ? formatElapsed(end - start) : undefined;

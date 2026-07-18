@@ -19,7 +19,7 @@ const theme = { fg: (_: string, text: string) => text, bg: (_: string, text: str
 const usage = { input: 1200, output: 345, cacheRead: 12, cacheWrite: 3, cost: 0.0123, contextTokens: 12345, turns: 2 };
 
 function worker(id: string, status: WorkerStatus, overrides: Partial<WorkerRecord> = {}): WorkerRecord {
-  return { id, worker: "scout", ownerSessionId: "owner", waveId: "wave", title: `Task ${id}`, instructions: "Do it", lifecycle: status === "ready" ? "reusable" : "one-shot", status, usage, startedAt: Date.now() - 78_000, ...overrides } as WorkerRecord;
+  return { id, worker: "scout", ownerSessionId: "owner", waveId: "wave", title: `Task ${id}`, instructions: "Do it", lifecycle: status === "ready" ? "reusable" : "one-shot", status, usage, turnDirection: status === "starting" ? "up" : "down", startedAt: Date.now() - 78_000, ...overrides } as WorkerRecord;
 }
 function snapshot(workers: readonly WorkerRecord[]): RuntimeSnapshot {
   return { workers, waves: [{ id: "wave", ownerSessionId: "owner", workerIds: workers.map((item) => item.id), mode: "async", state: "running", createdAt: Date.now() - 78_000 }] } as RuntimeSnapshot;
@@ -128,7 +128,7 @@ describe("active widget", () => {
     for (const width of [120, 80, 50, 42, 32]) {
       const row = Bun.stripANSI(component.render(width)[1]!);
       expect(visibleWidth(row)).toBeLessThanOrEqual(width);
-      expect(row).toContain("2t");
+      expect(row).toContain("2↓");
       expect(row).toContain("12.3k ctx");
       expect(row).toContain("A very");
       if (width >= 72) expect(row).toContain("scout →");
@@ -143,8 +143,20 @@ describe("active widget", () => {
     const row = Bun.stripANSI(component.render(80)[1]!);
     expect(row).not.toContain("working");
     expect(row).not.toContain("running command");
-    expect(row).toContain("2t");
+    expect(row).toContain("2↓");
     expect(row).toContain("12.3k ctx");
+    component.dispose();
+  });
+
+  test("renders turn count with the latest message direction", () => {
+    const component = new WorkerStatusComponent(snapshot([
+      worker("receiving", "running", { usage: { ...usage, turns: 2 }, turnDirection: "down" }),
+      worker("sending", "running", { usage: { ...usage, turns: 7 }, turnDirection: "up" }),
+    ]), theme);
+    const output = Bun.stripANSI(component.render(80).join("\n"));
+    expect(output).toContain("2↓");
+    expect(output).toContain("7↑");
+    expect(output).not.toMatch(/\d+t\b/);
     component.dispose();
   });
 
@@ -168,9 +180,9 @@ describe("active widget", () => {
       const output = Bun.stripANSI(component.render(width).join("\n"));
       expect(output).toContain("Workers · 2 active · 1m 18s");
       expect(output).toContain("Task run");
-      expect(output).toContain("2t");
+      expect(output).toContain("2↓");
       expect(output).toContain("Task start");
-      expect(output).toContain("0t");
+      expect(output).toContain("0↑");
       expect(output).not.toContain("Task done");
       expect(output).not.toContain("Task ready");
       expect(component.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);

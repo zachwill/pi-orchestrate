@@ -126,6 +126,10 @@ class FakeSession {
     };
   }
 
+  startMessage(message: AgentMessage): void {
+    this.emit({ type: "message_start", message });
+  }
+
   finishTurn(message: AssistantMessage): void {
     this.messages.push(message);
     const event: Extract<AgentSessionEvent, { type: "turn_end" }> = {
@@ -886,6 +890,29 @@ describe("worker session handle", () => {
     expect(await prompt).toEqual({ status: "aborted", message: "cancelled" });
   });
 
+  test("tracks turn count and the latest message direction as messages cross the model boundary", async () => {
+    const h = harness();
+    const first = assistant("one");
+    const second = assistant("two");
+    h.session.prompt.mockImplementation(async () => {
+      h.session.startMessage(first);
+      h.session.finishTurn(first);
+      h.session.startMessage({ role: "toolResult" } as AgentMessage);
+      h.session.startMessage(second);
+      h.session.finishTurn(second);
+    });
+    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+    const turns: number[] = [];
+    const directions: string[] = [];
+    handle.subscribeUsage((current) => turns.push(current.turns));
+    handle.subscribeTurnDirection((direction) => directions.push(direction));
+
+    await handle.prompt("task");
+
+    expect(turns).toEqual([1, 1, 2, 2]);
+    expect(directions).toEqual(["up", "down", "up", "down"]);
+  });
+
   test("accumulates turn usage and removes usage subscriptions", async () => {
     const h = harness();
     const handle = await createWorkerSessionFactory(h.dependencies).create(options());
@@ -954,6 +981,9 @@ describe("worker session handle", () => {
       throw new Error("activity listener failed");
     });
     handle.subscribeActivity((activity) => activityUpdates.push(activity));
+    handle.subscribeTurnDirection(() => {
+      throw new Error("turn direction listener failed");
+    });
 
     h.session.finishTurn(assistant("one"));
     h.session.startTool("call-1", "read");

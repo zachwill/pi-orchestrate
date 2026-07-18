@@ -11,6 +11,7 @@ import {
   type WorkerDefinition,
   type WorkerId,
   type WorkerOutcome,
+  type WorkerTurnDirection,
   type WorkerUsage,
 } from "../extension/domain.ts";
 import {
@@ -112,6 +113,9 @@ class FakeHandle implements WorkerSessionHandle {
   private readonly activityListenerHistory: Array<
     (activity: string | undefined) => void
   > = [];
+  private readonly turnDirectionListeners = new Set<
+    (direction: WorkerTurnDirection) => void
+  >();
 
   constructor(
     name: string,
@@ -169,6 +173,17 @@ class FakeHandle implements WorkerSessionHandle {
 
   emitStaleActivity(activity: string | undefined): void {
     for (const listener of this.activityListenerHistory) listener(activity);
+  }
+
+  subscribeTurnDirection(
+    listener: (direction: WorkerTurnDirection) => void,
+  ): () => void {
+    this.turnDirectionListeners.add(listener);
+    return () => this.turnDirectionListeners.delete(listener);
+  }
+
+  emitTurnDirection(direction: WorkerTurnDirection): void {
+    for (const listener of this.turnDirectionListeners) listener(direction);
   }
 }
 
@@ -805,11 +820,13 @@ describe("runtime state observability", () => {
     };
     first.emitUsage(usage);
     first.emitActivity("read");
+    first.emitTurnDirection("down");
 
-    expect(notifications).toEqual(["owner-a", "owner-a"]);
+    expect(notifications).toEqual(["owner-a", "owner-a", "owner-a"]);
     const ownerA = await orchestrator.snapshot("owner-a");
     expect(ownerA.workers[0]?.usage).toEqual(usage);
     expect(ownerA.workers[0]?.activity).toBe("read");
+    expect(ownerA.workers[0]?.turnDirection).toBe("down");
     expect(Object.isFrozen(ownerA)).toBe(true);
     expect(Object.isFrozen(ownerA.workers)).toBe(true);
     expect(Object.isFrozen(ownerA.workers[0])).toBe(true);
@@ -817,11 +834,12 @@ describe("runtime state observability", () => {
     const ownerBWorker = (await orchestrator.snapshot("owner-b")).workers[0];
     expect(ownerBWorker?.usage).toEqual(EMPTY_USAGE);
     expect(ownerBWorker?.activity).toBeUndefined();
+    expect(ownerBWorker?.turnDirection).toBe("up");
 
     unsubscribe();
     unsubscribe();
     first.emitActivity("bash");
-    expect(notifications).toEqual(["owner-a", "owner-a"]);
+    expect(notifications).toEqual(["owner-a", "owner-a", "owner-a"]);
 
     first.promptPlans[0]!.gate.resolve(undefined);
     second.promptPlans[0]!.gate.resolve(undefined);

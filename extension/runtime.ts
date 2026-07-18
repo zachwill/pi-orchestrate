@@ -201,6 +201,7 @@ interface RuntimeEntry {
   session?: WorkerSessionHandle;
   unsubscribeUsage?: () => void;
   unsubscribeActivity?: () => void;
+  unsubscribeTurnDirection?: () => void;
 }
 
 interface WaveWaiter {
@@ -316,6 +317,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
         lifecycle: definition.lifecycle,
         status: "starting",
         usage: copyUsage(EMPTY_WORKER_USAGE),
+        turnDirection: "up",
         startedAt: this.clock(),
       };
     });
@@ -396,11 +398,12 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
       state: "running",
       createdAt: this.clock(),
     };
-    const running = {
+    const running: WorkerRecord = {
       ...transitionWorkerStatus(current, "running"),
       waveId,
       instructions,
       activity: undefined,
+      turnDirection: "up",
       startedAt: this.clock(),
       settledAt: undefined,
     };
@@ -1137,6 +1140,14 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
       this.workers.set(workerId, { ...latest, activity });
       this.emitState(latest.ownerSessionId);
     });
+    entry.unsubscribeTurnDirection = session.subscribeTurnDirection((turnDirection) => {
+      const latest = this.workers.get(workerId);
+      if (!latest || entry.session !== session || entry.generation !== generation) return;
+      if (latest.status !== "starting" && latest.status !== "running") return;
+      if (latest.turnDirection === turnDirection) return;
+      this.workers.set(workerId, { ...latest, turnDirection });
+      this.emitState(latest.ownerSessionId);
+    });
   }
 
   private emitState(ownerSessionId: string): void {
@@ -1166,6 +1177,8 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     entry.unsubscribeUsage = undefined;
     safelyCall(entry.unsubscribeActivity);
     entry.unsubscribeActivity = undefined;
+    safelyCall(entry.unsubscribeTurnDirection);
+    entry.unsubscribeTurnDirection = undefined;
   }
 
   private disposeEntrySession(entry: RuntimeEntry): void {
