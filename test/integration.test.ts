@@ -293,7 +293,9 @@ async function invoke(
 }
 
 const orchestrationParams = {
-  tasks: [{ worker: "scout", title: "Inspect", instructions: "Inspect the project." }],
+  worker: "scout",
+  title: "Inspect",
+  instructions: "Inspect the project.",
 };
 
 describe("Pi Orchestrate extension integration", () => {
@@ -340,7 +342,7 @@ describe("Pi Orchestrate extension integration", () => {
     expect((promptResult as { systemPrompt: string }).systemPrompt).toContain("trusted-scout");
     expect(runtime.orchestrateCalls[0]?.context.catalog).toBe(catalog);
     expect(runtime.orchestrateCalls[0]?.context.projectTrusted).toBe(true);
-    expect(runtime.orchestrateCalls[0]?.tasks).toEqual(orchestrationParams.tasks);
+    expect(runtime.orchestrateCalls[0]?.tasks).toEqual([orchestrationParams]);
   });
 
   test("classifies a pure dispatch async and clears its mode after tool execution", async () => {
@@ -369,7 +371,7 @@ describe("Pi Orchestrate extension integration", () => {
     expect(runtime.snapshotOwners).toEqual(snapshotCallsBeforeDispatch);
   });
 
-  test("classifies dispatches inline when their assistant message contains mixed or multiple calls", async () => {
+  test("keeps mixed calls inline and accepts pure sibling orchestrations asynchronously", async () => {
     const pi = new FakePi();
     const { host, runtime } = fakeHost();
     install(pi, host);
@@ -401,24 +403,38 @@ describe("Pi Orchestrate extension integration", () => {
       {
         message: assistantToolCalls([
           { id: "first-dispatch", name: "orchestrate" },
-          { id: "second-dispatch", name: "worker_send" },
+          { id: "second-dispatch", name: "orchestrate" },
         ]),
       },
       ctx,
     );
-    await Promise.all([
+    const secondParams = {
+      worker: "scout",
+      title: "Review",
+      instructions: "Review the project.",
+    };
+    const groupedResults = await Promise.all([
       invoke(pi, "orchestrate", "first-dispatch", orchestrationParams, ctx),
-      invoke(
-        pi,
-        "worker_send",
-        "second-dispatch",
-        { worker_id: "worker-ready", instructions: "Continue." },
-        ctx,
-      ),
+      invoke(pi, "orchestrate", "second-dispatch", secondParams, ctx),
     ]);
 
-    expect(runtime.orchestrateCalls.map((call) => call.mode)).toEqual(["inline", "inline"]);
-    expect(runtime.sendCalls.map((call) => call.mode)).toEqual(["inline"]);
+    expect(runtime.orchestrateCalls.map((call) => call.mode)).toEqual([
+      "inline",
+      "async",
+      "async",
+    ]);
+    expect(runtime.orchestrateCalls.slice(-2).map((call) => call.tasks)).toEqual([
+      [orchestrationParams],
+      [secondParams],
+    ]);
+    expect(runtime.orchestrateCalls.slice(-2).map((call) => call.context.dispatchGroup))
+      .toEqual([
+        { id: "orchestrate:first-dispatch", size: 2 },
+        { id: "orchestrate:first-dispatch", size: 2 },
+      ]);
+    expect(groupedResults.every((result) => "terminate" in result && result.terminate === true))
+      .toBe(true);
+    expect(runtime.sendCalls).toEqual([]);
     expect(inlineUpdates).toEqual([{
       content: [{ type: "text", text: "1 worker response(s) received." }],
       details: {
@@ -433,6 +449,52 @@ describe("Pi Orchestrate extension integration", () => {
     expect(inlineResult).not.toHaveProperty("terminate");
     expect(inlineResult.details).toMatchObject({ mode: "inline" });
     expect(pi.sent).toEqual([]);
+  });
+
+  test("finishes an async sibling group when one call fails before admission", async () => {
+    const pi = new FakePi();
+    const { host } = fakeHost();
+    install(pi, host);
+    const { ctx } = createContext("owner-group");
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    await pi.emit("agent_start", {}, ctx);
+    await pi.emit(
+      "message_end",
+      {
+        message: assistantToolCalls([
+          { id: "group-valid", name: "orchestrate" },
+          { id: "group-invalid", name: "orchestrate" },
+        ]),
+      },
+      ctx,
+    );
+
+    const accepted = await invoke(pi, "orchestrate", "group-valid", orchestrationParams, ctx);
+    host.delivery.accept(workerSettlement("owner-group", {
+      eventId: "group-result",
+      sequence: 50,
+      dispatchGroupId: "orchestrate:group-valid",
+      dispatchGroupSize: 2,
+    }));
+    await pi.emit("tool_execution_end", {
+      toolCallId: "group-valid",
+      toolName: "orchestrate",
+      result: accepted,
+      isError: false,
+    }, ctx);
+    await pi.emit("tool_execution_end", {
+      toolCallId: "group-invalid",
+      toolName: "orchestrate",
+      result: {},
+      isError: true,
+    }, ctx);
+    await pi.emit("agent_settled", {}, ctx);
+
+    expect(pi.sent).toHaveLength(1);
+    expect(pi.sent[0]).toMatchObject({
+      options: { triggerTurn: true },
+      message: { details: { eventId: "group-result" } },
+    });
   });
 
   test("queues per-worker results for a busy owner and flushes them in settlement order with one synthesis turn", async () => {

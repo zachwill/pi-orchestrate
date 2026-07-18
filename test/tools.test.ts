@@ -29,6 +29,7 @@ import type {
 } from "../extension/runtime.js";
 import {
   registerOrchestrationTools,
+  type DispatchDecision,
   type OrchestrationToolDependencies,
 } from "../extension/tools.js";
 
@@ -132,6 +133,7 @@ interface Harness {
   readonly catalogCalls: ExtensionContext[];
   readonly dispatchCalls: string[];
   readonly modes: Map<string, DispatchMode>;
+  readonly groups: Map<string, DispatchDecision["group"]>;
 }
 
 function harness(): Harness {
@@ -149,20 +151,25 @@ function harness(): Harness {
   const catalogCalls: ExtensionContext[] = [];
   const dispatchCalls: string[] = [];
   const modes = new Map<string, DispatchMode>();
+  const groups = new Map<string, DispatchDecision["group"]>();
   const deps: OrchestrationToolDependencies = {
     runtime: runtime as unknown as OrchestratorRuntime,
     getCatalog(ctx) {
       catalogCalls.push(ctx);
       return catalog;
     },
-    getDispatchMode(toolCallId) {
+    getDispatchDecision(toolCallId) {
       dispatchCalls.push(toolCallId);
-      return modes.get(toolCallId) ?? "async";
+      const group = groups.get(toolCallId);
+      return {
+        mode: modes.get(toolCallId) ?? "async",
+        ...(group ? { group } : {}),
+      };
     },
   };
 
   registerOrchestrationTools(pi as unknown as ExtensionAPI, deps);
-  return { pi, runtime, context, catalog, catalogCalls, dispatchCalls, modes };
+  return { pi, runtime, context, catalog, catalogCalls, dispatchCalls, modes, groups };
 }
 
 async function invoke(
@@ -308,23 +315,11 @@ function snapshot(): RuntimeSnapshot {
 const expectedSchemas = {
   orchestrate: {
     type: "object",
-    required: ["tasks"],
+    required: ["worker", "title", "instructions"],
     properties: {
-      tasks: {
-        type: "array",
-        items: {
-          type: "object",
-          required: ["worker", "title", "instructions"],
-          properties: {
-            worker: { type: "string" },
-            title: { type: "string" },
-            instructions: { type: "string" },
-          },
-          additionalProperties: false,
-        },
-        minItems: 1,
-        maxItems: 12,
-      },
+      worker: { type: "string" },
+      title: { type: "string" },
+      instructions: { type: "string" },
     },
     additionalProperties: false,
   },
@@ -397,6 +392,8 @@ describe("registerOrchestrationTools", () => {
       expect(tool.renderResult).toBeFunction();
     }
 
+    expect(pi.tool("orchestrate").executionMode).toBe("parallel");
+
     const names = pi.tools.map((tool) => tool.name);
     expect(names).not.toContain("worker_status");
     expect(names).not.toContain("worker_respond");
@@ -407,26 +404,14 @@ describe("registerOrchestrationTools", () => {
     const { pi } = harness();
     const validTask = { worker: "scout", title: "Inspect", instructions: "Inspect." };
 
-    expect(Value.Check(pi.tool("orchestrate").parameters, { tasks: [validTask] })).toBe(true);
-    expect(Value.Check(pi.tool("orchestrate").parameters, { tasks: [] })).toBe(false);
-    expect(
-      Value.Check(pi.tool("orchestrate").parameters, {
-        tasks: Array.from({ length: 12 }, () => validTask),
-      }),
-    ).toBe(true);
-    expect(
-      Value.Check(pi.tool("orchestrate").parameters, {
-        tasks: Array.from({ length: 13 }, () => validTask),
-      }),
-    ).toBe(false);
-    expect(
-      Value.Check(pi.tool("orchestrate").parameters, {
-        tasks: [{ ...validTask, extra: true }],
-      }),
-    ).toBe(false);
-    expect(
-      Value.Check(pi.tool("orchestrate").parameters, { tasks: [validTask], extra: true }),
-    ).toBe(false);
+    expect(Value.Check(pi.tool("orchestrate").parameters, validTask)).toBe(true);
+    expect(Value.Check(pi.tool("orchestrate").parameters, { tasks: [validTask] })).toBe(false);
+    expect(Value.Check(pi.tool("orchestrate").parameters, [validTask])).toBe(false);
+    expect(Value.Check(pi.tool("orchestrate").parameters, { ...validTask, extra: true })).toBe(false);
+    expect(Value.Check(pi.tool("orchestrate").parameters, {
+      worker: "scout",
+      title: "Inspect",
+    })).toBe(false);
 
     expect(Value.Check(pi.tool("orchestration_status").parameters, {})).toBe(true);
     expect(Value.Check(pi.tool("orchestration_status").parameters, { poll: true })).toBe(false);
@@ -467,9 +452,11 @@ describe("registerOrchestrationTools", () => {
     const bullets = pi.tools.flatMap((tool) => tool.promptGuidelines ?? []);
 
     expect(new Set(bullets).size).toBe(bullets.length);
-    expect(pi.tool("orchestrate").description).toContain("1 to 12");
-    expect(pi.tool("orchestrate").promptSnippet).toContain("concurrent wave");
-    expect(pi.tool("orchestrate").promptGuidelines?.[0]).toContain("complete brief");
+    expect(pi.tool("orchestrate").description).toContain("one fully briefed task");
+    expect(pi.tool("orchestrate").description).toContain("sibling orchestrate calls");
+    expect(pi.tool("orchestrate").description).toContain("asynchronously");
+    expect(pi.tool("orchestrate").promptSnippet).toContain("one fully briefed worker task");
+    expect(pi.tool("orchestrate").promptGuidelines?.[0]).toContain("one complete brief per call");
     expect(pi.tool("orchestration_status").description).toContain("Never poll");
     expect(pi.tool("orchestration_status").promptGuidelines?.[0]).toContain("never poll");
     expect(pi.tool("worker_send").promptGuidelines?.[0]).toContain("ready reusable");
@@ -479,16 +466,26 @@ describe("registerOrchestrationTools", () => {
   });
 
   test("constructs the complete runtime context and selects async mode by tool call ID", async () => {
-    const { pi, runtime, context, catalog, catalogCalls, dispatchCalls, modes } = harness();
+    const {
+      pi,
+      runtime,
+      context,
+      catalog,
+      catalogCalls,
+      dispatchCalls,
+      modes,
+      groups,
+    } = harness();
     modes.set("orchestrate-call", "async");
-    const tasks = [{ worker: "scout", title: "Inspect", instructions: "Inspect." }];
+    groups.set("orchestrate-call", { id: "dispatch-group", size: 2 });
+    const task = { worker: "scout", title: "Inspect", instructions: "Inspect." };
     const controller = new AbortController();
 
     const result = await invoke(
       pi,
       "orchestrate",
       "orchestrate-call",
-      { tasks },
+      task,
       context,
       controller.signal,
     );
@@ -506,8 +503,9 @@ describe("registerOrchestrationTools", () => {
         catalog,
         parentModel: context.model,
         modelRegistry: context.modelRegistry,
+        dispatchGroup: { id: "dispatch-group", size: 2 },
       },
-      tasks,
+      tasks: [task],
       mode: "async",
       signal: undefined,
     });
@@ -528,9 +526,7 @@ describe("registerOrchestrationTools", () => {
       pi,
       "orchestrate",
       "inline-call",
-      {
-        tasks: [{ worker: "scout", title: "Inspect", instructions: "Inspect." }],
-      },
+      { worker: "scout", title: "Inspect", instructions: "Inspect." },
       context,
       controller.signal,
     );
@@ -716,19 +712,19 @@ describe("registerOrchestrationTools", () => {
     const renderContext = (expanded: boolean) => ({ expanded, argsComplete: false, cwd: "/workspace", state: {}, invalidate() {} }) as never;
 
     const partialOrchestrate = pi.tool("orchestrate").renderCall!(
-      { tasks: [{ worker: "scout" }, { title: "Plan" }] } as never,
+      { worker: "scout" } as never,
       themeForRendering(),
       renderContext(false),
     ).render(40);
     expect(partialOrchestrate.every((line) => Bun.stringWidth(line) <= 40)).toBe(true);
-    expect(Bun.stripANSI(partialOrchestrate.join("\n"))).toContain("orchestrate 2 workers");
+    expect(Bun.stripANSI(partialOrchestrate.join("\n"))).toContain("orchestrate scout");
 
-    const missingTasks = pi.tool("orchestrate").renderCall!(
+    const missingTask = pi.tool("orchestrate").renderCall!(
       {} as never,
       themeForRendering(),
       renderContext(true),
     ).render(40);
-    expect(Bun.stripANSI(missingTasks.join("\n"))).toContain("orchestrate 0 workers");
+    expect(Bun.stripANSI(missingTask.join("\n"))).toContain("orchestrate");
 
     const partialSend = pi.tool("worker_send").renderCall!(
       { worker_id: "worker-ready" } as never,
@@ -739,37 +735,31 @@ describe("registerOrchestrationTools", () => {
     expect(Bun.stripANSI(partialSend.join("\n"))).toContain("worker_send worker-ready");
   });
 
-  test("renders all 12 exact expandable outbound messages with safe bounded previews", async () => {
+  test("renders and stores one exact expandable outbound message with a safe bounded preview", async () => {
     const { pi, runtime, context } = harness();
     const instructions = `  First  exact\tline.\r\n\r\nUnicode 雪 \u001b[31mred\u0000\n${"UNBROKEN".repeat(12_500)}\nTAIL  `;
-    const tasks = Array.from({ length: 12 }, (_, index) => ({
-      worker: "scout",
-      title: `T${index}`,
-      instructions: index === 0 ? instructions : `  exact message ${index}  `,
-    }));
+    const task = { worker: "scout", title: "Inspect", instructions };
     const renderContext = (expanded: boolean) => ({ expanded, argsComplete: true, cwd: "/workspace", state: {}, invalidate() {} }) as never;
-    const collapsed = pi.tool("orchestrate").renderCall!({ tasks } as never, themeForRendering(), renderContext(false)).render(32);
+    const collapsed = pi.tool("orchestrate").renderCall!(task, themeForRendering(), renderContext(false)).render(32);
     expect(collapsed.every((line) => Bun.stringWidth(line) <= 32)).toBe(true);
     const collapsedText = Bun.stripANSI(collapsed.join("\n"));
-    for (let index = 0; index < 12; index += 1) expect(collapsedText).toContain(`T${index}`);
-    expect(collapsed.length).toBeGreaterThanOrEqual(12 * 2 + 2);
-    expect(collapsed.length).toBeLessThanOrEqual(12 * 3 + 2);
-    expect(Bun.stripANSI(collapsed[2]!)).toContain("First exact line.");
-    expect(Bun.stripANSI(collapsed[3]!)).toEndWith("…");
+    expect(collapsedText).toContain("orchestrate scout");
+    expect(collapsedText).toContain("Inspect");
+    expect(collapsedText).toContain("First exact line.");
+    expect(collapsedText).toContain("…");
     expect(collapsedText).toContain("to inspect full instructions");
-    const expanded = Bun.stripANSI(pi.tool("orchestrate").renderCall!({ tasks } as never, themeForRendering(), renderContext(true)).render(120_000).join("\n"));
+    const expanded = Bun.stripANSI(pi.tool("orchestrate").renderCall!(task, themeForRendering(), renderContext(true)).render(120_000).join("\n"));
     expect(expanded).toContain("  First  exact    line.");
     expect(expanded).toContain("Unicode 雪 ␛[31mred␀");
     expect(expanded).toContain("UNBROKEN".repeat(12_500));
     expect(expanded).toContain("TAIL  ");
-    for (let index = 1; index < 12; index += 1) expect(expanded).toContain(`  exact message ${index}  `);
 
     const sendExpanded = Bun.stripANSI(pi.tool("worker_send").renderCall!({ worker_id: "worker-1", instructions } as never, themeForRendering(), renderContext(true)).render(120_000).join("\n"));
     expect(sendExpanded).toContain("UNBROKEN".repeat(12_500));
     expect(sendExpanded).toContain("TAIL  ");
 
-    await invoke(pi, "orchestrate", "exact-storage", { tasks }, context);
-    expect(runtime.orchestrateCalls.at(-1)?.tasks).toEqual(tasks);
+    await invoke(pi, "orchestrate", "exact-storage", task, context);
+    expect(runtime.orchestrateCalls.at(-1)?.tasks).toEqual([task]);
     await invoke(pi, "worker_send", "exact-send", { worker_id: "worker-1", instructions }, context);
     expect(runtime.sendCalls.at(-1)?.instructions).toBe(instructions);
   });
@@ -809,7 +799,7 @@ describe("registerOrchestrationTools", () => {
       outcome: { status: "completed", assistantText: "Live complete response." },
     };
     const updates: unknown[] = [];
-    await invoke(pi, "orchestrate", "inline-partial", { tasks: [{ worker: "scout", title: "Inspect", instructions: "Inspect." }] }, context, undefined, (update) => updates.push(update));
+    await invoke(pi, "orchestrate", "inline-partial", { worker: "scout", title: "Inspect", instructions: "Inspect." }, context, undefined, (update) => updates.push(update));
     expect(updates).toHaveLength(1);
     const partial = updates[0] as AgentToolResult<unknown>;
     const rendered = pi.tool("orchestrate").renderResult!(partial, { isPartial: true, expanded: false }, themeForRendering(), { lastComponent: undefined } as never);
@@ -842,9 +832,7 @@ describe("registerOrchestrationTools", () => {
       const error = new Error(`${name} failed`);
       runtime.failures[runtimeMethod as keyof FakeRuntime["failures"]] = error;
       const params = {
-        orchestrate: {
-          tasks: [{ worker: "scout", title: "Inspect", instructions: "Inspect." }],
-        },
+        orchestrate: { worker: "scout", title: "Inspect", instructions: "Inspect." },
         orchestration_status: {},
         worker_send: { worker_id: "worker-ready", instructions: "Continue." },
         worker_abort: { all: true },

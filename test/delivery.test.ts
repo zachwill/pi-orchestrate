@@ -121,6 +121,50 @@ describe("DeliveryCoordinator worker settlements", () => {
     expect(parent.sent[1]?.message.content).toContain(DELIVERY_PARENT_INSTRUCTIONS);
   });
 
+  test("groups independent async waves behind one final synthesis boundary", () => {
+    const coordinator = new DeliveryCoordinator();
+    const parent = createBinding("owner-a", 1);
+    coordinator.bind(parent.binding);
+
+    coordinator.accept(settlement({
+      eventId: "group-first",
+      sequence: 3,
+      dispatchGroupId: "dispatch-group",
+      dispatchGroupSize: 2,
+    }));
+    expect(parent.sent.map(({ options }) => options.triggerTurn)).toEqual([false]);
+    expect(parent.sent[0]?.message.content).not.toContain(DELIVERY_PARENT_INSTRUCTIONS);
+
+    coordinator.accept(settlement({
+      eventId: "group-second",
+      sequence: 4,
+      dispatchGroupId: "dispatch-group",
+      dispatchGroupSize: 2,
+    }));
+    expect(parent.sent.map(({ options }) => options.triggerTurn)).toEqual([false, true]);
+    expect(parent.sent[1]?.message.content).toContain(DELIVERY_PARENT_INSTRUCTIONS);
+  });
+
+  test("shrinks an async dispatch group when a sibling call fails preflight", () => {
+    const coordinator = new DeliveryCoordinator();
+    const parent = createBinding("owner-a", 1, false);
+    coordinator.bind(parent.binding);
+    coordinator.accept(settlement({
+      eventId: "group-valid",
+      sequence: 5,
+      dispatchGroupId: "partial-group",
+      dispatchGroupSize: 2,
+    }));
+    coordinator.skipDispatchGroupMember("owner-a", "partial-group", 2);
+
+    parent.setIdle(true);
+    coordinator.markAgentSettled("owner-a", 1);
+
+    expect(parent.sent).toHaveLength(1);
+    expect(parent.sent[0]?.options.triggerTurn).toBe(true);
+    expect(parent.sent[0]?.message.content).toContain(DELIVERY_PARENT_INSTRUCTIONS);
+  });
+
   test("queues while busy and flushes the ordered prefix through the latest final", () => {
     const coordinator = new DeliveryCoordinator();
     const parent = createBinding("owner-a", 1, false);

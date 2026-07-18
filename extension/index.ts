@@ -22,14 +22,19 @@ import {
   registerOrchestrationPresentation,
   type StatusController,
 } from "./presentation.js";
-import { registerOrchestrationTools } from "./tools.js";
+import {
+  registerOrchestrationTools,
+  type DispatchDecision,
+} from "./tools.js";
 
 const DISPATCH_TOOL_NAMES: ReadonlySet<string> = new Set([
   "orchestrate",
   "worker_send",
 ]);
 
-type DispatchMode = "async" | "inline";
+interface StoredDispatchDecision extends DispatchDecision {
+  readonly ownerSessionId: string;
+}
 
 interface OwnerBinding {
   readonly ownerSessionId: string;
@@ -52,7 +57,7 @@ export function createOrchestrationExtension(
     const statusController =
       dependencies.createStatusController?.(host.runtime) ??
       createStatusController(host.runtime);
-    const dispatchModes = new Map<string, DispatchMode>();
+    const dispatchDecisions = new Map<string, StoredDispatchDecision>();
     let hostAttachment: ProcessHostAttachment | undefined;
     let activeBinding: OwnerBinding | undefined;
     let cachedCatalog: WorkerCatalog | undefined;
@@ -69,7 +74,8 @@ export function createOrchestrationExtension(
     registerOrchestrationTools(pi, {
       runtime: host.runtime,
       getCatalog: catalogFor,
-      getDispatchMode: (toolCallId) => dispatchModes.get(toolCallId) ?? "inline",
+      getDispatchDecision: (toolCallId) =>
+        dispatchDecisions.get(toolCallId) ?? { mode: "inline" },
     });
     registerOrchestrationPresentation(pi);
 
@@ -83,7 +89,7 @@ export function createOrchestrationExtension(
         statusController.unbind(activeBinding.ownerSessionId);
       }
 
-      dispatchModes.clear();
+      dispatchDecisions.clear();
       cachedCatalog = undefined;
       const binding: OwnerBinding = {
         ownerSessionId: ctx.sessionManager.getSessionId(),
@@ -117,17 +123,37 @@ export function createOrchestrationExtension(
       const toolCalls = event.message.content.filter(
         (part) => part.type === "toolCall",
       );
-      const mode: DispatchMode = toolCalls.length === 1 ? "async" : "inline";
+      const ownerSessionId = activeBinding?.ownerSessionId;
+      if (!ownerSessionId) return;
+      const groupedOrchestration =
+        toolCalls.length > 1 &&
+        toolCalls.every((toolCall) => toolCall.name === "orchestrate");
+      const group = groupedOrchestration
+        ? { id: `orchestrate:${toolCalls[0]?.id ?? "group"}`, size: toolCalls.length }
+        : undefined;
 
       for (const toolCall of toolCalls) {
-        if (DISPATCH_TOOL_NAMES.has(toolCall.name)) {
-          dispatchModes.set(toolCall.id, mode);
-        }
+        if (!DISPATCH_TOOL_NAMES.has(toolCall.name)) continue;
+        const mode = groupedOrchestration || toolCalls.length === 1
+          ? "async"
+          : "inline";
+        dispatchDecisions.set(toolCall.id, {
+          mode,
+          ownerSessionId,
+          ...(toolCall.name === "orchestrate" && group ? { group } : {}),
+        });
       }
     });
 
     pi.on("tool_execution_end", (event) => {
-      dispatchModes.delete(event.toolCallId);
+      const decision = dispatchDecisions.get(event.toolCallId);
+      dispatchDecisions.delete(event.toolCallId);
+      if (!event.isError || !decision?.group) return;
+      host.delivery.skipDispatchGroupMember(
+        decision.ownerSessionId,
+        decision.group.id,
+        decision.group.size,
+      );
     });
 
     pi.on("agent_start", () => {
@@ -152,7 +178,7 @@ export function createOrchestrationExtension(
       const binding = activeBinding;
       activeBinding = undefined;
       cachedCatalog = undefined;
-      dispatchModes.clear();
+      dispatchDecisions.clear();
 
       if (binding) {
         host.delivery.unbind(binding.ownerSessionId, binding.generation);

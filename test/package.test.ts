@@ -172,13 +172,16 @@ describe("published documentation", () => {
     const readme = await readText(readmePath);
 
     for (const tool of canonicalTools) expect(readme).toContain(tool);
-    expect(readme).toContain("tasks: [{ worker, title, instructions }]");
+    expect(readme).toContain("orchestrate({ worker, title, instructions })");
     expect(readme).toMatch(/atomic input, catalog, and model preflight/i);
+    expect(readme).toMatch(/one rejected call does not prevent valid siblings from starting/i);
     expect(readme).toMatch(/resource startup failure becomes that worker's `failed` result/i);
-    expect(readme).toMatch(/full 12-task wave/i);
-    expect(readme).toMatch(/no hidden concurrency throttle/i);
-    expect(readme).toMatch(/sole tool call in its assistant message/i);
-    expect(readme).toMatch(/sibling tool call makes its wave inline and blocking/i);
+    expect(readme).toMatch(/Pi executes sibling tool calls concurrently/i);
+    expect(readme).toMatch(/without an extension-level group limit or hidden throttle/i);
+    expect(readme).toMatch(/pure group of sibling `orchestrate` calls runs asynchronously/i);
+    expect(readme).toMatch(/only the final response starts the parent's synthesis turn/i);
+    expect(readme).toMatch(/Mixing `orchestrate` with another tool makes it inline and blocking/i);
+    expect(readme).toMatch(/`worker_send` is asynchronous only as the sole tool call/i);
     expect(readme).toMatch(/inline work receives the parent turn's cancellation signal/i);
     expect(readme).toMatch(/accepted async work does not retain that signal/i);
     expect(readme).toMatch(/Do not poll/i);

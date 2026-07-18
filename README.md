@@ -14,19 +14,19 @@ Pi packages execute with your system permissions. Review the package and worker 
 
 Pi Orchestrate adds exactly five tools:
 
-- `orchestrate` dispatches 1–12 tasks with `orchestrate({ tasks: [{ worker, title, instructions }] })`.
+- `orchestrate` dispatches one task with `orchestrate({ worker, title, instructions })`. Send independent tasks as sibling `orchestrate` calls in the same assistant message.
 - `orchestration_status` inspects the trusted catalog, catalog diagnostics, waves, and worker states without exposing full task instructions.
 - `worker_send` sends follow-up instructions to an owned reusable worker in the `ready` state.
 - `worker_abort` stops owned active work that is no longer needed.
 - `worker_close` closes an owned reusable worker in the `ready` state.
 
-An `orchestrate` wave first performs atomic input, catalog, and model preflight. No worker starts if any task fails that preflight. After acceptance, worker resources start independently: a resource startup failure becomes that worker's `failed` result and does not roll back or stop its peers.
+Each `orchestrate` call first performs atomic input, catalog, and model preflight before its worker starts. Sibling calls are admitted independently: one rejected call does not prevent valid siblings from starting. After acceptance, a resource startup failure becomes that worker's `failed` result and does not roll back or stop sibling calls.
 
-All tasks in a wave execute concurrently, including a full 12-task wave. Pi Orchestrate applies no hidden concurrency throttle. Exact unchanged worker instructions remain visible in each tool call: collapsed calls preview every message, and expanded calls show every full brief. Titles are labels, never replacements for instructions.
+Pi executes sibling tool calls concurrently, so independent `orchestrate` calls start concurrently without an extension-level group limit or hidden throttle. Exact unchanged worker instructions remain visible in each tool call: collapsed calls preview the message, and expanded calls show the full brief. Titles are labels, never replacements for instructions.
 
-For asynchronous behavior, `orchestrate` or `worker_send` must be the sole tool call in its assistant message. Mixing either with any sibling tool call makes its wave inline and blocking. Inline work receives the parent turn's cancellation signal. Accepted async work does not retain that signal and continues independently.
+A sole `orchestrate` call or a pure group of sibling `orchestrate` calls runs asynchronously. Pi accepts a pure group concurrently and yields the parent turn. Mixing `orchestrate` with another tool makes it inline and blocking. `worker_send` is asynchronous only as the sole tool call in its assistant message. Inline work receives the parent turn's cancellation signal. Accepted async work does not retain that signal and continues independently.
 
-A successful async call yields the parent turn. Responses enter the transcript individually as workers settle, and the final response starts the parent's synthesis turn. The bottom widget is ephemeral and shows active work only; completed, failed, aborted, and reusable ready workers disappear immediately. Inline responses accumulate in the live tool output while the call blocks.
+Async responses enter the transcript individually as workers settle. For a sibling dispatch group, only the final response starts the parent's synthesis turn. The bottom widget is ephemeral and shows active work only; completed, failed, aborted, and reusable ready workers disappear immediately. Inline responses accumulate in the live tool output while the call blocks.
 
 `orchestration_status` is for diagnostics and recovery, never a normal completion mechanism. Do not poll it for completion. If the owning session becomes inactive, its workers continue and completed results remain queued. Those results become available only when that exact owning session resumes; they are never delivered to another session.
 
@@ -38,8 +38,8 @@ Pi Orchestrate automatically injects the authoritative orchestration contract an
 
 1. Keep trivial or tightly coupled work in the parent session.
 2. Give every delegated task a full brief: objective, paths and scope, forbidden actions, context, constraints, observable success, checks, and expected output.
-3. Dispatch every known independent task in one `orchestrate` wave, up to 12 tasks.
-4. Make an async `orchestrate` or `worker_send` call the sole tool call in its assistant message, then yield after acceptance.
+3. Dispatch every known independent task with a sibling `orchestrate` call in the same assistant message.
+4. Keep an async `orchestrate` call or pure sibling group separate from other tools, then yield after acceptance. Make `worker_send` the sole tool call when it should run asynchronously.
 5. Review delivered evidence and changes, resolve conflicts, integrate deliberately, and run the relevant verification.
 6. Deliver the final answer from the parent session.
 

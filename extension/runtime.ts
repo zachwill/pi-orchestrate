@@ -49,6 +49,10 @@ export interface OrchestrationContext {
   readonly catalog: WorkerCatalog;
   readonly parentModel?: Model<Api>;
   readonly modelRegistry: ModelRegistry;
+  readonly dispatchGroup?: {
+    readonly id: string;
+    readonly size: number;
+  };
 }
 
 export interface AcceptedWave {
@@ -95,6 +99,8 @@ export interface WorkerSettlement {
   readonly remainingActive: number;
   readonly waveSize: number;
   readonly waveComplete: boolean;
+  readonly dispatchGroupId?: string;
+  readonly dispatchGroupSize?: number;
   readonly sessionFile: string | undefined;
 }
 
@@ -302,6 +308,12 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
       mode,
       state: "running",
       createdAt: this.clock(),
+      ...(context.dispatchGroup
+        ? {
+            dispatchGroupId: context.dispatchGroup.id,
+            dispatchGroupSize: context.dispatchGroup.size,
+          }
+        : {}),
     };
     const records = tasks.map<WorkerRecord>((task, index) => {
       const definition = definitions[index];
@@ -527,6 +539,15 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     validateMode(mode);
     if (!Array.isArray(tasks) || tasks.length < 1 || tasks.length > MAX_TASKS_PER_WAVE) {
       throw new Error(`orchestrate requires 1 to ${MAX_TASKS_PER_WAVE} tasks`);
+    }
+    if (context.dispatchGroup) {
+      validateText("dispatch group ID", context.dispatchGroup.id, MAX_WORKER_TITLE_LENGTH);
+      if (mode !== "async" || tasks.length !== 1) {
+        throw new Error("Grouped dispatch requires one async task");
+      }
+      if (!Number.isSafeInteger(context.dispatchGroup.size) || context.dispatchGroup.size < 2) {
+        throw new Error("Dispatch group size must be an integer of at least 2");
+      }
     }
 
     const definitions: WorkerDefinition[] = [];
@@ -897,6 +918,12 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
       remainingActive,
       waveSize: wave.workerIds.length,
       waveComplete,
+      ...(wave.dispatchGroupId && wave.dispatchGroupSize
+        ? {
+            dispatchGroupId: wave.dispatchGroupId,
+            dispatchGroupSize: wave.dispatchGroupSize,
+          }
+        : {}),
       sessionFile: worker.sessionFile,
     });
 

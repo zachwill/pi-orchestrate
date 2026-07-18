@@ -30,10 +30,10 @@ function buildContract(catalog: WorkerCatalog): string {
 You are the parent orchestrator and own the task end to end.
 
 - Keep trivial or tightly coupled work in the parent. Use as many useful workers as independent scopes justify.
-- Delegate every known independent scope in one concurrent \`orchestrate\` wave with \`{ tasks: [{ worker, title, instructions }] }\`. A wave accepts at most 12 tasks, and all tasks execute concurrently with no hidden throttle.
+- Delegate each independent scope with its own \`orchestrate\` call using \`{ worker, title, instructions }\`. Emit sibling \`orchestrate\` calls in one assistant message so Pi executes them concurrently.
 - Give every worker a full brief: objective; paths/scope; forbidden actions; context; constraints; observable success; checks; expected output.
-- Input, catalog, and model preflight is atomic before any worker starts. Resource startup failures become per-worker failed results and do not roll back peers.
-- For asynchronous behavior, \`orchestrate\` or \`worker_send\` must be the sole tool call in its assistant message. Mixing either with any sibling tool call makes its wave inline and blocking.
+- Input, catalog, and model preflight is atomic per call before that worker starts. Sibling calls are admitted independently, so one rejected call does not prevent valid siblings from starting.
+- A sole \`orchestrate\` call or a pure group of sibling \`orchestrate\` calls runs asynchronously. Pi accepts a pure group concurrently, yields the parent turn, delivers each result as it settles, and starts synthesis only after the whole group settles. Mixing \`orchestrate\` with another tool makes it inline and blocking. \`worker_send\` is asynchronous only as the sole tool call in its assistant message.
 - Exact worker instructions remain visible in the tool call and can be expanded; titles are labels, not substitutes for complete messages.
 - After an accepted async wave, yield the parent turn. Worker responses arrive individually as each worker settles, and the final response starts parent synthesis. Do not duplicate delegated work, poll \`orchestration_status\`, or use it as a normal completion mechanism.
 - The active-work widget shows only workers currently starting, running, or stopping. Inline worker responses appear progressively in live tool output.

@@ -35,10 +35,17 @@ interface BoundParent {
   agentRunning: boolean;
 }
 
+interface DispatchGroupState {
+  expected: number;
+  readonly acceptedEventIds: string[];
+}
+
 export class DeliveryCoordinator {
   private readonly boundParents = new Map<string, BoundParent>();
   private readonly pendingSettlements: WorkerSettlement[] = [];
   private readonly flushingOwners = new Set<string>();
+  private readonly dispatchGroups = new Map<string, DispatchGroupState>();
+  private readonly finalDispatchGroupEvents = new Set<string>();
   private highestAcceptedSequence = 0;
 
   bind(binding: ParentBinding): void {
@@ -75,10 +82,26 @@ export class DeliveryCoordinator {
 
     this.highestAcceptedSequence = settlement.sequence;
     this.pendingSettlements.push(settlement);
+    this.acceptDispatchGroupSettlement(settlement);
 
     const parent = this.boundParents.get(settlement.ownerSessionId);
     if (parent) this.flush(settlement.ownerSessionId, parent.binding.generation);
     return true;
+  }
+
+  skipDispatchGroupMember(
+    ownerSessionId: string,
+    dispatchGroupId: string,
+    dispatchGroupSize: number,
+  ): void {
+    const key = dispatchGroupKey(ownerSessionId, dispatchGroupId);
+    const state = this.dispatchGroups.get(key) ?? {
+      expected: dispatchGroupSize,
+      acceptedEventIds: [],
+    };
+    state.expected = Math.max(0, state.expected - 1);
+    this.dispatchGroups.set(key, state);
+    this.refreshDispatchGroupBoundary(key, state);
   }
 
   pendingCount(ownerSessionId: string): number {
@@ -91,6 +114,8 @@ export class DeliveryCoordinator {
     this.boundParents.clear();
     this.pendingSettlements.length = 0;
     this.flushingOwners.clear();
+    this.dispatchGroups.clear();
+    this.finalDispatchGroupEvents.clear();
     this.highestAcceptedSequence = 0;
   }
 
@@ -127,7 +152,8 @@ export class DeliveryCoordinator {
       );
       let latestFinalIndex = -1;
       for (let index = 0; index < queued.length; index += 1) {
-        if (queued[index]?.waveComplete) latestFinalIndex = index;
+        const settlement = queued[index];
+        if (settlement && this.isFinalBoundary(settlement)) latestFinalIndex = index;
       }
       const flushThrough = latestFinalIndex >= 0 ? latestFinalIndex : queued.length - 1;
       let flushBytesRemaining = MAX_DELIVERY_MARKDOWN_BYTES;
@@ -165,6 +191,7 @@ export class DeliveryCoordinator {
         if (pendingIndex >= 0) this.pendingSettlements.splice(pendingIndex, 1);
 
         if (triggerTurn) {
+          this.finishDispatchGroup(settlement);
           parent.agentRunning = true;
           return;
         }
@@ -188,7 +215,7 @@ export class DeliveryCoordinator {
     const content = body.length > 0
       ? `${heading}\n\n### ${settlement.title}\n${metadata}\n\n${body}`
       : `${heading}\n\n### ${settlement.title}\n${metadata}`;
-    const appendix = settlement.waveComplete
+    const appendix = this.isFinalBoundary(settlement)
       ? `\n\n---\n\n${DELIVERY_PARENT_INSTRUCTIONS}`
       : "";
 
@@ -199,6 +226,45 @@ export class DeliveryCoordinator {
       details: settlement,
     });
   }
+
+  private acceptDispatchGroupSettlement(settlement: WorkerSettlement): void {
+    if (!settlement.dispatchGroupId || !settlement.dispatchGroupSize) return;
+    const key = dispatchGroupKey(settlement.ownerSessionId, settlement.dispatchGroupId);
+    const state = this.dispatchGroups.get(key) ?? {
+      expected: settlement.dispatchGroupSize,
+      acceptedEventIds: [],
+    };
+    state.acceptedEventIds.push(settlement.eventId);
+    this.dispatchGroups.set(key, state);
+    this.refreshDispatchGroupBoundary(key, state);
+  }
+
+  private refreshDispatchGroupBoundary(key: string, state: DispatchGroupState): void {
+    if (state.expected === 0) {
+      this.dispatchGroups.delete(key);
+      return;
+    }
+    if (state.acceptedEventIds.length !== state.expected) return;
+    const finalEventId = state.acceptedEventIds.at(-1);
+    if (finalEventId) this.finalDispatchGroupEvents.add(finalEventId);
+  }
+
+  private isFinalBoundary(settlement: WorkerSettlement): boolean {
+    if (!settlement.dispatchGroupId) return settlement.waveComplete;
+    return this.finalDispatchGroupEvents.has(settlement.eventId);
+  }
+
+  private finishDispatchGroup(settlement: WorkerSettlement): void {
+    if (!settlement.dispatchGroupId) return;
+    this.dispatchGroups.delete(
+      dispatchGroupKey(settlement.ownerSessionId, settlement.dispatchGroupId),
+    );
+    this.finalDispatchGroupEvents.delete(settlement.eventId);
+  }
+}
+
+function dispatchGroupKey(ownerSessionId: string, dispatchGroupId: string): string {
+  return `${ownerSessionId}\u0000${dispatchGroupId}`;
 }
 
 function capMarkdown(content: string, appendix: string, byteLimit: number): string {

@@ -42,19 +42,24 @@ describe("orchestrator contract", () => {
     expect(updated).toContain("`new` [project]");
   });
 
-  test("defines async exclusivity, full concurrent waves, parent ownership, and lifecycle", () => {
+  test("defines async exclusivity, sibling concurrency, parent ownership, and lifecycle", () => {
     const result = appendOrchestratorContract(
       "",
       catalog([worker("zeta", "project", "reusable"), worker("alpha", "package")]),
     );
 
     expect(result).toContain("parent orchestrator");
-    expect(result).toContain("{ tasks: [{ worker, title, instructions }] }");
-    expect(result).toContain("at most 12 tasks");
-    expect(result).toContain("all tasks execute concurrently with no hidden throttle");
+    expect(result).toContain("{ worker, title, instructions }");
+    expect(result).toContain("sibling `orchestrate` calls in one assistant message");
+    expect(result).toContain("Pi executes them concurrently");
+    expect(result).toContain("preflight is atomic per call");
+    expect(result).toContain("one rejected call does not prevent valid siblings from starting");
     expect(result).toContain("full brief");
-    expect(result).toContain("must be the sole tool call in its assistant message");
-    expect(result).toContain("Mixing either with any sibling tool call");
+    expect(result).toContain("pure group of sibling `orchestrate` calls runs asynchronously");
+    expect(result).toContain("accepts a pure group concurrently");
+    expect(result).toContain("starts synthesis only after the whole group settles");
+    expect(result).toContain("Mixing `orchestrate` with another tool");
+    expect(result).toContain("`worker_send` is asynchronous only as the sole tool call");
     expect(result).toContain("inline and blocking");
     expect(result).toContain("yield the parent turn");
     expect(result).toContain("Do not duplicate delegated work");

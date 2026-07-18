@@ -44,7 +44,6 @@ import type {
 } from "./runtime.js";
 
 const STRICT_OBJECT = { additionalProperties: false } as const;
-const MAX_TASKS_PER_WAVE = 12;
 const MAX_INSTRUCTION_PREVIEW_LINES = 2;
 
 const taskSchema = Type.Object(
@@ -56,15 +55,7 @@ const taskSchema = Type.Object(
   STRICT_OBJECT,
 );
 
-const orchestrateSchema = Type.Object(
-  {
-    tasks: Type.Array(taskSchema, {
-      minItems: 1,
-      maxItems: MAX_TASKS_PER_WAVE,
-    }),
-  },
-  STRICT_OBJECT,
-);
+const orchestrateSchema = taskSchema;
 
 const statusSchema = Type.Object({}, STRICT_OBJECT);
 
@@ -104,10 +95,18 @@ const workerCloseSchema = Type.Object(
   STRICT_OBJECT,
 );
 
+export interface DispatchDecision {
+  readonly mode: "async" | "inline";
+  readonly group?: {
+    readonly id: string;
+    readonly size: number;
+  };
+}
+
 export interface OrchestrationToolDependencies {
   readonly runtime: OrchestratorRuntime;
   getCatalog(ctx: ExtensionContext): WorkerCatalog | Promise<WorkerCatalog>;
-  getDispatchMode(toolCallId: string): "async" | "inline";
+  getDispatchDecision(toolCallId: string): DispatchDecision;
 }
 
 export function registerOrchestrationTools(
@@ -118,21 +117,23 @@ export function registerOrchestrationTools(
     name: "orchestrate",
     label: "Orchestrate",
     description:
-      "Dispatch 1 to 12 independent, fully briefed tasks as one concurrent wave. A sole tool call runs asynchronously; sibling tool calls make it inline and blocking.",
-    promptSnippet: "Dispatch one concurrent wave of fully briefed worker tasks",
+      "Dispatch one fully briefed task. One or more sibling orchestrate calls run concurrently and asynchronously. Mixing orchestrate with another tool makes it inline and blocking.",
+    promptSnippet: "Dispatch one fully briefed worker task",
     promptGuidelines: [
-      "Use orchestrate for one independent worker wave, with a complete brief for every task.",
+      "Use sibling orchestrate calls for independent tasks, with one complete brief per call.",
     ],
+    executionMode: "parallel",
     parameters: orchestrateSchema,
     renderCall(args, theme, { expanded }) {
-      return renderDispatchCall(theme, args.tasks, expanded);
+      return renderDispatchCall(theme, args, expanded);
     },
     renderResult(result, { isPartial, expanded }, theme, context) {
       return renderOrchestrationResult(result, isPartial, expanded, theme, context.lastComponent);
     },
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const mode = deps.getDispatchMode(toolCallId);
-      const runtimeContext = await buildRuntimeContext(ctx, deps);
+      const decision = deps.getDispatchDecision(toolCallId);
+      const mode = decision.mode;
+      const runtimeContext = await buildRuntimeContext(ctx, deps, decision.group);
       const settlements: unknown[] = [];
       const onSettlement = mode === "inline" ? (settlement: unknown) => {
         settlements.push(settlement);
@@ -144,7 +145,7 @@ export function registerOrchestrationTools(
       const wave = await orchestrateWithMode(
         deps.runtime,
         runtimeContext,
-        params.tasks,
+        [params],
         mode,
         signal,
         onSettlement,
@@ -238,7 +239,7 @@ export function registerOrchestrationTools(
     },
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const workerId = asWorkerId(params.worker_id);
-      const mode = deps.getDispatchMode(toolCallId);
+      const mode = deps.getDispatchDecision(toolCallId).mode;
       const runtimeContext = await buildRuntimeContext(ctx, deps);
       const settlements: unknown[] = [];
       const onSettlement = mode === "inline" ? (settlement: unknown) => {
@@ -370,6 +371,7 @@ export function registerOrchestrationTools(
 async function buildRuntimeContext(
   ctx: ExtensionContext,
   deps: OrchestrationToolDependencies,
+  dispatchGroup?: DispatchDecision["group"],
 ): Promise<OrchestrationContext> {
   return {
     ownerSessionId: requireNonblank(
@@ -383,6 +385,7 @@ async function buildRuntimeContext(
     catalog: await deps.getCatalog(ctx),
     parentModel: ctx.model,
     modelRegistry: ctx.modelRegistry,
+    ...(dispatchGroup ? { dispatchGroup } : {}),
   };
 }
 
@@ -620,54 +623,48 @@ interface RenderableTask {
 
 function renderDispatchCall(
   theme: Theme,
-  tasks: readonly RenderableTask[] | undefined,
+  task: RenderableTask,
   expanded: boolean,
 ): Component {
   const container = new Container();
-  const renderableTasks = Array.isArray(tasks) ? tasks : [];
-  const count = renderableTasks.length;
   container.addChild(new Text(
-    theme.fg("toolTitle", theme.bold("orchestrate ")) + theme.fg("muted", `${count} worker${count === 1 ? "" : "s"}`),
+    theme.fg("toolTitle", theme.bold("orchestrate ")) + theme.fg("muted", safeTerminalText(task.worker)),
+    0, 0,
+  ));
+  container.addChild(new Text(
+    `${theme.fg("accent", "→")} ${theme.fg("text", theme.bold(safeTerminalText(task.title)))}`,
     0, 0,
   ));
   if (expanded) {
-    for (const task of renderableTasks) {
-      container.addChild(new Spacer(1));
-      container.addChild(new Text(`${theme.fg("accent", "→")} ${theme.fg("muted", safeTerminalText(task.worker))} · ${theme.fg("text", theme.bold(safeTerminalText(task.title)))}`, 0, 0));
-      container.addChild(new Text(safeTerminalText(task.instructions), 2, 0));
-    }
+    container.addChild(new Text(safeTerminalText(task.instructions), 2, 0));
     return new WidthBoundComponent(container);
   }
-  container.addChild(new InstructionPreview(renderableTasks, theme));
+  container.addChild(new InstructionPreview(task.instructions, theme));
   container.addChild(new Text(theme.fg("dim", keyHint("app.tools.expand", "to inspect full instructions")), 0, 0));
   return new WidthBoundComponent(container);
 }
 
 class InstructionPreview implements Component {
   constructor(
-    private readonly tasks: readonly RenderableTask[],
+    private readonly instructions: unknown,
     private readonly theme: Theme,
   ) {}
   render(width: number): string[] {
     const bounded = Math.max(1, width);
-    const lines: string[] = [];
-    for (const task of this.tasks) {
-      const heading = `${this.theme.fg("accent", "→")} ${this.theme.fg("muted", safeTerminalText(task.worker))} · ${this.theme.fg("text", this.theme.bold(safeTerminalText(task.title)))}`;
-      lines.push(truncateToWidth(heading, bounded, "…"));
+    const contentWidth = Math.max(1, bounded - 2);
+    const characterLimit = Math.max(256, Math.min(4096, contentWidth * 3));
+    const preview = compactInstructionPreview(this.instructions, characterLimit);
+    if (!preview.text) return [];
 
-      const contentWidth = Math.max(1, bounded - 2);
-      const characterLimit = Math.max(256, Math.min(4096, contentWidth * 3));
-      const preview = compactInstructionPreview(task.instructions, characterLimit);
-      if (!preview.text) continue;
-      const wrapped = wrapTextWithAnsi(preview.text, contentWidth);
-      const previewLines = wrapped.slice(0, MAX_INSTRUCTION_PREVIEW_LINES);
-      if (preview.truncated || wrapped.length > MAX_INSTRUCTION_PREVIEW_LINES) {
-        const lastIndex = previewLines.length - 1;
-        previewLines[lastIndex] = truncateToWidth(`${previewLines[lastIndex] ?? ""}…`, contentWidth, "…");
-      }
-      for (const line of previewLines) lines.push(this.theme.fg("dim", `  ${line}`));
+    const wrapped = wrapTextWithAnsi(preview.text, contentWidth);
+    const previewLines = wrapped.slice(0, MAX_INSTRUCTION_PREVIEW_LINES);
+    if (preview.truncated || wrapped.length > MAX_INSTRUCTION_PREVIEW_LINES) {
+      const lastIndex = previewLines.length - 1;
+      previewLines[lastIndex] = truncateToWidth(`${previewLines[lastIndex] ?? ""}…`, contentWidth, "…");
     }
-    return lines.map((line) => truncateToWidth(line, bounded, "…"));
+    return previewLines.map((line) =>
+      truncateToWidth(this.theme.fg("dim", `  ${line}`), bounded, "…")
+    );
   }
   invalidate(): void {}
 }

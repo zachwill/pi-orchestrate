@@ -249,6 +249,8 @@ export interface WaveRecord {
   readonly mode: WaveMode;
   readonly state: WaveState;
   readonly createdAt: number;
+  readonly dispatchGroupId?: string;
+  readonly dispatchGroupSize?: number;
 }
 
 export class InvalidTransitionError extends Error {

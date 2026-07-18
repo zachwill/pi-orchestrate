@@ -32,6 +32,8 @@ interface WorkerResultDetails {
   title: string;
   outcome: { assistantText?: string };
   waveComplete: boolean;
+  dispatchGroupId?: string;
+  dispatchGroupSize?: number;
   sessionFile?: string;
 }
 
@@ -47,7 +49,7 @@ const MODEL_ID = "deterministic-agent";
 const API_ID = "pi-orchestrate-memory";
 const BASE_SYSTEM_PROMPT = "PARENT_BASE_PROMPT";
 
-type Scenario = "async" | "mixed" | "failure";
+type Scenario = "async" | "parallel" | "mixed" | "failure";
 type ProviderConfig = Parameters<ModelRuntime["registerProvider"]>[1];
 
 interface ProviderRequest {
@@ -98,6 +100,7 @@ interface SmokeHarness {
   readonly requests: ProviderRequest[];
   readonly events: string[];
   readonly customMessagesStarted: Counter;
+  readonly childRequestsStarted: Counter;
   readonly childGates: Readonly<Record<"child-alpha" | "child-beta" | "child-inline" | "child-failure", Deferred>>;
   readonly previousAgentDir: string | undefined;
   readonly previousOffline: string | undefined;
@@ -248,6 +251,7 @@ function createProviderExtension(
   requests: ProviderRequest[],
   events: string[],
   childGates: SmokeHarness["childGates"],
+  childRequestsStarted: Counter,
 ): InlineExtension {
   const streamSimple = (
     requestedModel: Model<Api>,
@@ -274,18 +278,34 @@ function createProviderExtension(
             id: "dispatch-wave",
             name: "orchestrate",
             arguments: {
-              tasks: [
-                {
-                  worker: "scout",
-                  title: "Alpha task",
-                  instructions: "ALPHA_TASK: return deterministic alpha evidence.",
-                },
-                {
-                  worker: "scout",
-                  title: "Beta task",
-                  instructions: "BETA_TASK: return deterministic beta evidence.",
-                },
-              ],
+              worker: "scout",
+              title: "Alpha task",
+              instructions: "ALPHA_TASK: return deterministic alpha evidence.",
+            },
+          },
+        ]);
+      }
+
+      if (scenario === "parallel") {
+        return streamToolCalls([
+          {
+            type: "toolCall",
+            id: "dispatch-alpha",
+            name: "orchestrate",
+            arguments: {
+              worker: "scout",
+              title: "Alpha task",
+              instructions: "ALPHA_TASK: return deterministic alpha evidence.",
+            },
+          },
+          {
+            type: "toolCall",
+            id: "dispatch-beta",
+            name: "orchestrate",
+            arguments: {
+              worker: "scout",
+              title: "Beta task",
+              instructions: "BETA_TASK: return deterministic beta evidence.",
             },
           },
         ]);
@@ -297,11 +317,9 @@ function createProviderExtension(
           id: "dispatch-failure",
           name: "orchestrate",
           arguments: {
-            tasks: [{
-              worker: "scout",
-              title: "Failing provider task",
-              instructions: "FAIL_TASK: exercise deterministic provider failure.",
-            }],
+            worker: "scout",
+            title: "Failing provider task",
+            instructions: "FAIL_TASK: exercise deterministic provider failure.",
           },
         }]);
       }
@@ -312,13 +330,9 @@ function createProviderExtension(
           id: "dispatch-inline",
           name: "orchestrate",
           arguments: {
-            tasks: [
-              {
-                worker: "scout",
-                title: "Inline task",
-                instructions: "INLINE_TASK: return deterministic inline evidence.",
-              },
-            ],
+            worker: "scout",
+            title: "Inline task",
+            instructions: "INLINE_TASK: return deterministic inline evidence.",
           },
         },
         {
@@ -332,8 +346,10 @@ function createProviderExtension(
 
     if (kind === "parent-synthesis") {
       const synthesis = scenario === "async"
-        ? `SYNTHESIS:${transcript.includes("RESULT_ALPHA")}:${transcript.includes("RESULT_BETA")}`
-        : scenario === "failure"
+        ? `SYNTHESIS:${transcript.includes("RESULT_ALPHA")}`
+        : scenario === "parallel"
+          ? `PARALLEL_SYNTHESIS:${transcript.includes("RESULT_ALPHA")}:${transcript.includes("RESULT_BETA")}`
+          : scenario === "failure"
           ? `FAILURE_SYNTHESIS:${transcript.includes("DETERMINISTIC_PROVIDER_FAILURE")}`
           : `INLINE_SYNTHESIS:${transcript.includes("RESULT_INLINE")}:${transcript.includes("fixture-content")}`;
       events.push("provider:parent-synthesis:done");
@@ -341,9 +357,11 @@ function createProviderExtension(
     }
 
     if (kind === "child-failure") {
+      childRequestsStarted.increment();
       throw new Error("DETERMINISTIC_PROVIDER_FAILURE");
     }
 
+    childRequestsStarted.increment();
     const response = kind === "child-alpha"
       ? "RESULT_ALPHA"
       : kind === "child-beta"
@@ -448,6 +466,7 @@ async function createHarness(scenario: Scenario): Promise<SmokeHarness & { effec
   const events: string[] = [];
   const effectivePrompts: string[] = [];
   const customMessagesStarted = new Counter();
+  const childRequestsStarted = new Counter();
   const childGates = {
     "child-alpha": new Deferred(),
     "child-beta": new Deferred(),
@@ -478,7 +497,13 @@ async function createHarness(scenario: Scenario): Promise<SmokeHarness & { effec
       noContextFiles: true,
       systemPromptOverride: () => BASE_SYSTEM_PROMPT,
       extensionFactories: [
-        createProviderExtension(scenario, requests, events, childGates),
+        createProviderExtension(
+          scenario,
+          requests,
+          events,
+          childGates,
+          childRequestsStarted,
+        ),
         { name: "pi-orchestrate", factory: createOrchestrationExtension() },
         {
           name: "sdk-smoke-observer",
@@ -527,6 +552,7 @@ async function createHarness(scenario: Scenario): Promise<SmokeHarness & { effec
       events,
       effectivePrompts,
       customMessagesStarted,
+      childRequestsStarted,
       childGates,
       previousAgentDir,
       previousOffline,
@@ -570,36 +596,16 @@ function indexOfEvent(events: readonly string[], event: string): number {
 }
 
 describe("Pi 0.80.10 SDK integration", () => {
-  test.serial("runs a pure async orchestration wave through real parent and child AgentSessions", async () => {
+  test.serial("runs a sole orchestrate call asynchronously through real parent and child AgentSessions", async () => {
     const harness = await createHarness("async");
     try {
       const session = harness.runtime.session;
-      await session.prompt("Dispatch the deterministic smoke-test wave.");
+      await session.prompt("Dispatch the deterministic smoke-test task.");
 
       expect(harness.requests.filter((request) => request.kind === "parent-initial")).toHaveLength(1);
       expect(harness.requests.filter((request) => request.kind === "parent-synthesis")).toHaveLength(0);
       expect(session.isStreaming).toBe(false);
-
-      const betaSettled = new Deferred();
-      let ownerSessionId = "";
-      const host = getProcessHost()!;
-      const unsubscribeSettlement = host.runtime.subscribeSettlement((settlement) => {
-        if (settlement.title !== "Beta task") return;
-        ownerSessionId = settlement.ownerSessionId;
-        betaSettled.resolve();
-      });
-      harness.childGates["child-beta"].resolve();
-      await betaSettled.promise;
-      unsubscribeSettlement();
-
-      let workerMessages = session.messages.filter(isWorkerResultMessage);
-      expect(workerMessages).toHaveLength(1);
-      expect(textContent(workerMessages[0]?.content)).toContain("RESULT_BETA");
-      expect(harness.requests.filter((request) => request.kind === "parent-synthesis")).toHaveLength(0);
-      const intermediateSnapshot = await host.runtime.snapshot(ownerSessionId);
-      expect(intermediateSnapshot.workers
-        .filter((worker) => worker.status === "starting" || worker.status === "running")
-        .map((worker) => worker.title)).toEqual(["Alpha task"]);
+      await harness.childRequestsStarted.waitFor(1);
 
       harness.childGates["child-alpha"].resolve();
       await harness.customMessagesStarted.waitFor(1);
@@ -610,20 +616,16 @@ describe("Pi 0.80.10 SDK integration", () => {
       expect(initialParent.systemPrompt).toBe(harness.effectivePrompts[0]!);
       expect(initialParent.systemPrompt).toStartWith(BASE_SYSTEM_PROMPT);
       expect(initialParent.systemPrompt).toContain("## Pi Orchestrate Contract");
+      expect(initialParent.systemPrompt).toContain("sibling `orchestrate` calls");
       expect(initialParent.systemPrompt).toContain("Trusted worker catalog");
       expect(initialParent.systemPrompt).toContain("`scout` [package]");
       expect(initialParent.systemPrompt).toContain("`investigator` [package]");
       expect(initialParent.systemPrompt).toContain("`worker` [package]");
 
       const childRequests = harness.requests.filter((request) => request.kind.startsWith("child-"));
-      expect(childRequests.map((request) => request.kind).sort()).toEqual([
-        "child-alpha",
-        "child-beta",
-      ]);
-      expect(childRequests.every((request) => request.provider === PROVIDER_ID)).toBe(true);
-      expect(childRequests.every((request) => request.model === MODEL_ID)).toBe(true);
-      expect(childRequests.every((request) => request.systemPrompt.includes("direct child worker session")))
-        .toBe(true);
+      expect(childRequests.map((request) => request.kind)).toEqual(["child-alpha"]);
+      expect(childRequests[0]).toMatchObject({ provider: PROVIDER_ID, model: MODEL_ID });
+      expect(childRequests[0]?.systemPrompt).toContain("direct child worker session");
 
       const firstAssistant = session.messages.find(
         (message): message is AssistantMessage => message.role === "assistant",
@@ -634,63 +636,42 @@ describe("Pi 0.80.10 SDK integration", () => {
           id: "dispatch-wave",
           name: "orchestrate",
           arguments: {
-            tasks: [
-              {
-                worker: "scout",
-                title: "Alpha task",
-                instructions: "ALPHA_TASK: return deterministic alpha evidence.",
-              },
-              {
-                worker: "scout",
-                title: "Beta task",
-                instructions: "BETA_TASK: return deterministic beta evidence.",
-              },
-            ],
+            worker: "scout",
+            title: "Alpha task",
+            instructions: "ALPHA_TASK: return deterministic alpha evidence.",
           },
         },
       ]);
       const acceptedResult = session.messages.find(isOrchestrateToolResult);
       expect(textContent(acceptedResult?.content)).toContain("Accepted async wave");
-      expect(acceptedResult?.details.workerIds).toHaveLength(2);
+      expect(acceptedResult?.details.workerIds).toHaveLength(1);
 
-      workerMessages = session.messages.filter(isWorkerResultMessage);
-      expect(workerMessages).toHaveLength(2);
-      expect(workerMessages.map((message) => textContent(message.content))).toEqual([
-        expect.stringContaining("RESULT_BETA"),
-        expect.stringContaining("RESULT_ALPHA"),
-      ]);
-      expect(workerMessages.map((message) => message.details.title)).toEqual([
-        "Beta task",
-        "Alpha task",
-      ]);
-      expect(workerMessages.map((message) => message.details.outcome.assistantText)).toEqual([
-        "RESULT_BETA",
-        "RESULT_ALPHA",
-      ]);
-      expect(workerMessages.map((message) => message.details.waveComplete)).toEqual([false, true]);
-      expect(workerMessages.every((message) =>
-        typeof message.details.sessionFile === "string" &&
-        message.details.sessionFile.includes(harness.root))).toBe(true);
+      const workerMessages = session.messages.filter(isWorkerResultMessage);
+      expect(workerMessages).toHaveLength(1);
+      expect(textContent(workerMessages[0]?.content)).toContain("RESULT_ALPHA");
+      expect(workerMessages[0]?.details).toMatchObject({
+        title: "Alpha task",
+        outcome: { assistantText: "RESULT_ALPHA" },
+        waveComplete: true,
+      });
+      expect(workerMessages[0]?.details.sessionFile).toContain(harness.root);
 
       const synthesisRequests = harness.requests.filter((request) => request.kind === "parent-synthesis");
       expect(synthesisRequests).toHaveLength(1);
       expect(synthesisRequests[0]!.transcript).toContain("RESULT_ALPHA");
-      expect(synthesisRequests[0]!.transcript).toContain("RESULT_BETA");
-      expect(assistantTexts(session.messages).at(-1)).toBe("SYNTHESIS:true:true");
+      expect(assistantTexts(session.messages).at(-1)).toBe("SYNTHESIS:true");
       expect(harness.events.filter((event) => event === "parent:agent_start")).toHaveLength(2);
 
-      const betaDone = indexOfEvent(harness.events, "provider:child-beta:done");
       const alphaDone = indexOfEvent(harness.events, "provider:child-alpha:done");
       const initialSettled = indexOfEvent(harness.events, "parent:agent_settled");
-      const resultDeliveries = harness.events
-        .map((event, index) => ({ event, index }))
-        .filter(({ event }) => event === "parent:custom:pi-orchestrate-worker-result")
-        .map(({ index }) => index);
+      const resultDelivered = indexOfEvent(
+        harness.events,
+        "parent:custom:pi-orchestrate-worker-result",
+      );
       const synthesisStarted = indexOfEvent(harness.events, "provider:parent-synthesis:start");
-      expect(betaDone).toBeLessThan(alphaDone);
       expect(initialSettled).toBeLessThan(alphaDone);
-      expect(alphaDone).toBeLessThan(resultDeliveries[0]!);
-      expect(resultDeliveries[0]!).toBeLessThan(synthesisStarted);
+      expect(alphaDone).toBeLessThan(resultDelivered);
+      expect(resultDelivered).toBeLessThan(synthesisStarted);
       expect(session.messages.some((message) =>
         message.role === "assistant" && message.content.some((part) =>
           part.type === "toolCall" && part.name === "orchestration_status"))).toBe(false);
@@ -699,6 +680,91 @@ describe("Pi 0.80.10 SDK integration", () => {
       harness.disposed = true;
       expect(harness.events.at(-1)).toBe("parent:session_shutdown:quit");
       expect(getProcessHost()).toBeUndefined();
+    } finally {
+      await disposeHarness(harness);
+    }
+  }, 4_000);
+
+  test.serial("accepts sibling orchestrate calls concurrently and synthesizes after the group", async () => {
+    const harness = await createHarness("parallel");
+    try {
+      const session = harness.runtime.session;
+      await session.prompt("Dispatch two independent smoke-test tasks.");
+
+      await harness.childRequestsStarted.waitFor(2);
+      expect(harness.requests.filter((request) => request.kind.startsWith("child-")).map(
+        (request) => request.kind,
+      ).sort()).toEqual(["child-alpha", "child-beta"]);
+      expect(session.isStreaming).toBe(false);
+
+      const firstAssistant = session.messages.find(
+        (message): message is AssistantMessage => message.role === "assistant",
+      );
+      expect(firstAssistant?.content.filter((part) => part.type === "toolCall")).toEqual([
+        {
+          type: "toolCall",
+          id: "dispatch-alpha",
+          name: "orchestrate",
+          arguments: {
+            worker: "scout",
+            title: "Alpha task",
+            instructions: "ALPHA_TASK: return deterministic alpha evidence.",
+          },
+        },
+        {
+          type: "toolCall",
+          id: "dispatch-beta",
+          name: "orchestrate",
+          arguments: {
+            worker: "scout",
+            title: "Beta task",
+            instructions: "BETA_TASK: return deterministic beta evidence.",
+          },
+        },
+      ]);
+      const acceptedResults = session.messages.filter(isOrchestrateToolResult);
+      expect(acceptedResults).toHaveLength(2);
+      expect(acceptedResults.every((result) =>
+        textContent(result.content).includes("Accepted async wave"))).toBe(true);
+      expect(acceptedResults.every((result) => result.details.workerIds.length === 1)).toBe(true);
+
+      const betaSettled = new Deferred();
+      const unsubscribeSettlement = getProcessHost()!.runtime.subscribeSettlement((settlement) => {
+        if (settlement.title === "Beta task") betaSettled.resolve();
+      });
+      harness.childGates["child-beta"].resolve();
+      await betaSettled.promise;
+      expect(session.messages.filter(isWorkerResultMessage)).toHaveLength(1);
+      expect(harness.requests.filter((request) => request.kind === "parent-synthesis"))
+        .toHaveLength(0);
+
+      harness.childGates["child-alpha"].resolve();
+      await harness.customMessagesStarted.waitFor(1);
+      unsubscribeSettlement();
+      await session.agent.waitForIdle();
+
+      const workerMessages = session.messages.filter(isWorkerResultMessage);
+      expect(workerMessages).toHaveLength(2);
+      expect(workerMessages.map((message) => message.details.title)).toEqual([
+        "Beta task",
+        "Alpha task",
+      ]);
+      expect(workerMessages.map((message) => textContent(message.content)).join("\n"))
+        .toContain("RESULT_ALPHA");
+      expect(workerMessages.map((message) => textContent(message.content)).join("\n"))
+        .toContain("RESULT_BETA");
+      expect(workerMessages.map((message) => message.details.waveComplete)).toEqual([true, true]);
+      expect(workerMessages.map((message) => ({
+        id: message.details.dispatchGroupId,
+        size: message.details.dispatchGroupSize,
+      }))).toEqual([
+        { id: "orchestrate:dispatch-alpha", size: 2 },
+        { id: "orchestrate:dispatch-alpha", size: 2 },
+      ]);
+      expect(assistantTexts(session.messages).at(-1)).toBe("PARALLEL_SYNTHESIS:true:true");
+      expect(harness.requests.filter((request) => request.kind === "parent-synthesis"))
+        .toHaveLength(1);
+      expect(harness.events.filter((event) => event === "parent:agent_start")).toHaveLength(2);
     } finally {
       await disposeHarness(harness);
     }
