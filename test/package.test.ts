@@ -185,6 +185,7 @@ describe("published documentation", () => {
     const dispatch = markdownSection(readme, "Dispatch");
     const results = markdownSection(readme, "Results and ownership");
     const lifecycle = markdownSection(readme, "Lifecycle");
+    const parent = markdownSection(readme, "Parent contract");
     const catalog = markdownSection(readme, "Worker catalog");
     const trust = markdownSection(readme, "Trust and isolation");
 
@@ -209,6 +210,11 @@ describe("published documentation", () => {
     expectBlockWith(lifecycle, [/\bone-shot\b/i, /\bcompleted\b/i, /\breusable\b/i, /\bready\b/i]);
     expectBlockWith(lifecycle, [/\bworker_send\b/i, /\bworker_close\b/i, /\bworker_abort\b/i]);
     expectBlockWith(lifecycle, [/\bprocess\b/i, /\breloads?\b/i, /\bclose\b/i]);
+
+    expectBlockWith(parent, [/\bbounded\b/i, /\bindependent\b/i, /\bparallel\b/i]);
+    expectBlockWith(parent, [/\bself-contained\b/i, /\bsuccess criteria\b/i, /\bexpected output\b/i]);
+    expectBlockWith(parent, [/\bresults expose\b/i, /\bparallel wave\b/i, /\bwhole task\b/i]);
+    expectBlockWith(parent, [/\breview\b/i, /\bverify\b/i, /\bfinal answer\b/i]);
 
     const precedence = catalog.match(/^\d+\. .*$/gm) ?? [];
     expect(catalog).toMatch(/precedence/i);

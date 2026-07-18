@@ -53,15 +53,26 @@ describe("orchestrator contract", () => {
       catalog([worker("zeta", "project", "reusable"), worker("alpha", "package")]),
     );
 
+    expectContractRule(result, [/\bbroad\b/i, /\bbounded\b/i, /\bindependent\b/i, /\bparallel\b/i]);
     expectContractRule(result, [
       /`orchestrate`/,
       /\{ worker, title, instructions \}/,
       /\bsibling\b/i,
       /\bone assistant message\b/i,
     ]);
+    expectContractRule(result, [
+      /\bthorough\b/i,
+      /\bself-contained\b/i,
+      /\bobjective\b/i,
+      /\bscope\b/i,
+      /\bsuccess criteria\b/i,
+      /\bexpected output\b/i,
+    ]);
     expectContractRule(result, [/`orchestrate`/, /\basynchronously\b/i, /\binline\b/i, /\bblocking\b/i]);
     expectContractRule(result, [/\bpoll\b/i, /`orchestration_status`/]);
+    expectContractRule(result, [/\bresults\b/i, /\bnew independent work\b/i, /\bparallel wave\b/i, /\bwhole task\b/i]);
     expectContractRule(result, [/\bparent\b/i, /\bsynthesi[sz]/i, /\breview/i, /\bverification\b/i]);
+    expect(result).not.toContain("active-work widget");
     expectContractRule(result, [/\breusable\b/i, /\bready\b/i, /`worker_send`/, /`worker_close`/]);
 
     expectContractRule(result, [/`alpha`/, /\bpackage\b/i, /\bone-shot\b/i]);

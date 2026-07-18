@@ -65,11 +65,12 @@ Workers, runs, and queued delivery survive extension reloads and session switche
 
 Pi Orchestrate injects the authoritative orchestration contract and trusted catalog into the parent system prompt. The parent remains responsible for the task end to end:
 
-1. Keep trivial or tightly coupled work in the parent session.
-2. Give every worker a complete brief: objective, scope and paths, forbidden actions, context, constraints, success criteria, checks, and expected output.
+1. Keep trivial or tightly coupled work in the parent. Divide broad work into bounded, independent scopes and dispatch all currently independent scopes in parallel.
+2. Give every worker a thorough, self-contained brief with the objective, paths and scope, context, success criteria, and expected output. State forbidden actions explicitly.
 3. Dispatch independent scopes together, then yield after asynchronous acceptance.
-4. Review evidence and changes, resolve conflicts, integrate deliberately, and verify the result.
-5. Produce the final answer from the parent session.
+4. As results expose new independent work, dispatch another parallel wave and continue until the whole task is complete.
+5. Review evidence and changes, resolve conflicts, integrate deliberately, and verify the result.
+6. Produce the final answer from the parent session.
 
 Workers provide bounded evidence or changes. They do not replace parent judgment.
 
