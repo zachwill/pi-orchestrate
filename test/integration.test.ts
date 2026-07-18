@@ -302,7 +302,7 @@ describe("Pi Orchestrate extension integration", () => {
     const shared = fakeHost();
     install(pi, shared.host);
 
-    expect(pi.tools.map((tool) => tool.name)).toEqual(TOOL_NAMES);
+    expect(pi.tools.map((tool) => tool.name)).toEqual([...TOOL_NAMES]);
     expect(pi.renderers).toEqual(["pi-orchestrate-worker-result"]);
     expect(pi.tools.map((tool) => tool.name)).not.toContain("worker_status");
     expect(pi.tools.map((tool) => tool.name)).not.toContain("worker_respond");

@@ -347,7 +347,10 @@ describe("orchestration admission and concurrency", () => {
     expect(await orchestrator.snapshot("owner")).toEqual({ waves: [], workers: [] });
 
     const accepted = await orchestrator.orchestrate(owner, [task("known")], "async");
-    expect(accepted).toEqual({ id: "wave-1", workerIds: ["worker-1"] });
+    expect({
+      id: String(accepted.id),
+      workerIds: accepted.workerIds.map(String),
+    }).toEqual({ id: "wave-1", workerIds: ["worker-1"] });
     await tracker.starts.waitFor(1);
     handle.promptPlans[0]!.gate.resolve(undefined);
     await handle.disposed.promise;
@@ -452,7 +455,7 @@ describe("completion, reusable workers, and wave ownership", () => {
 
     const completed = await completion.promise;
     expect(completed.results.map((item) => item.worker)).toEqual(["alpha", "beta", "gamma"]);
-    expect(completed.results.map((item) => item.workerId)).toEqual(accepted.workerIds);
+    expect(completed.results.map((item) => item.workerId)).toEqual([...accepted.workerIds]);
     expect(completed.results.map((item) => item.outcome.status)).toEqual([
       "completed",
       "completed",
@@ -562,7 +565,7 @@ describe("completion, reusable workers, and wave ownership", () => {
 
     const snapshot = await orchestrator.snapshot("owner");
     expect(snapshot.waves).toHaveLength(MAX_COMPLETED_WAVE_HISTORY);
-    expect(snapshot.waves[0]?.id).toBe("wave-3");
+    expect(String(snapshot.waves[0]?.id)).toBe("wave-3");
     expect(snapshot.workers).toHaveLength(MAX_TERMINAL_WORKER_HISTORY + 1);
     expect(snapshot.workers.some((worker) => worker.id === reusableId && worker.status === "ready")).toBe(true);
     expect(snapshot.workers.some((worker) => worker.id === "worker-2")).toBe(false);
@@ -1001,6 +1004,93 @@ describe("keyed scheduling and reentrant reusable sends", () => {
     await scheduler.close();
   });
 
+  test("remove waits for interrupted workflow finalization", async () => {
+    const scheduler = createWorkflowScheduler<string>();
+    const started = new Deferred();
+    const finalizerStarted = new Deferred();
+    const finalizerGate = new Deferred();
+    const finalized = new Deferred();
+
+    scheduler.start(
+      "worker",
+      Effect.sync(() => started.resolve(undefined)).pipe(
+        Effect.andThen(Effect.never),
+        Effect.ensuring(
+          Effect.sync(() => finalizerStarted.resolve(undefined)).pipe(
+            Effect.andThen(Effect.promise(() => finalizerGate.promise)),
+            Effect.andThen(Effect.sync(() => finalized.resolve(undefined))),
+          ),
+        ),
+      ),
+      () => undefined,
+    );
+    await started.promise;
+
+    const removing = scheduler.remove("worker");
+    await finalizerStarted.promise;
+    await expectPending(removing);
+    finalizerGate.resolve(undefined);
+    await removing;
+    await finalized.promise;
+    await scheduler.close();
+  });
+
+  test("interruption-only causes never call the defect handler", async () => {
+    const scheduler = createWorkflowScheduler<string>();
+    const started = new Deferred();
+    const finalized = new Deferred();
+    const defects: unknown[] = [];
+
+    scheduler.start(
+      "worker",
+      Effect.sync(() => started.resolve(undefined)).pipe(
+        Effect.andThen(Effect.never),
+        Effect.ensuring(Effect.sync(() => finalized.resolve(undefined))),
+      ),
+      (error) => defects.push(error),
+    );
+    await started.promise;
+
+    await scheduler.remove("worker");
+    await finalized.promise;
+    expect(defects).toEqual([]);
+    await scheduler.close();
+  });
+
+  test("concurrent close calls join one disposal and run finalizers once", async () => {
+    const scheduler = createWorkflowScheduler<string>();
+    const started = new Deferred();
+    const finalizerStarted = new Deferred();
+    const finalizerGate = new Deferred();
+    let finalizerRuns = 0;
+
+    scheduler.start(
+      "worker",
+      Effect.sync(() => started.resolve(undefined)).pipe(
+        Effect.andThen(Effect.never),
+        Effect.ensuring(
+          Effect.sync(() => {
+            finalizerRuns += 1;
+            finalizerStarted.resolve(undefined);
+          }).pipe(Effect.andThen(Effect.promise(() => finalizerGate.promise))),
+        ),
+      ),
+      () => undefined,
+    );
+    await started.promise;
+
+    const firstClose = scheduler.close();
+    const secondClose = scheduler.close();
+    expect(secondClose).toBe(firstClose);
+    await finalizerStarted.promise;
+    await Promise.all([expectPending(firstClose), expectPending(secondClose)]);
+    expect(finalizerRuns).toBe(1);
+
+    finalizerGate.resolve(undefined);
+    await Promise.all([firstClose, secondClose]);
+    expect(finalizerRuns).toBe(1);
+  });
+
   test("completion listeners can synchronously send the next reusable generation", async () => {
     const tracker = new PromptTracker();
     const first = promptPlan({ status: "ready", assistantText: "first" });
@@ -1070,16 +1160,74 @@ describe("keyed scheduling and reentrant reusable sends", () => {
 });
 
 describe("inline AbortSignal ownership", () => {
-  test("an already-aborted signal commits no wave, worker, ID, or session", async () => {
+  test("already-aborted signals preserve null, object, and default reason identity", async () => {
     const orchestrator = runtime(new FakeFactory([]));
     const owner = context("owner", [definition("worker")]);
-    const controller = new AbortController();
-    controller.abort(new Error("parent turn ended"));
+    const objectReason = { kind: "parent-turn-ended" };
+    const controllers = [new AbortController(), new AbortController(), new AbortController()];
+    controllers[0]!.abort(null);
+    controllers[1]!.abort(objectReason);
+    controllers[2]!.abort();
 
-    await expect(
-      orchestrator.orchestrate(owner, [task("worker")], "inline", controller.signal),
-    ).rejects.toThrow("parent turn ended");
-    expect(await orchestrator.snapshot("owner")).toEqual({ waves: [], workers: [] });
+    for (const controller of controllers) {
+      const rejectedReason = await orchestrator
+        .orchestrate(owner, [task("worker")], "inline", controller.signal)
+        .then(
+          () => "unexpected success",
+          (reason: unknown) => reason,
+        );
+      expect(rejectedReason).toBe(controller.signal.reason);
+      expect(await orchestrator.snapshot("owner")).toEqual({ waves: [], workers: [] });
+    }
+    expect(controllers[0]!.signal.reason).toBeNull();
+    expect(controllers[1]!.signal.reason).toBe(objectReason);
+    expect(controllers[2]!.signal.reason).toBeInstanceOf(DOMException);
+    await orchestrator.shutdown();
+  });
+
+  test("admitted inline signals preserve null, object, and default reason identity", async () => {
+    const tracker = new PromptTracker();
+    const plans = Array.from({ length: 3 }, (_, index) => ({
+      handle: new FakeHandle(
+        `inline-reason-${index}`,
+        [promptPlan({ status: "completed", assistantText: "late" })],
+        tracker,
+      ),
+    }));
+    const orchestrator = runtime(new FakeFactory(plans));
+    const owner = context("owner", [definition("worker")]);
+    const objectReason = { kind: "inline-cancelled" };
+    const aborts = [
+      (controller: AbortController) => controller.abort(null),
+      (controller: AbortController) => controller.abort(objectReason),
+      (controller: AbortController) => controller.abort(),
+    ];
+
+    for (let index = 0; index < aborts.length; index += 1) {
+      const controller = new AbortController();
+      const inline = orchestrator.orchestrate(
+        owner,
+        [task("worker")],
+        "inline",
+        controller.signal,
+      );
+      await tracker.starts.waitFor(index + 1);
+      aborts[index]!(controller);
+
+      const rejectedReason = await inline.then(
+        () => "unexpected success",
+        (reason: unknown) => reason,
+      );
+      expect(rejectedReason).toBe(controller.signal.reason);
+      const snapshot = await orchestrator.snapshot("owner");
+      expect(snapshot.waves[index]).toMatchObject({ state: "complete" });
+      expect(snapshot.workers[index]).toMatchObject({
+        status: "aborted",
+        outcome: { status: "aborted" },
+      });
+    }
+    expect((await orchestrator.snapshot("owner")).waves).toHaveLength(3);
+    for (const plan of plans) plan.handle.promptPlans[0]!.gate.resolve(undefined);
     await orchestrator.shutdown();
   });
 

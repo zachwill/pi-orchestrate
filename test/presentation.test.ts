@@ -1,7 +1,7 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { initTheme, type ExtensionAPI, type ExtensionContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type Component } from "@earendil-works/pi-tui";
-import type { WorkerRecord, WorkerStatus } from "../extension/domain.ts";
+import type { WaveId, WorkerId, WorkerRecord, WorkerStatus } from "../extension/domain.ts";
 import type { RuntimeSnapshot } from "../extension/runtime.ts";
 import {
   MAX_RESULT_PREVIEW_LINES,
@@ -19,10 +19,10 @@ const theme = { fg: (_: string, text: string) => text, bg: (_: string, text: str
 const usage = { input: 1200, output: 345, cacheRead: 12, cacheWrite: 3, cost: 0.0123, contextTokens: 12345, turns: 2 };
 
 function worker(id: string, status: WorkerStatus, overrides: Partial<WorkerRecord> = {}): WorkerRecord {
-  return { id, worker: "scout", ownerSessionId: "owner", waveId: "wave", title: `Task ${id}`, instructions: "Do it", lifecycle: status === "ready" ? "reusable" : "one-shot", status, usage, messageDirection: status === "starting" ? "to-model" : "from-model", startedAt: Date.now() - 78_000, ...overrides } as WorkerRecord;
+  return { id: id as WorkerId, worker: "scout", ownerSessionId: "owner", waveId: "wave" as WaveId, title: `Task ${id}`, instructions: "Do it", lifecycle: status === "ready" ? "reusable" : "one-shot", status, usage, messageDirection: status === "starting" ? "to-model" : "from-model", startedAt: Date.now() - 78_000, ...overrides };
 }
 function snapshot(workers: readonly WorkerRecord[]): RuntimeSnapshot {
-  return { workers, waves: [{ id: "wave", ownerSessionId: "owner", workerIds: workers.map((item) => item.id), mode: "async", state: "running", createdAt: Date.now() - 78_000 }] } as RuntimeSnapshot;
+  return { workers, waves: [{ id: "wave" as WaveId, ownerSessionId: "owner", workerIds: workers.map((item) => item.id), mode: "async", state: "running", createdAt: Date.now() - 78_000 }] };
 }
 function settlement(status: "completed" | "ready" | "failed" | "aborted" = "completed", text = "A useful worker response.") {
   return {

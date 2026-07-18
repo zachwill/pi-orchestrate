@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
   getAgentDir,
@@ -298,6 +299,7 @@ function snapshot(): RuntimeSnapshot {
         usage,
         outcome: { status: "ready", assistantText: "Ready for follow-up." },
         sessionFile: "/sessions/worker-owned.jsonl",
+        startedAt: 123,
       },
     ],
   };
@@ -574,13 +576,13 @@ describe("registerOrchestrationTools", () => {
       signal,
     }))).toEqual([
       {
-        workerId: "worker-ready",
+        workerId: "worker-ready" as WorkerId,
         instructions: "Continue.",
         mode: "async",
         signal: undefined,
       },
       {
-        workerId: "worker-ready",
+        workerId: "worker-ready" as WorkerId,
         instructions: "Finish.",
         mode: "inline",
         signal: controller.signal,
@@ -660,8 +662,8 @@ describe("registerOrchestrationTools", () => {
     await invoke(pi, "worker_abort", "abort-all", { all: true }, context);
 
     expect(runtime.abortCalls).toEqual([
-      { ownerSessionId: "owner-session", target: { workerIds: ["worker-1", "worker-2"] } },
-      { ownerSessionId: "owner-session", target: { waveId: "wave-1" } },
+      { ownerSessionId: "owner-session", target: { workerIds: ["worker-1" as WorkerId, "worker-2" as WorkerId] } },
+      { ownerSessionId: "owner-session", target: { waveId: "wave-1" as WaveId } },
       { ownerSessionId: "owner-session", target: { all: true } },
     ]);
 
@@ -698,7 +700,7 @@ describe("registerOrchestrationTools", () => {
     );
 
     expect(runtime.closeCalls).toEqual([
-      { ownerSessionId: "owner-session", workerId: "worker-ready" },
+      { ownerSessionId: "owner-session", workerId: "worker-ready" as WorkerId },
     ]);
     expect(result.details).toEqual({ workerId: "worker-ready" });
     expect(result).not.toHaveProperty("terminate");
@@ -746,7 +748,7 @@ describe("registerOrchestrationTools", () => {
       instructions: index === 0 ? instructions : `  exact message ${index}  `,
     }));
     const renderContext = (expanded: boolean) => ({ expanded, argsComplete: true, cwd: "/workspace", state: {}, invalidate() {} }) as never;
-    const collapsed = pi.tool("orchestrate").renderCall!(tasks.length ? { tasks } as never : never, themeForRendering(), renderContext(false)).render(32);
+    const collapsed = pi.tool("orchestrate").renderCall!({ tasks } as never, themeForRendering(), renderContext(false)).render(32);
     expect(collapsed.every((line) => Bun.stringWidth(line) <= 32)).toBe(true);
     const collapsedText = Bun.stripANSI(collapsed.join("\n"));
     for (let index = 0; index < 12; index += 1) expect(collapsedText).toContain(`T${index}`);

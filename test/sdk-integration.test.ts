@@ -28,6 +28,20 @@ import {
 import { getProcessHost, quitProcessHost } from "../extension/host.js";
 import { createOrchestrationExtension } from "../extension/index.js";
 
+interface WorkerResultDetails {
+  title: string;
+  outcome: { assistantText?: string };
+  waveComplete: boolean;
+  sessionFile?: string;
+}
+
+type WorkerResultMessage = Extract<AgentMessage, { role: "custom" }> & {
+  details: WorkerResultDetails;
+};
+type OrchestrateToolResultMessage = Extract<AgentMessage, { role: "toolResult" }> & {
+  details: { workerIds: unknown[] };
+};
+
 const PROVIDER_ID = "pi-orchestrate-sdk-smoke";
 const MODEL_ID = "deterministic-agent";
 const API_ID = "pi-orchestrate-memory";
@@ -189,6 +203,22 @@ function textContent(content: unknown): string {
     })
     .filter(Boolean)
     .join("\n");
+}
+
+function isWorkerResultMessage(message: AgentMessage): message is WorkerResultMessage {
+  if (message.role !== "custom" || message.customType !== "pi-orchestrate-worker-result") return false;
+  const details = message.details;
+  if (!details || typeof details !== "object") return false;
+  if (!("title" in details) || typeof details.title !== "string") return false;
+  if (!("outcome" in details) || !details.outcome || typeof details.outcome !== "object") return false;
+  return "waveComplete" in details && typeof details.waveComplete === "boolean";
+}
+
+function isOrchestrateToolResult(message: AgentMessage): message is OrchestrateToolResultMessage {
+  if (message.role !== "toolResult" || message.toolName !== "orchestrate") return false;
+  const details = message.details;
+  return !!details && typeof details === "object" &&
+    "workerIds" in details && Array.isArray(details.workerIds);
 }
 
 function transcriptText(context: Context): string {
@@ -562,10 +592,7 @@ describe("Pi 0.80.10 SDK integration", () => {
       await betaSettled.promise;
       unsubscribeSettlement();
 
-      let workerMessages = session.messages.filter(
-        (message) => message.role === "custom" &&
-          message.customType === "pi-orchestrate-worker-result",
-      );
+      let workerMessages = session.messages.filter(isWorkerResultMessage);
       expect(workerMessages).toHaveLength(1);
       expect(textContent(workerMessages[0]?.content)).toContain("RESULT_BETA");
       expect(harness.requests.filter((request) => request.kind === "parent-synthesis")).toHaveLength(0);
@@ -580,7 +607,7 @@ describe("Pi 0.80.10 SDK integration", () => {
 
       const initialParent = harness.requests.find((request) => request.kind === "parent-initial")!;
       expect(harness.effectivePrompts).toHaveLength(1);
-      expect(initialParent.systemPrompt).toBe(harness.effectivePrompts[0]);
+      expect(initialParent.systemPrompt).toBe(harness.effectivePrompts[0]!);
       expect(initialParent.systemPrompt).toStartWith(BASE_SYSTEM_PROMPT);
       expect(initialParent.systemPrompt).toContain("## Pi Orchestrate Contract");
       expect(initialParent.systemPrompt).toContain("Trusted worker catalog");
@@ -622,16 +649,11 @@ describe("Pi 0.80.10 SDK integration", () => {
           },
         },
       ]);
-      const acceptedResult = session.messages.find(
-        (message) => message.role === "toolResult" && message.toolName === "orchestrate",
-      );
+      const acceptedResult = session.messages.find(isOrchestrateToolResult);
       expect(textContent(acceptedResult?.content)).toContain("Accepted async wave");
       expect(acceptedResult?.details.workerIds).toHaveLength(2);
 
-      workerMessages = session.messages.filter(
-        (message) => message.role === "custom" &&
-          message.customType === "pi-orchestrate-worker-result",
-      );
+      workerMessages = session.messages.filter(isWorkerResultMessage);
       expect(workerMessages).toHaveLength(2);
       expect(workerMessages.map((message) => textContent(message.content))).toEqual([
         expect.stringContaining("RESULT_BETA"),
@@ -690,10 +712,7 @@ describe("Pi 0.80.10 SDK integration", () => {
       await harness.customMessagesStarted.waitFor(1);
       await session.agent.waitForIdle();
 
-      const workerMessages = session.messages.filter(
-        (message) => message.role === "custom" &&
-          message.customType === "pi-orchestrate-worker-result",
-      );
+      const workerMessages = session.messages.filter(isWorkerResultMessage);
       expect(workerMessages).toHaveLength(1);
       expect(workerMessages[0]?.details).toMatchObject({
         title: "Failing provider task",

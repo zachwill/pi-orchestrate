@@ -1345,7 +1345,8 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
 }
 
 function abortSignalReason(signal: AbortSignal): unknown {
-  return signal.reason ?? new DOMException("This operation was aborted", "AbortError");
+  if ("reason" in signal) return signal.reason;
+  return new DOMException("This operation was aborted", "AbortError");
 }
 
 function addAll(target: Set<string>, source: ReadonlySet<string>): void {

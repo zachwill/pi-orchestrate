@@ -76,6 +76,7 @@ function assistant(
   usage: Partial<AssistantMessage["usage"]> = {},
   errorMessage?: string,
 ): AssistantMessage {
+  const { cost, ...usageFields } = usage;
   return {
     role: "assistant",
     content: [
@@ -95,15 +96,14 @@ function assistant(
       cacheRead: 0,
       cacheWrite: 0,
       totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-      ...usage,
+      ...usageFields,
       cost: {
         input: 0,
         output: 0,
         cacheRead: 0,
         cacheWrite: 0,
         total: 0,
-        ...usage.cost,
+        ...cost,
       },
     },
   };
@@ -176,10 +176,10 @@ class SubscriptionFailureSession extends FakeSession {
   }
 }
 
-type ResourceLoaderInput = Parameters<WorkerSessionDependencies["createResourceLoader"]>[0];
+type ServicesInput = Parameters<WorkerSessionDependencies["createServices"]>[0];
+type ResourceLoaderInput = ServicesInput["resourceLoaderOptions"];
 type SessionManagerInput = Parameters<WorkerSessionDependencies["createSessionManager"]>[0];
 type SettingsInput = Parameters<WorkerSessionDependencies["createSettingsManager"]>[0];
-type SettingsOptions = Parameters<WorkerSessionDependencies["createSettingsManager"]>[1];
 type ModelRuntimeInput = Parameters<WorkerSessionDependencies["createModelRuntime"]>[0];
 type AgentSessionInput = Parameters<WorkerSessionDependencies["createAgentSession"]>[0];
 type ProviderConfig = NonNullable<ReturnType<ModelRegistry["getRegisteredProviderConfig"]>>;
@@ -224,7 +224,7 @@ interface Harness {
   runtime: FakeModelRuntime;
   loaderOptions: ResourceLoaderInput[];
   sessionManagerInputs: SessionManagerInput[];
-  settingsInputs: Array<{ settings: SettingsInput; options: SettingsOptions }>;
+  settingsInputs: SettingsInput[];
   modelRuntimeInputs: ModelRuntimeInput[];
   agentInputs: AgentSessionInput[];
   reload: ReturnType<typeof mock>;
@@ -256,7 +256,7 @@ function harness(
 ): Harness {
   const loaderOptions: ResourceLoaderInput[] = [];
   const sessionManagerInputs: SessionManagerInput[] = [];
-  const settingsInputs: Array<{ settings: SettingsInput; options: SettingsOptions }> = [];
+  const settingsInputs: SettingsInput[] = [];
   const modelRuntimeInputs: ModelRuntimeInput[] = [];
   const agentInputs: AgentSessionInput[] = [];
   const reload = mock(async () => {});
@@ -282,12 +282,7 @@ function harness(
       projectTrusted: boolean;
       compaction: WorkerDefinition["compaction"];
     }) {
-      settingsInputs.push({
-        settings: input.compaction === undefined
-          ? undefined
-          : { compaction: { ...input.compaction } },
-        options: { projectTrusted: input.projectTrusted },
-      });
+      settingsInputs.push(input);
       return { kind: "settings-manager" } as unknown as SettingsManager;
     },
     async resolveExtensionPaths() {
@@ -295,7 +290,7 @@ function harness(
     },
     createSessionManager(input: SessionManagerInput) {
       sessionManagerInputs.push(input);
-      return { kind: "session-manager", entries: [] };
+      return { kind: "session-manager", entries: [] } as unknown as SessionManager;
     },
     async createModelRuntime(input: ModelRuntimeInput) {
       modelRuntimeInputs.push(input);
@@ -312,7 +307,7 @@ function harness(
       try {
         await loader.reload();
       } catch (error) {
-        loader.dispose();
+        loaderDispose();
         throw error;
       }
       return {
@@ -325,12 +320,7 @@ function harness(
       };
     },
     async createAgentSession(input: AgentSessionInput) {
-      agentInputs.push({
-        ...input,
-        modelRuntime: input.services.modelRuntime,
-        resourceLoader: input.services.resourceLoader,
-        settingsManager: input.services.settingsManager,
-      } as unknown as AgentSessionInput);
+      agentInputs.push(input);
       return { session };
     },
     createRuntime(input: { session: FakeSession }) {
@@ -421,9 +411,9 @@ describe("worker session factory", () => {
       noPromptTemplates: true,
       noThemes: true,
     });
-    expect(loader.appendSystemPrompt[0]).toBe("Worker system prompt.");
-    expect(loader.appendSystemPrompt[1]).toContain("direct child worker session");
-    expect(loader.appendSystemPrompt[1]).toContain("Do not spawn");
+    expect(loader.appendSystemPrompt![0]).toBe("Worker system prompt.");
+    expect(loader.appendSystemPrompt![1]).toContain("direct child worker session");
+    expect(loader.appendSystemPrompt![1]).toContain("Do not spawn");
 
     const filtered = loader.skillsOverride!({
       skills: [skill("alpha"), skill("other"), skill("beta")],
@@ -433,8 +423,10 @@ describe("worker session factory", () => {
     expect(filtered.diagnostics).toEqual([]);
 
     expect(h.settingsInputs).toEqual([{
-      settings: { compaction: { enabled: false } },
-      options: { projectTrusted: true },
+      cwd: "/project",
+      agentDir: "/agent",
+      projectTrusted: true,
+      compaction: { enabled: false },
     }]);
     expect(h.modelRuntimeInputs).toEqual([{
       authPath: "/agent/auth.json",
@@ -443,12 +435,12 @@ describe("worker session factory", () => {
     expect(h.runtime.refresh).toHaveBeenCalledTimes(2);
     expect(h.runtime.refresh).toHaveBeenNthCalledWith(1, { allowNetwork: false });
     expect(h.runtime.refresh).toHaveBeenNthCalledWith(2, { allowNetwork: false });
-    expect(h.agentInputs[0]!.model).toBe(h.runtime.models[0]);
-    expect(h.agentInputs[0]!.modelRuntime).toBe(h.runtime);
+    expect(h.agentInputs[0]!.model).toBe(h.runtime.models[0]!);
+    expect(h.agentInputs[0]!.services.modelRuntime).toBe(h.runtime as unknown as ModelRuntime);
     expect(h.agentInputs[0]!.tools).toEqual(["read", "grep", "find", "ls"]);
-    expect(h.agentInputs[0]!.resourceLoader).toBeDefined();
+    expect(h.agentInputs[0]!.services.resourceLoader).toBeDefined();
     expect(h.agentInputs[0]!.sessionManager).toBeDefined();
-    expect(h.agentInputs[0]!.settingsManager).toBeDefined();
+    expect(h.agentInputs[0]!.services.settingsManager).toBeDefined();
     expect("authStorage" in h.agentInputs[0]!).toBe(false);
     expect("modelRegistry" in h.agentInputs[0]!).toBe(false);
   });
@@ -615,7 +607,7 @@ describe("worker session factory", () => {
       options({ definition: definition({ skills: [] }), projectTrusted: false }),
     );
 
-    expect(h.settingsInputs[0]!.options).toEqual({ projectTrusted: false });
+    expect(h.settingsInputs[0]!.projectTrusted).toBe(false);
     expect(h.loaderOptions[0]).toMatchObject({ noSkills: true });
     expect(h.loaderOptions[0]!.agentsFilesOverride).toBeFunction();
     const filtered = h.loaderOptions[0]!.skillsOverride!({
@@ -679,8 +671,8 @@ describe("worker session factory", () => {
       { providerId: "provider", apiKey: "runtime-secret" },
     ]);
     expect(parentRegistry.getApiKeyAndHeaders).toHaveBeenCalledWith(runtime.models[0]);
-    expect(h.agentInputs[0]!.model).toBe(runtime.models[0]);
-    expect(h.agentInputs[0]!.modelRuntime).toBe(runtime);
+    expect(h.agentInputs[0]!.model).toBe(runtime.models[0]!);
+    expect(h.agentInputs[0]!.services.modelRuntime).toBe(runtime as unknown as ModelRuntime);
 
     const missingHarness = harness(new FakeSession(), ["alpha", "beta"], new FakeModelRuntime([]));
     const missingFactory = createWorkerSessionFactory(missingHarness.dependencies);
@@ -784,7 +776,7 @@ describe("worker session factory", () => {
         unrelatedProvider,
       );
       const childModel = childRuntime!.getModel("actual-custom", "actual-model")!;
-      expect(h.agentInputs[0]!.modelRuntime).toBe(childRuntime);
+      expect(h.agentInputs[0]!.services.modelRuntime).toBe(childRuntime!);
       expect(h.agentInputs[0]!.model).toEqual(childModel);
       const childAuth = await childRuntime!.getAuth(childModel);
       expect(childAuth?.auth.apiKey).toBe("parent-runtime-key");
@@ -853,9 +845,9 @@ describe("worker session factory", () => {
       }));
 
       const selectedModel = h.agentInputs[0]!.model;
-      expect(h.agentInputs[0]!.modelRuntime).toBe(childRuntime);
+      expect(h.agentInputs[0]!.services.modelRuntime).toBe(childRuntime!);
       expect(selectedModel).toEqual(
-        childRuntime!.getModel("refresh-only", dynamicModel.id),
+        childRuntime!.getModel("refresh-only", dynamicModel.id)!,
       );
       const response = await childRuntime!.completeSimple(selectedModel, { messages: [] });
       expect(response.content).toEqual([{ type: "text", text: "refresh-only response" }]);
@@ -1123,7 +1115,7 @@ describe("worker session factory", () => {
     expect(h.sessionManagerInputs).toEqual([
       { cwd: "/project", parentSessionFile: "/sessions/parent.jsonl" },
     ]);
-    expect((h.agentInputs[0]!.sessionManager as { entries: unknown[] }).entries).toEqual([]);
+    expect((h.agentInputs[0]!.sessionManager as unknown as { entries: unknown[] }).entries).toEqual([]);
   });
 });
 

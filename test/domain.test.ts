@@ -82,15 +82,15 @@ describe("supported tools and worker catalog", () => {
 describe("ID factories", () => {
   test("worker and wave IDs have canonical prefixes and independent sequences", () => {
     const ids = createSequentialIdFactories(3);
-    expect(ids.workerId()).toBe("worker-3");
-    expect(ids.workerId()).toBe("worker-4");
-    expect(ids.waveId()).toBe("wave-3");
-    expect(ids.waveId()).toBe("wave-4");
+    expect(String(ids.workerId())).toBe("worker-3");
+    expect(String(ids.workerId())).toBe("worker-4");
+    expect(String(ids.waveId())).toBe("wave-3");
+    expect(String(ids.waveId())).toBe("wave-4");
 
     const values = ["alpha", "beta"];
     const random = createRandomIdFactories(() => values.shift() ?? "exhausted");
-    expect(random.workerId()).toBe("worker-alpha");
-    expect(random.waveId()).toBe("wave-beta");
+    expect(String(random.workerId())).toBe("worker-alpha");
+    expect(String(random.waveId())).toBe("wave-beta");
   });
 });
 
