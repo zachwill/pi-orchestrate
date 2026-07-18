@@ -69,28 +69,16 @@ describe("per-worker result messages", () => {
     expect(output).toContain("session /sessions/worker.jsonl");
   });
 
-  test("renders a leading completion heading as an explicit success state", () => {
-    const colorTheme = {
-      ...theme,
-      fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
-    } as Theme;
-    const component = renderer()(
-      {
-        role: "custom",
-        customType: "pi-orchestrate-worker-result",
-        content: "fallback",
-        display: true,
-        details: settlement("completed", "## Completed\n\nChanged the worker bootstrap."),
-        timestamp: 1,
-      },
-      { expanded: true },
-      colorTheme,
-    )!;
-    const output = Bun.stripANSI(component.render(80).join("\n"));
+  test("removes a redundant completion heading from the worker response", () => {
+    const output = Bun.stripANSI(renderResult(
+      settlement("completed", "## Completed\n\nChanged the worker bootstrap."),
+      true,
+      80,
+    ).join("\n"));
 
-    expect(output).toContain("<success>✓ Completed</success>");
+    expect(output).toContain("✓ scout · Inspect code · 5s");
     expect(output).toContain("Changed the worker bootstrap.");
-    expect(output).not.toContain("## Completed");
+    expect(output).not.toContain("Completed");
   });
 
   test("caps collapsed content by rendered visual height and safely falls back", () => {
@@ -233,10 +221,27 @@ describe("active widget", () => {
       expect(row).toContain("2↓");
       expect(row).toContain("12k ctx");
       expect(row).toContain("A very");
-      if (width >= 72) expect(row).toContain("scout →");
-      else expect(row).not.toContain("scout →");
+      if (width >= 72) expect(row).toContain(" · scout · 2↓");
+      else expect(row).not.toContain(" · scout · 2↓");
       expect(row).not.toContain("searching");
     }
+    component.dispose();
+  });
+
+  test("italicizes the worker type between the title and turn count when space allows", () => {
+    const italicTheme = {
+      ...theme,
+      italic: (text: string) => `<italic>${text}</italic>`,
+    } as Theme;
+    const component = new WorkerStatusComponent(
+      snapshot([worker("run", "running", { worker: "investigator" })]),
+      italicTheme,
+    );
+
+    const wide = Bun.stripANSI(component.render(100)[1]!);
+    const narrow = Bun.stripANSI(component.render(60)[1]!);
+    expect(wide).toContain("Task run · <italic>investigator</italic> · 2↓ · 12k ctx");
+    expect(narrow).not.toContain("investigator");
     component.dispose();
   });
 

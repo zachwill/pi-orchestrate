@@ -253,13 +253,22 @@ export class WorkerStatusComponent implements Component {
     );
     const turns = formatTurnMarker(worker);
     const context = `${formatContextTokens(numberOrZero(worker.usage?.contextTokens))} ctx`;
-    const suffixFields = width >= 28 ? [turns, context] : width >= 12 ? [turns] : [];
-    const requiredWidth = (fields: readonly string[]) => visibleWidth(`⠋  · ${fields.join(" · ")}`) + 10;
-    const showWorker = width >= 72 && requiredWidth([worker.worker, ...suffixFields]) <= width;
-    const prefix = showWorker ? `${glyph} ${this.theme.fg("muted", worker.worker)} → ` : `${glyph} `;
+    const usageFields = width >= 28 ? [turns, context] : width >= 12 ? [turns] : [];
+    const workerType = this.theme.fg("muted", this.theme.italic(worker.worker));
+    const workerTypeFits = visibleWidth(
+      `⠋  · ${worker.worker} · ${usageFields.join(" · ")}`,
+    ) + 10 <= width;
+    const suffixFields = width >= 72 && workerTypeFits
+      ? [workerType, ...usageFields]
+      : usageFields;
+    const prefix = `${glyph} `;
     const suffix = suffixFields.length ? ` · ${suffixFields.join(" · ")}` : "";
     const titleWidth = Math.max(1, width - visibleWidth(prefix) - visibleWidth(suffix));
-    const title = truncateToWidth(this.theme.fg("text", this.theme.bold(worker.title)), titleWidth, "…");
+    const title = truncateToWidth(
+      this.theme.fg("text", this.theme.bold(worker.title)),
+      titleWidth,
+      "…",
+    );
     return `${prefix}${title}${suffix}`;
   }
 }
@@ -315,14 +324,10 @@ export class WorkerResultComponent implements Component {
     const header = `${statusIcon(details)} ${details.worker} · ${details.title}${status}${elapsed ? ` · ${elapsed}` : ""}`;
     const outcome = presentedOutcome(details);
     box.addChild(new Text(this.theme.fg(color, this.theme.bold(header)), 0, 0));
-    box.addChild(new Spacer(1));
-    if (outcome.heading) {
-      box.addChild(new Text(this.theme.fg("success", this.theme.bold(outcome.heading)), 0, 0));
-      if (outcome.body) box.addChild(new Spacer(1));
-    }
-    if (outcome.body) {
+    if (outcome) {
+      box.addChild(new Spacer(1));
       box.addChild(new WidthBoundComponent(
-        new Markdown(outcome.body, 0, 0, getMarkdownTheme()),
+        new Markdown(outcome, 0, 0, getMarkdownTheme()),
         this.expanded ? undefined : MAX_RESULT_PREVIEW_LINES,
       ));
     }
@@ -366,22 +371,19 @@ function outcomeText(outcome: WorkerOutcome): string {
   return "Worker session closed.";
 }
 
-function presentedOutcome(result: SafeSettlement): { heading?: string; body: string } {
+function presentedOutcome(result: SafeSettlement): string {
   const body = outcomeText(result.outcome);
-  if (result.status !== "completed" && result.status !== "ready") return { body };
+  if (result.status !== "completed" && result.status !== "ready") return body;
 
   const lines = body.split("\n");
   const headingIndex = lines.findIndex((line) => line.trim() !== "");
   if (headingIndex < 0 || !/^#{1,6}\s+(?:completed|complete|done)\s*#*\s*$/i.test(lines[headingIndex]!)) {
-    return { body };
+    return body;
   }
 
   lines.splice(headingIndex, 1);
   while (lines[headingIndex]?.trim() === "") lines.splice(headingIndex, 1);
-  return {
-    heading: result.status === "ready" ? "✓ Response complete" : "✓ Completed",
-    body: lines.join("\n").trimEnd(),
-  };
+  return lines.join("\n").trimEnd();
 }
 
 function settlementMetadata(result: SafeSettlement): string[] {
