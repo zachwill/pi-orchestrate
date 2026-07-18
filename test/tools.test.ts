@@ -26,6 +26,8 @@ import type {
   OrchestrationContext,
   OrchestratorRuntime,
   RuntimeSnapshot,
+  SettlementListener,
+  WorkerSettlement,
 } from "../extension/runtime.js";
 import {
   registerOrchestrationTools,
@@ -59,7 +61,7 @@ class FakeRuntime {
     mode: DispatchMode;
     signal?: AbortSignal;
   }> = [];
-  settlementToEmit: unknown | undefined;
+  settlementToEmit: WorkerSettlement | undefined;
   readonly sendCalls: Array<{
     context: OrchestrationContext;
     workerId: WorkerId;
@@ -86,8 +88,9 @@ class FakeRuntime {
     tasks: readonly { worker: string; title: string; instructions: string }[],
     mode: DispatchMode,
     signal?: AbortSignal,
-    onSettlement?: (settlement: unknown) => void,
+    onSettlement?: SettlementListener,
   ): Promise<AcceptedWave | CompletedWave> {
+    if (signal?.aborted) throw signal.reason;
     this.orchestrateCalls.push({ context, tasks, mode, signal });
     if (this.failures.orchestrate) throw this.failures.orchestrate;
     if (mode === "inline" && this.settlementToEmit) onSettlement?.(this.settlementToEmit);
@@ -100,8 +103,9 @@ class FakeRuntime {
     instructions: string,
     mode: DispatchMode,
     signal?: AbortSignal,
-    onSettlement?: (settlement: unknown) => void,
+    onSettlement?: SettlementListener,
   ): Promise<AcceptedWave | CompletedWave> {
+    if (signal?.aborted) throw signal.reason;
     this.sendCalls.push({ context, workerId, instructions, mode, signal });
     if (this.failures.send) throw this.failures.send;
     if (mode === "inline" && this.settlementToEmit) onSettlement?.(this.settlementToEmit);
@@ -507,7 +511,7 @@ describe("registerOrchestrationTools", () => {
       },
       tasks: [task],
       mode: "async",
-      signal: undefined,
+      signal: controller.signal,
     });
     expect(result.terminate).toBe(true);
     expect(result.details).toBe(runtime.acceptedWave);
@@ -515,6 +519,29 @@ describe("registerOrchestrationTools", () => {
     expect(result.content[0]?.type === "text" && result.content[0].text).toContain(
       "wave-accepted",
     );
+  });
+
+  test("rejects already-aborted async orchestrate admission with the exact reason", async () => {
+    const { pi, runtime, context, modes } = harness();
+    modes.set("orchestrate-aborted", "async");
+    const reason = { kind: "parent-turn-ended" };
+    const controller = new AbortController();
+    controller.abort(reason);
+
+    const rejectedReason = await invoke(
+      pi,
+      "orchestrate",
+      "orchestrate-aborted",
+      { worker: "scout", title: "Inspect", instructions: "Inspect." },
+      context,
+      controller.signal,
+    ).then(
+      () => "unexpected success",
+      (error: unknown) => error,
+    );
+
+    expect(rejectedReason).toBe(reason);
+    expect(runtime.orchestrateCalls).toHaveLength(0);
   });
 
   test("returns inline aggregate results without termination", async () => {
@@ -575,7 +602,7 @@ describe("registerOrchestrationTools", () => {
         workerId: "worker-ready" as WorkerId,
         instructions: "Continue.",
         mode: "async",
-        signal: undefined,
+        signal: controller.signal,
       },
       {
         workerId: "worker-ready" as WorkerId,
@@ -598,6 +625,29 @@ describe("registerOrchestrationTools", () => {
       ),
     ).rejects.toThrow("worker_id must not be blank");
     expect(runtime.sendCalls).toHaveLength(2);
+  });
+
+  test("rejects already-aborted async worker_send admission with the exact reason", async () => {
+    const { pi, runtime, context, modes } = harness();
+    modes.set("send-aborted", "async");
+    const reason = new Error("parent turn ended before admission");
+    const controller = new AbortController();
+    controller.abort(reason);
+
+    const rejectedReason = await invoke(
+      pi,
+      "worker_send",
+      "send-aborted",
+      { worker_id: "worker-ready", instructions: "Continue." },
+      context,
+      controller.signal,
+    ).then(
+      () => "unexpected success",
+      (error: unknown) => error,
+    );
+
+    expect(rejectedReason).toBe(reason);
+    expect(runtime.sendCalls).toHaveLength(0);
   });
 
   test("status forwards only the current owner and returns catalog diagnostics plus snapshot", async () => {
@@ -795,8 +845,25 @@ describe("registerOrchestrationTools", () => {
     const { pi, runtime, context, modes } = harness();
     modes.set("inline-partial", "inline");
     runtime.settlementToEmit = {
-      workerId: "worker-inline", waveId: "wave-inline", worker: "scout", title: "Inspect", status: "completed",
+      eventId: "settlement-inline",
+      sequence: 1,
+      ownerSessionId: "owner-session",
+      waveId: "wave-inline" as WaveId,
+      workerId: "worker-inline" as WorkerId,
+      generation: 1,
+      mode: "inline",
+      worker: "scout",
+      title: "Inspect",
+      lifecycle: "one-shot",
+      status: "completed",
       outcome: { status: "completed", assistantText: "Live complete response." },
+      usage,
+      startedAt: 1,
+      settledAt: 2,
+      remainingActive: 0,
+      waveSize: 1,
+      waveComplete: true,
+      sessionFile: "/sessions/worker-inline.jsonl",
     };
     const updates: unknown[] = [];
     await invoke(pi, "orchestrate", "inline-partial", { worker: "scout", title: "Inspect", instructions: "Inspect." }, context, undefined, (update) => updates.push(update));

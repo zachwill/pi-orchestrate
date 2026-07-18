@@ -304,7 +304,5 @@ function renderOutcome(outcome: WorkerSettlement["outcome"]): string {
       const reason = outcome.message ? `Aborted: ${outcome.message}` : "Aborted";
       return outcome.assistantText ? `${reason}\n\n${outcome.assistantText}` : reason;
     }
-    case "closed":
-      return "Closed";
   }
 }

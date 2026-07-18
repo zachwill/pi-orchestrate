@@ -18,7 +18,7 @@ import {
   type CreateAgentSessionResult,
   type DefaultResourceLoader,
 } from "@earendil-works/pi-coding-agent";
-import { Effect, Exit, Schema, Scope } from "effect";
+import { Cause, Effect, Exit, Schema, Scope } from "effect";
 import type {
   WorkerDefinition,
   WorkerMessageDirection,
@@ -75,20 +75,65 @@ export interface WorkerSessionFactory {
   create(options: WorkerSessionFactoryOptions): Promise<WorkerSessionHandle>;
 }
 
+const WorkerModelAcquisitionOperation = Schema.Literals([
+  "select-model",
+  "create-model-runtime",
+  "register-providers",
+  "refresh-providers",
+  "resolve-model",
+  "authenticate-model",
+  "configure-runtime-auth",
+]);
+type WorkerModelAcquisitionOperation = typeof WorkerModelAcquisitionOperation.Type;
+
+const WorkerResourceAcquisitionOperation = Schema.Literals([
+  "create-settings",
+  "resolve-extensions",
+  "create-services",
+  "validate-skills",
+]);
+type WorkerResourceAcquisitionOperation = typeof WorkerResourceAcquisitionOperation.Type;
+
+const WorkerAgentSessionAcquisitionOperation = Schema.Literals([
+  "create-session-manager",
+  "create-session",
+  "create-runtime",
+  "bind-extensions",
+  "verify-durability",
+  "subscribe-events",
+]);
+type WorkerAgentSessionAcquisitionOperation = typeof WorkerAgentSessionAcquisitionOperation.Type;
+
 export class WorkerModelAcquisitionError extends Schema.TaggedErrorClass<WorkerModelAcquisitionError>()(
   "WorkerSession.ModelAcquisitionError",
-  { message: Schema.String, cause: Schema.Defect() },
+  { operation: WorkerModelAcquisitionOperation, message: Schema.String, cause: Schema.Defect() },
 ) {}
 
 export class WorkerResourceAcquisitionError extends Schema.TaggedErrorClass<WorkerResourceAcquisitionError>()(
   "WorkerSession.ResourceAcquisitionError",
-  { message: Schema.String, cause: Schema.Defect() },
+  { operation: WorkerResourceAcquisitionOperation, message: Schema.String, cause: Schema.Defect() },
 ) {}
 
 export class WorkerAgentSessionAcquisitionError extends Schema.TaggedErrorClass<WorkerAgentSessionAcquisitionError>()(
   "WorkerSession.AgentSessionAcquisitionError",
-  { message: Schema.String, cause: Schema.Defect() },
+  { operation: WorkerAgentSessionAcquisitionOperation, message: Schema.String, cause: Schema.Defect() },
 ) {}
+
+const WorkerSessionCleanupOperation = Schema.Literals([
+  "unsubscribe",
+  "runtime",
+  "raw-session",
+  "resource-loader",
+  "scope-close",
+]);
+export type WorkerSessionCleanupOperation = typeof WorkerSessionCleanupOperation.Type;
+
+export interface WorkerSessionCleanupFailure {
+  readonly operation: WorkerSessionCleanupOperation;
+  readonly cause: unknown;
+}
+
+export type WorkerSessionCleanupReporter = (failure: WorkerSessionCleanupFailure) => void;
 
 interface SettingsManagerInput {
   cwd: string;
@@ -137,6 +182,7 @@ export interface WorkerSessionDependencies {
   createServices(input: ServicesInput): Promise<AgentSessionServices>;
   createAgentSession(input: AgentSessionInput): Promise<{ session: WorkerAgentSession }>;
   createRuntime(input: RuntimeInput): OwnedWorkerRuntime;
+  reportCleanupFailure(failure: WorkerSessionCleanupFailure): void;
 }
 
 const defaultDependencies: WorkerSessionDependencies = {
@@ -163,6 +209,12 @@ const defaultDependencies: WorkerSessionDependencies = {
         throw new Error("Worker sessions do not support runtime replacement");
       },
     ) as unknown as OwnedWorkerRuntime,
+  reportCleanupFailure: ({ operation }) => {
+    process.emitWarning("Worker session cleanup failed", {
+      code: "PI_ORCHESTRATE_WORKER_CLEANUP",
+      detail: `Operation: ${operation}`,
+    });
+  },
 };
 
 export function resolveWorkerModel(
@@ -204,11 +256,41 @@ export function isOrchestrationExtensionPath(path: string): boolean {
   return isWithin(canonicalPath(path), ORCHESTRATE_PACKAGE_ROOT);
 }
 
-function resourceLoaderFinalizer(resourceLoader: ResourceLoader): Effect.Effect<void> {
+function reportCleanupFailure(
+  reporter: WorkerSessionCleanupReporter,
+  operation: WorkerSessionCleanupOperation,
+  cause: unknown,
+): Effect.Effect<void> {
   return Effect.sync(() => {
+    try {
+      reporter({ operation, cause });
+    } catch {
+      // Reporting must never make best-effort cleanup fail.
+    }
+  });
+}
+
+function bestEffortCleanup(
+  reporter: WorkerSessionCleanupReporter,
+  operation: WorkerSessionCleanupOperation,
+  cleanup: () => void | Promise<void>,
+): Effect.Effect<void> {
+  return Effect.tryPromise({
+    try: async () => cleanup(),
+    catch: (cause) => cause,
+  }).pipe(
+    Effect.catch((cause) => reportCleanupFailure(reporter, operation, cause)),
+  );
+}
+
+function resourceLoaderFinalizer(
+  resourceLoader: ResourceLoader,
+  reporter: WorkerSessionCleanupReporter,
+): Effect.Effect<void> {
+  return bestEffortCleanup(reporter, "resource-loader", () => {
     if (!("dispose" in resourceLoader) || typeof resourceLoader.dispose !== "function") return;
     resourceLoader.dispose();
-  }).pipe(Effect.ignoreCause);
+  });
 }
 
 function describeError(error: unknown, fallback: string): string {
@@ -267,6 +349,7 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
     private readonly reusable: boolean,
     sessionFile: string,
     private readonly scope: Scope.Closeable,
+    private readonly cleanupReporter: WorkerSessionCleanupReporter,
   ) {
     this.sessionFile = sessionFile;
   }
@@ -357,7 +440,9 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
     this.usageListeners.clear();
     this.activityListeners.clear();
     this.messageDirectionListeners.clear();
-    this.disposePromise = Effect.runPromise(disposeWorkerSession(this.scope));
+    this.disposePromise = Effect.runPromise(
+      disposeWorkerSession(this.scope, this.cleanupReporter),
+    );
     return this.disposePromise;
   }
 
@@ -395,19 +480,32 @@ function selectedModelCoordinates(
   throw new Error(`Worker "${definition.name}" has no configured model and no parent model is available`);
 }
 
-function modelAcquisitionError(cause: unknown, fallback: string): WorkerModelAcquisitionError {
-  return new WorkerModelAcquisitionError({ message: describeError(cause, fallback), cause });
+function modelAcquisitionError(
+  operation: WorkerModelAcquisitionOperation,
+  fallback: string,
+): (cause: unknown) => WorkerModelAcquisitionError {
+  return (cause) => new WorkerModelAcquisitionError({
+    operation,
+    message: describeError(cause, fallback),
+    cause,
+  });
 }
 
-function resourceAcquisitionError(cause: unknown): WorkerResourceAcquisitionError {
-  return new WorkerResourceAcquisitionError({
+function resourceAcquisitionError(
+  operation: WorkerResourceAcquisitionOperation,
+): (cause: unknown) => WorkerResourceAcquisitionError {
+  return (cause) => new WorkerResourceAcquisitionError({
+    operation,
     message: describeError(cause, "Worker resource acquisition failed"),
     cause,
   });
 }
 
-function agentSessionAcquisitionError(cause: unknown): WorkerAgentSessionAcquisitionError {
-  return new WorkerAgentSessionAcquisitionError({
+function agentSessionAcquisitionError(
+  operation: WorkerAgentSessionAcquisitionOperation,
+): (cause: unknown) => WorkerAgentSessionAcquisitionError {
+  return (cause) => new WorkerAgentSessionAcquisitionError({
+    operation,
     message: describeError(cause, "Worker agent session acquisition failed"),
     cause,
   });
@@ -417,20 +515,24 @@ const refreshModelRuntime = Effect.fn("WorkerSession.refreshModelRuntime")(funct
   modelRuntime: ModelRuntime,
   definition: WorkerDefinition,
 ) {
+  const refreshError = modelAcquisitionError(
+    "refresh-providers",
+    "Worker model refresh failed",
+  );
   const result = yield* Effect.tryPromise({
     try: () => modelRuntime.refresh({ allowNetwork: false }),
-    catch: (cause) => modelAcquisitionError(cause, "Worker model refresh failed"),
+    catch: refreshError,
   });
   if (result.errors.size > 0) {
     const errors = [...result.errors].map(([id, error]) => `${id}: ${error.message}`).join("; ");
     const cause = new Error(
       `Worker "${definition.name}" failed to refresh child model providers: ${errors}`,
     );
-    return yield* Effect.fail(modelAcquisitionError(cause, "Worker model refresh failed"));
+    return yield* Effect.fail(refreshError(cause));
   }
   if (result.aborted) {
     const cause = new Error(`Worker "${definition.name}" child model refresh was aborted`);
-    return yield* Effect.fail(modelAcquisitionError(cause, "Worker model refresh failed"));
+    return yield* Effect.fail(refreshError(cause));
   }
 });
 
@@ -440,14 +542,14 @@ const prepareChildModelRuntime = Effect.fn("WorkerSession.prepareChildModelRunti
 ) {
   const selected = yield* Effect.try({
     try: () => selectedModelCoordinates(options.definition, options.parentModel),
-    catch: (cause) => modelAcquisitionError(cause, "Worker model selection failed"),
+    catch: modelAcquisitionError("select-model", "Worker model selection failed"),
   });
   const modelRuntime = yield* Effect.tryPromise({
     try: () => dependencies.createModelRuntime({
       authPath: join(options.agentDir, "auth.json"),
       modelsPath: join(options.agentDir, "models.json"),
     }),
-    catch: (cause) => modelAcquisitionError(cause, "Worker model runtime creation failed"),
+    catch: modelAcquisitionError("create-model-runtime", "Worker model runtime creation failed"),
   });
 
   yield* Effect.try({
@@ -457,18 +559,18 @@ const prepareChildModelRuntime = Effect.fn("WorkerSession.prepareChildModelRunti
         if (config) modelRuntime.registerProvider(providerId, { ...config });
       }
     },
-    catch: (cause) => modelAcquisitionError(cause, "Worker model provider registration failed"),
+    catch: modelAcquisitionError("register-providers", "Worker model provider registration failed"),
   });
   yield* refreshModelRuntime(modelRuntime, options.definition);
 
   const model = yield* Effect.try({
     try: () => modelRuntime.getModel(selected.provider, selected.modelId),
-    catch: (cause) => modelAcquisitionError(cause, "Worker model resolution failed"),
+    catch: modelAcquisitionError("resolve-model", "Worker model resolution failed"),
   });
   if (model) {
     const auth = yield* Effect.tryPromise({
       try: () => options.modelRegistry.getApiKeyAndHeaders(model),
-      catch: (cause) => modelAcquisitionError(cause, "Worker model authentication failed"),
+      catch: modelAcquisitionError("authenticate-model", "Worker model authentication failed"),
     });
     if (auth.ok) {
       yield* Effect.tryPromise({
@@ -480,7 +582,7 @@ const prepareChildModelRuntime = Effect.fn("WorkerSession.prepareChildModelRunti
             await modelRuntime.setRuntimeApiKey(selected.provider, auth.apiKey);
           }
         },
-        catch: (cause) => modelAcquisitionError(cause, "Worker model runtime key setup failed"),
+        catch: modelAcquisitionError("configure-runtime-auth", "Worker model runtime key setup failed"),
       });
     }
   }
@@ -515,8 +617,13 @@ function contextLoaderOptions(
 
 const disposeWorkerSession = Effect.fn("WorkerSession.dispose")(function* (
   scope: Scope.Closeable,
+  reporter: WorkerSessionCleanupReporter,
 ) {
-  yield* Scope.close(scope, Exit.void).pipe(Effect.ignoreCause);
+  yield* Scope.close(scope, Exit.void).pipe(
+    Effect.catchCause((cause) =>
+      reportCleanupFailure(reporter, "scope-close", Cause.squash(cause))
+    ),
+  );
 });
 
 const acquireWorkerServices = Effect.fn("WorkerSession.acquireServices")(function* (
@@ -532,7 +639,7 @@ const acquireWorkerServices = Effect.fn("WorkerSession.acquireServices")(functio
       projectTrusted: options.projectTrusted,
       compaction: definition.compaction,
     }),
-    catch: resourceAcquisitionError,
+    catch: resourceAcquisitionError("create-settings"),
   });
   const extensionPaths = yield* Effect.tryPromise({
     try: () => dependencies.resolveExtensionPaths({
@@ -540,7 +647,7 @@ const acquireWorkerServices = Effect.fn("WorkerSession.acquireServices")(functio
       agentDir: options.agentDir,
       settingsManager,
     }),
-    catch: resourceAcquisitionError,
+    catch: resourceAcquisitionError("resolve-extensions"),
   }).pipe(Effect.map((paths) => paths.filter((path) => !isOrchestrationExtensionPath(path))));
 
   return yield* Effect.acquireRelease(
@@ -562,9 +669,12 @@ const acquireWorkerServices = Effect.fn("WorkerSession.acquireServices")(functio
           appendSystemPrompt: [definition.systemPrompt, DIRECT_CHILD_BOUNDARY],
         },
       }),
-      catch: resourceAcquisitionError,
+      catch: resourceAcquisitionError("create-services"),
     }),
-    (services) => resourceLoaderFinalizer(services.resourceLoader),
+    (services) => resourceLoaderFinalizer(
+      services.resourceLoader,
+      dependencies.reportCleanupFailure,
+    ),
   );
 });
 
@@ -573,16 +683,28 @@ interface AgentSessionOwnership {
   runtime: OwnedWorkerRuntime | undefined;
 }
 
-function rawSessionFinalizer(session: WorkerAgentSession): Effect.Effect<void> {
-  return Effect.sync(() => session.dispose()).pipe(Effect.ignoreCause);
+function rawSessionFinalizer(
+  session: WorkerAgentSession,
+  reporter: WorkerSessionCleanupReporter,
+): Effect.Effect<void> {
+  return bestEffortCleanup(reporter, "raw-session", () => session.dispose());
 }
 
-function agentSessionFinalizer(ownership: AgentSessionOwnership): Effect.Effect<void> {
+function agentSessionFinalizer(
+  ownership: AgentSessionOwnership,
+  reporter: WorkerSessionCleanupReporter,
+): Effect.Effect<void> {
   const runtime = ownership.runtime;
-  if (!runtime) return rawSessionFinalizer(ownership.session);
-  return Effect.tryPromise(() => runtime.dispose()).pipe(
-    Effect.catch(() => rawSessionFinalizer(ownership.session)),
-    Effect.ignoreCause,
+  if (!runtime) return rawSessionFinalizer(ownership.session, reporter);
+  return Effect.tryPromise({
+    try: () => runtime.dispose(),
+    catch: (cause) => cause,
+  }).pipe(
+    Effect.catch((cause) =>
+      reportCleanupFailure(reporter, "runtime", cause).pipe(
+        Effect.andThen(rawSessionFinalizer(ownership.session, reporter)),
+      )
+    ),
   );
 }
 
@@ -593,12 +715,15 @@ const acquireAgentSession = Effect.fn("WorkerSession.acquireAgentSession")(funct
   return yield* Effect.acquireRelease(
     Effect.tryPromise({
       try: () => dependencies.createAgentSession(input),
-      catch: agentSessionAcquisitionError,
+      catch: agentSessionAcquisitionError("create-session"),
     }).pipe(Effect.map(({ session }) => {
       const ownership: AgentSessionOwnership = { session, runtime: undefined };
       return ownership;
     })),
-    agentSessionFinalizer,
+    (ownership) => agentSessionFinalizer(
+      ownership,
+      dependencies.reportCleanupFailure,
+    ),
   );
 });
 
@@ -609,22 +734,27 @@ const acquireAgentSessionRuntime = Effect.fn("WorkerSession.acquireAgentSessionR
 ) {
   const runtime = yield* Effect.try({
     try: () => dependencies.createRuntime({ session: ownership.session, services }),
-    catch: agentSessionAcquisitionError,
+    catch: agentSessionAcquisitionError("create-runtime"),
   });
   ownership.runtime = runtime;
   return runtime;
 });
 
 const acquireSessionSubscription = Effect.fn("WorkerSession.acquireSubscription")(function* (
+  dependencies: WorkerSessionDependencies,
   runtime: OwnedWorkerRuntime,
   handle: DefaultWorkerSessionHandle,
 ) {
   return yield* Effect.acquireRelease(
     Effect.try({
       try: () => runtime.session.subscribe((event) => handle.receiveSessionEvent(event)),
-      catch: agentSessionAcquisitionError,
+      catch: agentSessionAcquisitionError("subscribe-events"),
     }),
-    (unsubscribe) => Effect.sync(unsubscribe).pipe(Effect.ignoreCause),
+    (unsubscribe) => bestEffortCleanup(
+      dependencies.reportCleanupFailure,
+      "unsubscribe",
+      unsubscribe,
+    ),
   );
 });
 
@@ -649,14 +779,14 @@ const createWorkerSession = Effect.fn("WorkerSession.create")(function* (
         }
         return resolvedModel;
       },
-      catch: (cause) => modelAcquisitionError(cause, "Worker model resolution failed"),
+      catch: modelAcquisitionError("resolve-model", "Worker model resolution failed"),
     });
     const sessionManager = yield* Effect.try({
       try: () => dependencies.createSessionManager({
         cwd: options.cwd,
         parentSessionFile: options.parentSessionFile,
       }),
-      catch: agentSessionAcquisitionError,
+      catch: agentSessionAcquisitionError("create-session-manager"),
     });
     const ownership = yield* acquireAgentSession(dependencies, {
       services,
@@ -668,7 +798,7 @@ const createWorkerSession = Effect.fn("WorkerSession.create")(function* (
     const runtime = yield* acquireAgentSessionRuntime(dependencies, ownership, services);
     yield* Effect.tryPromise({
       try: () => runtime.session.bindExtensions({ mode: "print" }),
-      catch: agentSessionAcquisitionError,
+      catch: agentSessionAcquisitionError("bind-extensions"),
     });
 
     yield* Effect.try({
@@ -684,7 +814,7 @@ const createWorkerSession = Effect.fn("WorkerSession.create")(function* (
           );
         }
       },
-      catch: resourceAcquisitionError,
+      catch: resourceAcquisitionError("validate-skills"),
     });
     const sessionFile = yield* Effect.try({
       try: () => {
@@ -693,7 +823,7 @@ const createWorkerSession = Effect.fn("WorkerSession.create")(function* (
         }
         return runtime.session.sessionFile;
       },
-      catch: agentSessionAcquisitionError,
+      catch: agentSessionAcquisitionError("verify-durability"),
     });
 
     const handle = new DefaultWorkerSessionHandle(
@@ -701,15 +831,24 @@ const createWorkerSession = Effect.fn("WorkerSession.create")(function* (
       definition.lifecycle === "reusable",
       sessionFile,
       scope,
+      dependencies.reportCleanupFailure,
     );
-    yield* acquireSessionSubscription(runtime, handle);
+    yield* acquireSessionSubscription(dependencies, runtime, handle);
     return handle;
   }).pipe(Scope.provide(scope));
 
   return yield* acquisition.pipe(
     Effect.catchCause((cause) =>
       Effect.gen(function* () {
-        yield* Scope.close(scope, Exit.failCause(cause)).pipe(Effect.ignoreCause);
+        yield* Scope.close(scope, Exit.failCause(cause)).pipe(
+          Effect.catchCause((cleanupCause) =>
+            reportCleanupFailure(
+              dependencies.reportCleanupFailure,
+              "scope-close",
+              Cause.squash(cleanupCause),
+            )
+          ),
+        );
         return yield* Effect.failCause(cause);
       })
     ),

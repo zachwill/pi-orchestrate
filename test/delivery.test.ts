@@ -143,6 +143,18 @@ describe("DeliveryCoordinator worker settlements", () => {
     }));
     expect(parent.sent.map(({ options }) => options.triggerTurn)).toEqual([false, true]);
     expect(parent.sent[1]?.message.content).toContain(DELIVERY_PARENT_INSTRUCTIONS);
+    expect(parent.sent.map(({ message }) => message.details)).toEqual([
+      expect.objectContaining({
+        waveSize: 1,
+        dispatchGroupId: "dispatch-group",
+        dispatchGroupSize: 2,
+      }),
+      expect.objectContaining({
+        waveSize: 1,
+        dispatchGroupId: "dispatch-group",
+        dispatchGroupSize: 2,
+      }),
+    ]);
   });
 
   test("shrinks an async dispatch group when a sibling call fails preflight", () => {

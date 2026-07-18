@@ -14,10 +14,14 @@ import {
   visibleWidth,
   type Component,
 } from "@earendil-works/pi-tui";
-import { Result, Schema } from "effect";
+import { Result } from "effect";
 import type { WorkerDeliveryDetails } from "./delivery.js";
 import type { WorkerOutcome, WorkerRecord, WorkerStatus, WorkerUsage } from "./domain.js";
 import type { OrchestratorRuntime, RuntimeSnapshot } from "./runtime.js";
+import {
+  decodePersistedWorkerSettlementDetails,
+  type WorkerSettlementDetails,
+} from "./worker-settlement.js";
 
 export const ORCHESTRATION_PRESENTATION_KEY = "pi-orchestrate";
 export const MAX_RESULT_PREVIEW_LINES = 6;
@@ -43,77 +47,7 @@ const ACTIVE_STATUSES: ReadonlySet<WorkerStatus> = new Set(["starting", "running
 
 export type PresentationRuntime = Pick<OrchestratorRuntime, "snapshot" | "subscribeState">;
 
-const NonnegativeFinite = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0));
-const NonnegativeInteger = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
-const legacyOptionalKey = <S extends Schema.Constraint>(schema: S) =>
-  Schema.optionalKey(Schema.UndefinedOr(schema));
-
-const WorkerUsageSchema = Schema.Struct({
-  input: NonnegativeFinite,
-  output: NonnegativeFinite,
-  cacheRead: NonnegativeFinite,
-  cacheWrite: NonnegativeFinite,
-  cost: NonnegativeFinite,
-  contextTokens: NonnegativeFinite,
-  turns: NonnegativeInteger,
-});
-
-const WorkerCompletedOutcomeSchema = Schema.Struct({
-  status: Schema.Literal("completed"),
-  assistantText: Schema.String,
-});
-const WorkerReadyOutcomeSchema = Schema.Struct({
-  status: Schema.Literal("ready"),
-  assistantText: Schema.String,
-});
-const WorkerFailedOutcomeSchema = Schema.Struct({
-  status: Schema.Literal("failed"),
-  message: Schema.String,
-  assistantText: legacyOptionalKey(Schema.String),
-});
-const WorkerAbortedOutcomeSchema = Schema.Struct({
-  status: Schema.Literal("aborted"),
-  message: legacyOptionalKey(Schema.String),
-  assistantText: legacyOptionalKey(Schema.String),
-});
-const WorkerOutcomeSchema = Schema.Union([
-  WorkerCompletedOutcomeSchema,
-  WorkerReadyOutcomeSchema,
-  WorkerFailedOutcomeSchema,
-  WorkerAbortedOutcomeSchema,
-]);
-
-const SettlementPayloadSchema = Schema.Struct({
-  eventId: legacyOptionalKey(Schema.String),
-  sequence: legacyOptionalKey(NonnegativeInteger),
-  ownerSessionId: Schema.String,
-  waveId: Schema.String,
-  workerId: Schema.String,
-  generation: NonnegativeInteger,
-  mode: Schema.Literals(["async", "inline"]),
-  worker: Schema.String,
-  title: Schema.String,
-  lifecycle: Schema.Literals(["one-shot", "reusable"]),
-  status: Schema.Literals(["completed", "ready", "failed", "aborted"]),
-  outcome: WorkerOutcomeSchema,
-  usage: WorkerUsageSchema,
-  startedAt: NonnegativeInteger,
-  settledAt: NonnegativeInteger,
-  remainingActive: legacyOptionalKey(NonnegativeInteger),
-  waveComplete: legacyOptionalKey(Schema.Boolean),
-  sessionFile: legacyOptionalKey(Schema.String),
-  failureStage: legacyOptionalKey(Schema.Literals(["startup", "prompt", "workflow", "cancellation"])),
-}).check(Schema.makeFilter((settlement) => {
-  if (settlement.outcome.status !== settlement.status) return "outcome status must match settlement status";
-  if (settlement.settledAt < settlement.startedAt) return "settlement timestamp must not precede start timestamp";
-  if (settlement.failureStage !== undefined && settlement.status !== "failed" && settlement.status !== "aborted") {
-    return "failure stage requires a failed or aborted settlement";
-  }
-}));
-
-const SettlementEnvelopeSchema = Schema.Struct({ settlement: SettlementPayloadSchema });
-const decodeSettlementEnvelope = Schema.decodeUnknownResult(SettlementEnvelopeSchema);
-type SafeSettlement = Schema.Schema.Type<typeof SettlementPayloadSchema>;
+type SafeSettlement = WorkerSettlementDetails;
 
 interface StatusBinding {
   readonly ownerSessionId: string;
@@ -405,9 +339,11 @@ export class WorkerResultComponent implements Component {
 }
 
 function readSettlement(value: unknown): SafeSettlement | undefined {
-  const envelope = isRecord(value) && isRecord(value.settlement) ? value : { settlement: value };
-  const decoded = decodeSettlementEnvelope(envelope);
-  return Result.isSuccess(decoded) ? decoded.success.settlement : undefined;
+  const payload = isRecord(value) && isRecord(value.settlement)
+    ? value.settlement
+    : value;
+  const decoded = decodePersistedWorkerSettlementDetails(payload);
+  return Result.isSuccess(decoded) ? decoded.success : undefined;
 }
 
 function statusHeading(result: SafeSettlement): string {

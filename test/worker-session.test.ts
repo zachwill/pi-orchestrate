@@ -863,6 +863,49 @@ describe("worker session factory", () => {
     }
   });
 
+  test("labels provider, authentication, and service acquisition operations", async () => {
+    const providerFailure = harness();
+    const providerRegistry = registry({
+      getRegisteredProviderIds: mock(() => {
+        throw new Error("provider registration failed");
+      }),
+    });
+    await expect(
+      createWorkerSessionFactory(providerFailure.dependencies).create(
+        options({ modelRegistry: providerRegistry }),
+      ),
+    ).rejects.toMatchObject({
+      _tag: "WorkerSession.ModelAcquisitionError",
+      operation: "register-providers",
+    });
+
+    const authenticationFailure = harness();
+    const authenticationRegistry = registry({
+      getApiKeyAndHeaders: mock(async () => {
+        throw new Error("authentication failed");
+      }),
+    });
+    await expect(
+      createWorkerSessionFactory(authenticationFailure.dependencies).create(
+        options({ modelRegistry: authenticationRegistry }),
+      ),
+    ).rejects.toMatchObject({
+      _tag: "WorkerSession.ModelAcquisitionError",
+      operation: "authenticate-model",
+    });
+
+    const servicesFailure = harness();
+    servicesFailure.dependencies.createServices = async () => {
+      throw new Error("services failed");
+    };
+    await expect(
+      createWorkerSessionFactory(servicesFailure.dependencies).create(options()),
+    ).rejects.toMatchObject({
+      _tag: "WorkerSession.ResourceAcquisitionError",
+      operation: "create-services",
+    });
+  });
+
   test("keeps initial and second refresh failures in the model acquisition taxonomy", async () => {
     const initialRefresh = harness();
     initialRefresh.runtime.refresh.mockResolvedValueOnce({
@@ -879,6 +922,7 @@ describe("worker session factory", () => {
     expect(initialFailure).toBeInstanceOf(WorkerModelAcquisitionError);
     expect(initialFailure).toMatchObject({
       _tag: "WorkerSession.ModelAcquisitionError",
+      operation: "refresh-providers",
       message: 'Worker "scout" failed to refresh child model providers: broken-provider: catalog unavailable',
     });
     expect(initialRefresh.loaderOptions).toHaveLength(0);
@@ -930,6 +974,7 @@ describe("worker session factory", () => {
     expect(failure).toBeInstanceOf(WorkerResourceAcquisitionError);
     expect(failure).toMatchObject({
       _tag: "WorkerSession.ResourceAcquisitionError",
+      operation: "validate-skills",
       message: 'Worker "scout" selected skills were not loaded: beta',
     });
     expect(h.reload).toHaveBeenCalledTimes(1);
@@ -1101,10 +1146,30 @@ describe("worker session factory", () => {
     expect(failure).toBeInstanceOf(WorkerAgentSessionAcquisitionError);
     expect(failure).toMatchObject({
       _tag: "WorkerSession.AgentSessionAcquisitionError",
+      operation: "subscribe-events",
       message: "subscription failed",
     });
     expect(session.dispose).toHaveBeenCalledTimes(1);
     expect(h.loaderDispose).toHaveBeenCalledTimes(1);
+  });
+
+  test("labels bind and durability acquisition failures without parsing messages", async () => {
+    const bindFailure = harness();
+    bindFailure.session.bindExtensions.mockRejectedValueOnce(new Error("private bind detail"));
+    await expect(
+      createWorkerSessionFactory(bindFailure.dependencies).create(options()),
+    ).rejects.toMatchObject({
+      _tag: "WorkerSession.AgentSessionAcquisitionError",
+      operation: "bind-extensions",
+    });
+
+    const durabilityFailure = harness(new FakeSession(""));
+    await expect(
+      createWorkerSessionFactory(durabilityFailure.dependencies).create(options()),
+    ).rejects.toMatchObject({
+      _tag: "WorkerSession.AgentSessionAcquisitionError",
+      operation: "verify-durability",
+    });
   });
 
   test("creates fresh session lineage without importing a parent transcript", async () => {
@@ -1352,34 +1417,92 @@ describe("worker session handle", () => {
     expect(order).toEqual(["subscription", "runtime", "loader"]);
   });
 
-  test("falls back to the raw session when runtime disposal rejects and continues cleanup", async () => {
+  test("reports each failed cleanup once while preserving fallback order", async () => {
     const order: string[] = [];
+    const reports: unknown[] = [];
+    const unsubscribeFailure = new Error("unsubscribe failed");
+    const runtimeFailure = new Error("session_shutdown failed");
+    const rawSessionFailure = new Error("raw session dispose failed");
     const h = harness();
+    h.dependencies.reportCleanupFailure = (failure) => {
+      reports.push(failure);
+      order.push(`report:${failure.operation}`);
+    };
     h.session.unsubscribe.mockImplementation(() => {
       order.push("subscription");
-      throw new Error("unsubscribe failed");
+      throw unsubscribeFailure;
     });
     h.session.dispose.mockImplementation(() => {
       order.push("raw-session");
-      throw new Error("raw session dispose failed");
+      throw rawSessionFailure;
     });
     h.loaderDispose.mockImplementation(() => order.push("loader"));
     h.dependencies.createRuntime = (input) => ({
       session: input.session,
       async dispose() {
         order.push("runtime");
-        throw new Error("session_shutdown failed");
+        throw runtimeFailure;
       },
     });
     const handle = await createWorkerSessionFactory(h.dependencies).create(options());
 
-    await expect(handle.dispose()).resolves.toBeUndefined();
+    await expect(Promise.all([handle.dispose(), handle.dispose()])).resolves.toEqual([
+      undefined,
+      undefined,
+    ]);
     h.session.startTool("after-dispose", "read");
 
-    expect(order).toEqual(["subscription", "runtime", "raw-session", "loader"]);
+    expect(order).toEqual([
+      "subscription",
+      "report:unsubscribe",
+      "runtime",
+      "report:runtime",
+      "raw-session",
+      "report:raw-session",
+      "loader",
+    ]);
+    expect(reports).toEqual([
+      { operation: "unsubscribe", cause: unsubscribeFailure },
+      { operation: "runtime", cause: runtimeFailure },
+      { operation: "raw-session", cause: rawSessionFailure },
+    ]);
     expect(h.session.unsubscribe).toHaveBeenCalledTimes(1);
     expect(h.session.dispose).toHaveBeenCalledTimes(1);
     expect(h.loaderDispose).toHaveBeenCalledTimes(1);
+  });
+
+  test("keeps the acquisition error when partial-acquisition cleanup and reporting fail", async () => {
+    const order: string[] = [];
+    const h = harness();
+    h.dependencies.createRuntime = () => {
+      throw new Error("runtime acquisition failed");
+    };
+    h.session.dispose.mockImplementation(() => {
+      order.push("raw-session");
+      throw new Error("private session payload");
+    });
+    h.loaderDispose.mockImplementation(() => {
+      order.push("resource-loader");
+      throw new Error("private provider payload");
+    });
+    h.dependencies.reportCleanupFailure = (failure) => {
+      order.push(`report:${failure.operation}`);
+      throw new Error("reporter failed");
+    };
+
+    await expect(
+      createWorkerSessionFactory(h.dependencies).create(options()),
+    ).rejects.toMatchObject({
+      _tag: "WorkerSession.AgentSessionAcquisitionError",
+      operation: "create-runtime",
+      message: "runtime acquisition failed",
+    });
+    expect(order).toEqual([
+      "raw-session",
+      "report:raw-session",
+      "resource-loader",
+      "report:resource-loader",
+    ]);
   });
 
   test("joins concurrent disposal on one asynchronous scope close", async () => {

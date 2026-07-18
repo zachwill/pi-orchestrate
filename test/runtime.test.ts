@@ -680,6 +680,7 @@ describe("per-worker settlement observability", () => {
       mode: "async",
       status: "completed",
       remainingActive: 1,
+      waveSize: 2,
       waveComplete: false,
       startedAt: 1_700_000_000_000,
       settledAt: 1_700_000_000_000,

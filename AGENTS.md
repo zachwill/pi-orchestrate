@@ -20,6 +20,7 @@ Follow responsibilities rather than adding cross-layer shortcuts:
 - `catalog.ts` and `contract.ts` own trusted worker discovery, strict parsing, source precedence, diagnostics, and parent prompt guidance.
 - `runtime.ts` and `scheduler.ts` own admission, atomic preflight, concurrency, ownership, cancellation, reusable generations, settlement, and retained state.
 - `worker-session.ts` creates durable isolated child sessions and reports usage, activity, and message direction back to the runtime.
+- `worker-settlement.ts` owns the current persisted settlement schema and any explicitly supported persisted-input normalization.
 - `host.ts` and `delivery.ts` preserve process-scoped work across extension reloads while delivering results only to the owning session.
 - `tools.ts` defines the public tool schemas, execution adapters, streaming updates, and tool renderers.
 - `presentation.ts` owns result messages, the active-worker widget, footer status, width-safe rendering, and UI disposal.
@@ -44,6 +45,19 @@ Preserve these contracts:
 - Model-facing output and collapsed UI stay bounded; structured details retain the complete state needed for reconstruction.
 
 The state machine in `domain.ts`, executable tests, and then the README are authoritative when details are unclear.
+
+## Sandcastle doctrine
+
+This package is pre-1.0 and intentionally a sandcastle: build carefully for the work in front of us and expect its shape to change as real usage teaches us more.
+
+- Keep the public orchestration contract, ownership boundaries, state transitions, trust model, and persisted contracts precise.
+- Prefer direct, boring, domain-named code over generic frameworks, universal abstractions, deep nesting, or dense conditional expressions.
+- Keep decisions close to the module that owns them. Extract only for real repetition, a stable boundary, or concrete lifecycle and validation value.
+- Optimize for code that is easy to understand, replace, and reshape next week. Readability and deletion are features.
+- When an idea changes, rename or replace the old seam directly. Do not preserve obsolete APIs, aliases, adapters, schemas, migrations, or terminology without a concrete compatibility requirement.
+- Treat pre-1.0 legacy paths as liabilities by default. Delete dead compatibility code and its tests instead of making new work route around it.
+- Use Effect where it makes failures, dependencies, interruption, concurrency, validation, observability, or resource ownership clearer. Keep straightforward synchronous domain logic as straightforward TypeScript.
+- Preserve behavior deliberately, not accidentally. If compatibility still matters, name the supported boundary and justify it in code and tests.
 
 ## Implementation guidance
 

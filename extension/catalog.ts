@@ -127,27 +127,34 @@ function isMissingPath(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
-interface UnexpectedPath {
+interface IssuePath {
   readonly path: readonly PropertyKey[];
+  readonly issue: SchemaIssue.Issue;
 }
 
-function collectUnexpectedPaths(
+function collectIssuePaths(
   issue: SchemaIssue.Issue,
   parentPath: readonly PropertyKey[] = [],
-): UnexpectedPath[] {
+): IssuePath[] {
   switch (issue._tag) {
     case "Pointer":
-      return collectUnexpectedPaths(issue.issue, [...parentPath, ...issue.path]);
+      return collectIssuePaths(issue.issue, [...parentPath, ...issue.path]);
     case "Composite":
+      return issue.issues.flatMap((child) => collectIssuePaths(child, parentPath));
     case "AnyOf":
-      return issue.issues.flatMap((child) => collectUnexpectedPaths(child, parentPath));
+      return issue.issues.length === 0
+        ? [{ path: parentPath, issue }]
+        : issue.issues.flatMap((child) => collectIssuePaths(child, parentPath));
     case "Encoding":
     case "Filter":
-      return collectUnexpectedPaths(issue.issue, parentPath);
+      return collectIssuePaths(issue.issue, parentPath);
+    case "InvalidType":
+    case "InvalidValue":
+    case "MissingKey":
     case "UnexpectedKey":
-      return [{ path: parentPath }];
-    default:
-      return [];
+    case "Forbidden":
+    case "OneOf":
+      return [{ path: parentPath, issue }];
   }
 }
 
@@ -165,8 +172,9 @@ function listItems(value: unknown): readonly unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
-function schemaDiagnostic(error: Schema.SchemaError, frontmatter: unknown): string {
-  const unexpected = collectUnexpectedPaths(error.issue);
+function schemaDiagnostic(issue: SchemaIssue.Issue, frontmatter: unknown): string {
+  const issuePaths = collectIssuePaths(issue);
+  const unexpected = issuePaths.filter(({ issue }) => issue._tag === "UnexpectedKey");
   const frontmatterFields = unexpected
     .filter(({ path }) => path.length === 1 && typeof path[0] === "string")
     .map(({ path }) => String(path[0]))
@@ -196,8 +204,9 @@ function schemaDiagnostic(error: Schema.SchemaError, frontmatter: unknown): stri
     "compaction",
     "lifecycle",
   ];
-  const message = error.message;
-  const field = orderedFields.find((candidate) => message.includes(`["${candidate}"]`));
+  const field = orderedFields.find((candidate) =>
+    issuePaths.some(({ path }) => path[0] === candidate)
+  );
   const value = field === undefined ? undefined : fieldValue(frontmatter, field);
 
   if (field === "name" || field === "description") {
@@ -234,13 +243,21 @@ function schemaDiagnostic(error: Schema.SchemaError, frontmatter: unknown): stri
     if (compactionFields.length > 0) {
       return `unknown compaction field${compactionFields.length === 1 ? "" : "s"}: ${compactionFields.join(", ")}`;
     }
-    if (message.includes('["enabled"]')) {
+    if (issuePaths.some(({ path }) => path[0] === "compaction" && path[1] === "enabled")) {
       return "frontmatter field 'compaction.enabled' must be a boolean";
     }
-    if (message.includes('["reserveTokens"]')) {
+    if (
+      issuePaths.some(({ path }) =>
+        path[0] === "compaction" && path[1] === "reserveTokens"
+      )
+    ) {
       return "frontmatter field 'compaction.reserveTokens' must be a non-negative integer";
     }
-    if (message.includes('["keepRecentTokens"]')) {
+    if (
+      issuePaths.some(({ path }) =>
+        path[0] === "compaction" && path[1] === "keepRecentTokens"
+      )
+    ) {
       return "frontmatter field 'compaction.keepRecentTokens' must be a non-negative integer";
     }
     return "frontmatter field 'compaction' must be a mapping";
@@ -266,7 +283,7 @@ function parseWorker(
   const { frontmatter, body } = parsed;
   const decoded = decodeWorkerFrontmatter(frontmatter);
   if (Result.isFailure(decoded)) {
-    throw new Error(schemaDiagnostic(decoded.failure, frontmatter));
+    throw new Error(schemaDiagnostic(decoded.failure.issue, frontmatter));
   }
 
   const worker = decoded.success;

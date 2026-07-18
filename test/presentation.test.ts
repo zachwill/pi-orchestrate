@@ -1,5 +1,6 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { initTheme, type ExtensionAPI, type ExtensionContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
+import { Result, Schema } from "effect";
 import { visibleWidth, type Component } from "@earendil-works/pi-tui";
 import type { WaveId, WorkerId, WorkerRecord, WorkerStatus } from "../extension/domain.ts";
 import type { RuntimeSnapshot } from "../extension/runtime.ts";
@@ -13,6 +14,10 @@ import {
   registerOrchestrationPresentation,
   type PresentationRuntime,
 } from "../extension/presentation.ts";
+import {
+  WorkerSettlementDetails,
+  decodePersistedWorkerSettlementDetails,
+} from "../extension/worker-settlement.ts";
 
 beforeAll(() => initTheme("dark", false));
 const theme = { fg: (_: string, text: string) => text, bg: (_: string, text: string) => text, bold: (text: string) => text, italic: (text: string) => text, underline: (text: string) => text, inverse: (text: string) => text, strikethrough: (text: string) => text } as Theme;
@@ -29,7 +34,7 @@ function settlement(status: "completed" | "ready" | "failed" | "aborted" = "comp
     eventId: "event", sequence: 1, ownerSessionId: "owner", waveId: "wave", workerId: "worker-1", generation: 2,
     mode: "async", worker: "scout", title: "Inspect code", lifecycle: status === "ready" ? "reusable" : "one-shot", status,
     outcome: status === "completed" || status === "ready" ? { status, assistantText: text } : { status, message: text, assistantText: "Partial evidence." },
-    usage, startedAt: 1000, settledAt: 6200, remainingActive: 0, waveComplete: true, sessionFile: "/sessions/worker.jsonl",
+    usage, startedAt: 1000, settledAt: 6200, remainingActive: 0, waveSize: 1, waveComplete: true, sessionFile: "/sessions/worker.jsonl",
   };
 }
 function renderer(): MessageRenderer {
@@ -121,13 +126,66 @@ describe("per-worker result messages", () => {
     }
   });
 
-  test("accepts legacy optional omissions, excess fields, and the settlement envelope", () => {
+  test("keeps the canonical current fields through persisted decoding", () => {
+    const current = {
+      ...settlement(),
+      waveSize: 3,
+      dispatchGroupId: "dispatch-1",
+      dispatchGroupSize: 3,
+      currentExtra: "ignored",
+    };
+    const decoded = decodePersistedWorkerSettlementDetails(current);
+
+    expect(Result.isSuccess(decoded)).toBe(true);
+    if (!Result.isSuccess(decoded)) throw new Error("Expected current settlement to decode");
+    expect(decoded.success).toMatchObject({
+      eventId: "event",
+      sequence: 1,
+      remainingActive: 0,
+      waveSize: 3,
+      waveComplete: true,
+      dispatchGroupId: "dispatch-1",
+      dispatchGroupSize: 3,
+      sessionFile: "/sessions/worker.jsonl",
+    });
+    expect(decoded.success).not.toHaveProperty("currentExtra");
+
+    const missingCurrentField = { ...current };
+    Reflect.deleteProperty(missingCurrentField, "waveSize");
+    expect(Result.isFailure(
+      Schema.decodeUnknownResult(WorkerSettlementDetails)(missingCurrentField),
+    )).toBe(true);
+  });
+
+  test("normalizes legacy omissions and ignores excess envelope fields", () => {
     const legacy = settlement();
     Reflect.deleteProperty(legacy, "eventId");
     Reflect.deleteProperty(legacy, "sequence");
     Reflect.deleteProperty(legacy, "remainingActive");
+    Reflect.deleteProperty(legacy, "waveSize");
     Reflect.deleteProperty(legacy, "waveComplete");
     Reflect.deleteProperty(legacy, "sessionFile");
+
+    const decoded = decodePersistedWorkerSettlementDetails(legacy);
+    expect(Result.isSuccess(decoded)).toBe(true);
+    if (!Result.isSuccess(decoded)) throw new Error("Expected legacy settlement to decode");
+    expect(decoded.success).toMatchObject({
+      eventId: "legacy:wave:worker-1:2",
+      sequence: 0,
+      remainingActive: 0,
+      waveSize: 1,
+      waveComplete: true,
+      sessionFile: undefined,
+    });
+
+    expect(Result.isSuccess(decodePersistedWorkerSettlementDetails({
+      ...legacy,
+      status: "failed",
+      outcome: { status: "failed", message: "old failure", assistantText: undefined },
+      failureStage: undefined,
+      dispatchGroupId: undefined,
+      dispatchGroupSize: undefined,
+    }))).toBe(true);
 
     const output = Bun.stripANSI(renderResult({
       settlement: { ...legacy, legacyExtra: "ignored" },

@@ -257,6 +257,91 @@ prompt`,
     );
   });
 
+  test("reports every field failure from structured issue paths", () => {
+    const fs = new FakeFileSystem();
+    fs.addDirectory(packageDirectory, {
+      "bad-name.md": definition("bad-name", "prompt").replace("name: bad-name", "name: ''"),
+      "bad-description.md": definition("bad-description", "prompt").replace(
+        "description: bad-description description",
+        "description: ''",
+      ),
+      "empty-model.md": definition("empty-model", "prompt").replace(
+        "model: provider/model",
+        "model: ''",
+      ),
+      "bad-model.md": definition("bad-model", "prompt").replace(
+        "model: provider/model",
+        "model: local-model",
+      ),
+      "empty-thinking.md": definition("empty-thinking", "prompt", "thinking: ''\n"),
+      "bad-thinking.md": definition("bad-thinking", "prompt", "thinking: extreme\n"),
+      "missing-tools.md": definition("missing-tools", "prompt").replace("tools: read\n", ""),
+      "bad-tools-shape.md": definition("bad-tools-shape", "prompt").replace(
+        "tools: read",
+        "tools: [read, 42]",
+      ),
+      "bad-skills.md": definition("bad-skills", "prompt", "skills: [bun, '']\n"),
+      "bad-compaction.md": definition("bad-compaction", "prompt", "compaction: compact\n"),
+      "bad-enabled.md": definition(
+        "bad-enabled",
+        "prompt",
+        "compaction:\n  enabled: 1\n",
+      ),
+      "bad-reserve.md": definition(
+        "bad-reserve",
+        "prompt",
+        "compaction:\n  reserveTokens: 1.5\n",
+      ),
+      "bad-keep-recent.md": definition(
+        "bad-keep-recent",
+        "prompt",
+        "compaction:\n  keepRecentTokens: -1\n",
+      ),
+      "compaction-priority.md": definition(
+        "compaction-priority",
+        "prompt",
+        "compaction:\n  enabled: 1\n  reserveTokens: -1\n  keepRecentTokens: -1\n",
+      ),
+      "missing-lifecycle.md": definition("missing-lifecycle", "prompt").replace(
+        "lifecycle: one-shot\n",
+        "",
+      ),
+      "bad-lifecycle.md": definition("bad-lifecycle", "prompt", "", "temporary"),
+      "priority.md": definition("priority", "prompt", "", "temporary").replace(
+        "description: priority description",
+        "description: ''",
+      ),
+      "not-mapping.md": "---\n- name\n- tools\n---\nprompt",
+    });
+    fs.addDirectory(userDirectory, {});
+
+    const catalog = createWorkerCatalogDiscovery(fs)(options(false));
+    const messages = new Map(
+      catalog.diagnostics.map((item) => [item.filePath?.split("/").at(-1), item.message]),
+    );
+
+    expect(messages).toEqual(new Map([
+      ["bad-compaction.md", "frontmatter field 'compaction' must be a mapping"],
+      ["bad-description.md", "frontmatter field 'description' must be a non-empty string"],
+      ["bad-enabled.md", "frontmatter field 'compaction.enabled' must be a boolean"],
+      ["bad-keep-recent.md", "frontmatter field 'compaction.keepRecentTokens' must be a non-negative integer"],
+      ["bad-lifecycle.md", "frontmatter field 'lifecycle' must be 'one-shot' or 'reusable'"],
+      ["bad-model.md", "frontmatter field 'model' must use provider/model format"],
+      ["bad-name.md", "frontmatter field 'name' must be a non-empty string"],
+      ["bad-reserve.md", "frontmatter field 'compaction.reserveTokens' must be a non-negative integer"],
+      ["bad-skills.md", "frontmatter field 'skills' must be a comma string or string array"],
+      ["bad-thinking.md", "unsupported thinking level 'extreme'"],
+      ["bad-tools-shape.md", "frontmatter field 'tools' must be a non-empty comma string or string array"],
+      ["compaction-priority.md", "frontmatter field 'compaction.enabled' must be a boolean"],
+      ["empty-model.md", "frontmatter field 'model' must be a non-empty string"],
+      ["empty-thinking.md", "frontmatter field 'thinking' must be a non-empty string"],
+      ["missing-lifecycle.md", "frontmatter field 'lifecycle' must be 'one-shot' or 'reusable'"],
+      ["missing-tools.md", "frontmatter field 'tools' is required"],
+      ["not-mapping.md", "frontmatter must be a mapping"],
+      ["priority.md", "frontmatter field 'description' must be a non-empty string"],
+    ]));
+  });
+
   test("distinguishes omitted, explicit empty, and nonempty skill selection", () => {
     const fs = new FakeFileSystem();
     fs.addDirectory(packageDirectory, {

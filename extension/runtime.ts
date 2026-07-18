@@ -34,6 +34,15 @@ import {
   type WorkerSessionFactory,
   type WorkerSessionHandle,
 } from "./worker-session.js";
+import type {
+  SettlementFailureStage,
+  WorkerSettlement,
+} from "./worker-settlement.js";
+
+export type {
+  SettlementFailureStage,
+  WorkerSettlement,
+} from "./worker-settlement.js";
 
 export const MAX_TERMINAL_WORKER_HISTORY = 100;
 export const MAX_COMPLETED_WAVE_HISTORY = 100;
@@ -75,33 +84,6 @@ export interface CompletedWave {
   readonly ownerSessionId: string;
   readonly mode: WaveMode;
   readonly results: readonly CompletedResult[];
-}
-
-export type SettlementFailureStage = "startup" | "prompt" | "workflow" | "cancellation";
-
-export interface WorkerSettlement {
-  readonly eventId: string;
-  readonly sequence: number;
-  readonly ownerSessionId: string;
-  readonly waveId: WaveId;
-  readonly workerId: WorkerId;
-  readonly generation: number;
-  readonly mode: WaveMode;
-  readonly worker: string;
-  readonly title: string;
-  readonly lifecycle: WorkerRecord["lifecycle"];
-  readonly status: Exclude<WaveCompleteWorkerStatus, "closed">;
-  readonly outcome: WorkerOutcome;
-  readonly failureStage?: SettlementFailureStage;
-  readonly usage: WorkerUsage;
-  readonly startedAt: number;
-  readonly settledAt: number;
-  readonly remainingActive: number;
-  readonly waveSize: number;
-  readonly waveComplete: boolean;
-  readonly dispatchGroupId?: string;
-  readonly dispatchGroupSize?: number;
-  readonly sessionFile: string | undefined;
 }
 
 export interface RuntimeSnapshot {
@@ -885,7 +867,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     const worker = this.workers.get(workerId);
     const wave = worker ? this.waves.get(worker.waveId) : undefined;
     if (!worker || !wave || !worker.outcome || !isWorkerCompleteForWave(worker.status)) return;
-    if (worker.status === "closed") return;
+    if (worker.status === "closed" || worker.outcome.status === "closed") return;
 
     let remainingActive = 0;
     let waveComplete = true;
@@ -1421,7 +1403,7 @@ function copyUsage(usage: WorkerUsage): WorkerUsage {
   };
 }
 
-function copyOutcome(outcome: WorkerOutcome): WorkerOutcome {
+function copyOutcome<Outcome extends WorkerOutcome>(outcome: Outcome): Outcome {
   return { ...outcome };
 }
 

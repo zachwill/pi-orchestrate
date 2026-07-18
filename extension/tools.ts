@@ -23,7 +23,6 @@ import {
 import { Type } from "typebox";
 import {
   type CatalogDiagnostic,
-  type OrchestrateTaskInput,
   type WaveId,
   type WaveRecord,
   type WorkerCatalog,
@@ -41,6 +40,8 @@ import type {
   OrchestrationContext,
   OrchestratorRuntime,
   RuntimeSnapshot,
+  SettlementListener,
+  WorkerSettlement,
 } from "./runtime.js";
 
 const STRICT_OBJECT = { additionalProperties: false } as const;
@@ -134,25 +135,13 @@ export function registerOrchestrationTools(
       const decision = deps.getDispatchDecision(toolCallId);
       const mode = decision.mode;
       const runtimeContext = await buildRuntimeContext(ctx, deps, decision.group);
-      const settlements: unknown[] = [];
-      const onSettlement = mode === "inline" ? (settlement: unknown) => {
-        settlements.push(settlement);
-        onUpdate?.({
-          content: [{ type: "text", text: `${settlements.length} worker response(s) received.` }],
-          details: { mode: "inline", settlements: [...settlements] },
-        });
-      } : undefined;
-      const wave = await orchestrateWithMode(
-        deps.runtime,
-        runtimeContext,
-        [params],
-        mode,
-        signal,
-        onSettlement,
-      );
-
       if (mode === "async") {
-        const acceptedWave = wave as AcceptedWave;
+        const acceptedWave = await deps.runtime.orchestrate(
+          runtimeContext,
+          [params],
+          "async",
+          signal,
+        );
         const readable = acceptedWaveDetails(acceptedWave);
         return {
           content: [
@@ -166,7 +155,13 @@ export function registerOrchestrationTools(
         };
       }
 
-      const completedWave = wave as CompletedWave;
+      const completedWave = await deps.runtime.orchestrate(
+        runtimeContext,
+        [params],
+        "inline",
+        signal,
+        createInlineSettlementListener(onUpdate),
+      );
       const readable = completedWaveDetails(completedWave);
       return {
         content: [
@@ -241,26 +236,14 @@ export function registerOrchestrationTools(
       const workerId = asWorkerId(params.worker_id);
       const mode = deps.getDispatchDecision(toolCallId).mode;
       const runtimeContext = await buildRuntimeContext(ctx, deps);
-      const settlements: unknown[] = [];
-      const onSettlement = mode === "inline" ? (settlement: unknown) => {
-        settlements.push(settlement);
-        onUpdate?.({
-          content: [{ type: "text", text: `${settlements.length} worker response(s) received.` }],
-          details: { mode: "inline", settlements: [...settlements] },
-        });
-      } : undefined;
-      const wave = await sendWithMode(
-        deps.runtime,
-        runtimeContext,
-        workerId,
-        params.instructions,
-        mode,
-        signal,
-        onSettlement,
-      );
-
       if (mode === "async") {
-        const acceptedWave = wave as AcceptedWave;
+        const acceptedWave = await deps.runtime.send(
+          runtimeContext,
+          workerId,
+          params.instructions,
+          "async",
+          signal,
+        );
         const readable = acceptedWaveDetails(acceptedWave);
         return {
           content: [
@@ -274,7 +257,14 @@ export function registerOrchestrationTools(
         };
       }
 
-      const completedWave = wave as CompletedWave;
+      const completedWave = await deps.runtime.send(
+        runtimeContext,
+        workerId,
+        params.instructions,
+        "inline",
+        signal,
+        createInlineSettlementListener(onUpdate),
+      );
       const readable = completedWaveDetails(completedWave);
       return {
         content: [
@@ -389,29 +379,20 @@ async function buildRuntimeContext(
   };
 }
 
-function orchestrateWithMode(
-  runtime: OrchestratorRuntime,
-  context: OrchestrationContext,
-  tasks: readonly OrchestrateTaskInput[],
-  mode: "async" | "inline",
-  signal: AbortSignal | undefined,
-  onSettlement?: (settlement: unknown) => void,
-): Promise<AcceptedWave | CompletedWave> {
-  if (mode === "async") return runtime.orchestrate(context, tasks, "async");
-  return runtime.orchestrate(context, tasks, "inline", signal, onSettlement);
-}
-
-function sendWithMode(
-  runtime: OrchestratorRuntime,
-  context: OrchestrationContext,
-  workerId: WorkerId,
-  instructions: string,
-  mode: "async" | "inline",
-  signal: AbortSignal | undefined,
-  onSettlement?: (settlement: unknown) => void,
-): Promise<AcceptedWave | CompletedWave> {
-  if (mode === "async") return runtime.send(context, workerId, instructions, "async");
-  return runtime.send(context, workerId, instructions, "inline", signal, onSettlement);
+function createInlineSettlementListener(
+  onUpdate: ((result: AgentToolResult<unknown>) => void) | undefined,
+): SettlementListener {
+  const settlements: WorkerSettlement[] = [];
+  return (settlement) => {
+    settlements.push(settlement);
+    onUpdate?.({
+      content: [{
+        type: "text",
+        text: `${settlements.length} worker response(s) received.`,
+      }],
+      details: { mode: "inline", settlements: [...settlements] },
+    });
+  };
 }
 
 function requireNonblank(name: string, value: string): string {
