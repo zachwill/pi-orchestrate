@@ -115,6 +115,7 @@ export function registerOrchestrationTools(
     promptSnippet: "Dispatch one fully briefed worker task",
     promptGuidelines: [
       "Use sibling orchestrate calls for independent tasks, with one complete brief per call.",
+      "Before yielding, dispatch every currently known independent task; never wait for one sibling's acceptance or completion before dispatching the rest.",
     ],
     executionMode: "parallel",
     parameters: orchestrateSchema,

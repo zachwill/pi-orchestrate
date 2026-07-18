@@ -55,6 +55,19 @@ describe("orchestrator contract", () => {
 
     expectContractRule(result, [/\bbroad\b/i, /\bbounded\b/i, /\bindependent\b/i, /\bparallel\b/i]);
     expectContractRule(result, [
+      /\bbefore dispatching\b/i,
+      /\bcurrent parallel wave\b/i,
+      /\bevery currently known independent scope\b/i,
+      /\bbefore yielding\b/i,
+    ]);
+    expectContractRule(result, [
+      /\bnever stop\b/i,
+      /`orchestrate`/,
+      /\banother known independent scope\b/i,
+      /\bacceptance or completion\b/i,
+      /\bdispatching the rest\b/i,
+    ]);
+    expectContractRule(result, [
       /`orchestrate`/,
       /\{ worker, title, instructions \}/,
       /\bsibling\b/i,
@@ -69,6 +82,11 @@ describe("orchestrator contract", () => {
       /\bexpected output\b/i,
     ]);
     expectContractRule(result, [/`orchestrate`/, /\basynchronously\b/i, /\binline\b/i, /\bblocking\b/i]);
+    expectContractRule(result, [
+      /\bevery currently known sibling\b/i,
+      /\badmissions have resolved\b/i,
+      /\brejected sibling does not block yielding\b/i,
+    ]);
     expectContractRule(result, [/\bpoll\b/i, /`orchestration_status`/]);
     expectContractRule(result, [/\bresults\b/i, /\bnew independent work\b/i, /\bparallel wave\b/i, /\bwhole task\b/i]);
     expectContractRule(result, [/\bparent\b/i, /\bsynthesi[sz]/i, /\breview/i, /\bverification\b/i]);

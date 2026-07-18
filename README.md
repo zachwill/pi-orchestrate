@@ -28,7 +28,7 @@ Pi Orchestrate adds exactly five tools:
 
 Each `orchestrate` call validates its input, worker definition, and model before allocating IDs or starting a session. Calls are admitted independently: a rejected sibling does not block valid siblings. After admission, a startup or prompt failure settles only that worker as `failed`.
 
-Pi executes sibling tool calls concurrently, with no extension-level group limit or hidden throttle. Send every known independent task as sibling `orchestrate` calls in one assistant message.
+Pi executes sibling tool calls concurrently, with no extension-level group limit or hidden throttle. Before yielding, send every known independent task as sibling `orchestrate` calls in one assistant message. Finish dispatching the whole wave without waiting for any sibling's acceptance or completion; if one call is emitted separately, continue dispatching the remaining known siblings.
 
 Execution mode depends on the complete tool-call group:
 
@@ -67,7 +67,7 @@ Pi Orchestrate injects the authoritative orchestration contract and trusted cata
 
 1. Keep trivial or tightly coupled work in the parent. Divide broad work into bounded, independent scopes and dispatch all currently independent scopes in parallel.
 2. Give every worker a thorough, self-contained brief with the objective, paths and scope, context, success criteria, and expected output. State forbidden actions explicitly.
-3. Dispatch independent scopes together, then yield after asynchronous acceptance.
+3. Before yielding, dispatch every currently known independent scope. Never stop after one call while another known scope remains, and never wait for one sibling's acceptance or completion before dispatching the rest.
 4. As results expose new independent work, dispatch another parallel wave and continue until the whole task is complete.
 5. Review evidence and changes, resolve conflicts, integrate deliberately, and verify the result.
 6. Produce the final answer from the parent session.

@@ -389,6 +389,12 @@ describe("registerOrchestrationTools", () => {
     expect(pi.tool("orchestrate").description).toContain("asynchronously");
     expect(pi.tool("orchestrate").promptSnippet).toContain("one fully briefed worker task");
     expect(pi.tool("orchestrate").promptGuidelines?.[0]).toContain("one complete brief per call");
+    expect(pi.tool("orchestrate").promptGuidelines?.[1]).toContain(
+      "dispatch every currently known independent task",
+    );
+    expect(pi.tool("orchestrate").promptGuidelines?.[1]).toContain(
+      "never wait for one sibling's acceptance or completion",
+    );
     expect(pi.tool("orchestration_status").description).toContain("Never poll");
     expect(pi.tool("orchestration_status").promptGuidelines?.[0]).toContain("never poll");
     expect(pi.tool("worker_send").promptGuidelines?.[0]).toContain("ready reusable");
