@@ -612,33 +612,40 @@ function readableDetails(title: string, details: unknown): string {
   return `${truncation.content}\n\n[Output truncated: ${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}. Full structured details remain available.]`;
 }
 
+interface RenderableTask {
+  readonly worker?: unknown;
+  readonly title?: unknown;
+  readonly instructions?: unknown;
+}
+
 function renderDispatchCall(
   theme: Theme,
-  tasks: readonly { worker: string; title: string; instructions: string }[],
+  tasks: readonly RenderableTask[] | undefined,
   expanded: boolean,
 ): Component {
   const container = new Container();
-  const count = tasks.length;
+  const renderableTasks = Array.isArray(tasks) ? tasks : [];
+  const count = renderableTasks.length;
   container.addChild(new Text(
     theme.fg("toolTitle", theme.bold("orchestrate ")) + theme.fg("muted", `${count} worker${count === 1 ? "" : "s"}`),
     0, 0,
   ));
   if (expanded) {
-    for (const task of tasks) {
+    for (const task of renderableTasks) {
       container.addChild(new Spacer(1));
-      container.addChild(new Text(`${theme.fg("accent", "→")} ${theme.fg("muted", task.worker)} · ${theme.fg("text", theme.bold(task.title))}`, 0, 0));
+      container.addChild(new Text(`${theme.fg("accent", "→")} ${theme.fg("muted", safeTerminalText(task.worker))} · ${theme.fg("text", theme.bold(safeTerminalText(task.title)))}`, 0, 0));
       container.addChild(new Text(safeTerminalText(task.instructions), 2, 0));
     }
     return new WidthBoundComponent(container);
   }
-  container.addChild(new InstructionPreview(tasks, theme));
+  container.addChild(new InstructionPreview(renderableTasks, theme));
   container.addChild(new Text(theme.fg("dim", keyHint("app.tools.expand", "to inspect full instructions")), 0, 0));
   return new WidthBoundComponent(container);
 }
 
 class InstructionPreview implements Component {
   constructor(
-    private readonly tasks: readonly { worker: string; title: string; instructions: string }[],
+    private readonly tasks: readonly RenderableTask[],
     private readonly theme: Theme,
   ) {}
   render(width: number): string[] {
@@ -668,12 +675,12 @@ class InstructionPreview implements Component {
 function renderWorkerMessageCall(
   theme: Theme,
   tool: string,
-  workerId: string,
-  instructions: string,
+  workerId: unknown,
+  instructions: unknown,
   expanded: boolean,
 ): Component {
   const container = new Container();
-  container.addChild(new Text(theme.fg("toolTitle", theme.bold(`${tool} `)) + theme.fg("muted", workerId), 0, 0));
+  container.addChild(new Text(theme.fg("toolTitle", theme.bold(`${tool} `)) + theme.fg("muted", safeTerminalText(workerId)), 0, 0));
   if (expanded) container.addChild(new Text(safeTerminalText(instructions), 2, 0));
   else {
     container.addChild(new Text(`${theme.fg("accent", "→")} ${truncateInstruction(instructions, 240)}`, 0, 0));
@@ -694,33 +701,36 @@ class WidthBoundComponent implements Component {
   dispose(): void { (this.child as Component & { dispose?: () => void }).dispose?.(); }
 }
 
-function safeTerminalText(value: string): string {
-  return value.replace(/\r\n?/g, "\n").replace(/\t/g, "    ").replace(/[\x00-\x08\x0B-\x1F\x7F]/g, (character) => {
+function safeTerminalText(value: unknown): string {
+  const text = typeof value === "string" ? value : value == null ? "" : String(value);
+  return text.replace(/\r\n?/g, "\n").replace(/\t/g, "    ").replace(/[\x00-\x08\x0B-\x1F\x7F]/g, (character) => {
     const code = character.charCodeAt(0);
     return code === 0x7f ? "␡" : String.fromCodePoint(0x2400 + code);
   });
 }
 
-function compactInstructionPreview(instructions: string, characterLimit: number): { text: string; truncated: boolean } {
-  const source = instructions.slice(0, characterLimit);
+function compactInstructionPreview(instructions: unknown, characterLimit: number): { text: string; truncated: boolean } {
+  const text = typeof instructions === "string" ? instructions : instructions == null ? "" : String(instructions);
+  const source = text.slice(0, characterLimit);
   return {
     text: safeTerminalText(source).replace(/\s+/g, " ").trim(),
-    truncated: source.length < instructions.length,
+    truncated: source.length < text.length,
   };
 }
 
-function firstInstructionLine(instructions: string): string | undefined {
-  return instructions.split(/\r\n?|\n/).find((line) => line.trim().length > 0);
+function firstInstructionLine(instructions: unknown): string | undefined {
+  const text = typeof instructions === "string" ? instructions : instructions == null ? "" : String(instructions);
+  return text.split(/\r\n?|\n/).find((line) => line.trim().length > 0);
 }
 
-function truncateInstruction(instructions: string, limit: number): string {
+function truncateInstruction(instructions: unknown, limit: number): string {
   const first = firstInstructionLine(instructions) ?? "";
   return first.length > limit ? `${first.slice(0, limit - 1)}…` : first;
 }
 
-function renderCompactCall(theme: Theme, tool: string, target: string): Text {
+function renderCompactCall(theme: Theme, tool: string, target: unknown): Text {
   return new Text(
-    theme.fg("toolTitle", theme.bold(`${tool} `)) + theme.fg("muted", target),
+    theme.fg("toolTitle", theme.bold(`${tool} `)) + theme.fg("muted", safeTerminalText(target)),
     0,
     0,
   );

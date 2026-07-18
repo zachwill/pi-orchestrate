@@ -709,6 +709,34 @@ describe("registerOrchestrationTools", () => {
     expect(runtime.closeCalls).toHaveLength(1);
   });
 
+  test("renders incomplete streaming tool arguments without crashing", () => {
+    const { pi } = harness();
+    const renderContext = (expanded: boolean) => ({ expanded, argsComplete: false, cwd: "/workspace", state: {}, invalidate() {} }) as never;
+
+    const partialOrchestrate = pi.tool("orchestrate").renderCall!(
+      { tasks: [{ worker: "scout" }, { title: "Plan" }] } as never,
+      themeForRendering(),
+      renderContext(false),
+    ).render(40);
+    expect(partialOrchestrate.every((line) => Bun.stringWidth(line) <= 40)).toBe(true);
+    expect(Bun.stripANSI(partialOrchestrate.join("\n"))).toContain("orchestrate 2 workers");
+
+    const missingTasks = pi.tool("orchestrate").renderCall!(
+      {} as never,
+      themeForRendering(),
+      renderContext(true),
+    ).render(40);
+    expect(Bun.stripANSI(missingTasks.join("\n"))).toContain("orchestrate 0 workers");
+
+    const partialSend = pi.tool("worker_send").renderCall!(
+      { worker_id: "worker-ready" } as never,
+      themeForRendering(),
+      renderContext(false),
+    ).render(40);
+    expect(partialSend.every((line) => Bun.stringWidth(line) <= 40)).toBe(true);
+    expect(Bun.stripANSI(partialSend.join("\n"))).toContain("worker_send worker-ready");
+  });
+
   test("renders all 12 exact expandable outbound messages with safe bounded previews", async () => {
     const { pi, runtime, context } = harness();
     const instructions = `  First  exact\tline.\r\n\r\nUnicode 雪 \u001b[31mred\u0000\n${"UNBROKEN".repeat(12_500)}\nTAIL  `;
