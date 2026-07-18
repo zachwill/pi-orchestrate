@@ -133,9 +133,29 @@ describe("active widget", () => {
       expect(row).toContain("A very");
       if (width >= 72) expect(row).toContain("scout →");
       else expect(row).not.toContain("scout →");
-      if (width >= 42) expect(row).toContain("searching");
-      else expect(row).not.toContain("searching");
+      expect(row).not.toContain("searching");
     }
+    component.dispose();
+  });
+
+  test("omits low-value activity labels from running rows", () => {
+    const component = new WorkerStatusComponent(snapshot([worker("run", "running", { activity: "bash" })]), theme);
+    const row = Bun.stripANSI(component.render(80)[1]!);
+    expect(row).not.toContain("working");
+    expect(row).not.toContain("running command");
+    expect(row).toContain("2t");
+    expect(row).toContain("12.3k ctx");
+    component.dispose();
+  });
+
+  test("uses distinct motion shapes for lifecycle states", () => {
+    const component = new WorkerStatusComponent(snapshot([
+      worker("start", "starting"),
+      worker("run", "running"),
+      worker("stop", "stopping"),
+    ]), theme);
+    const glyphs = component.render(80).slice(1).map((line) => Bun.stripANSI(line).slice(0, 1));
+    expect(new Set(glyphs).size).toBe(3);
     component.dispose();
   });
 

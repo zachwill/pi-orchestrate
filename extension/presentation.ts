@@ -22,7 +22,21 @@ export const ORCHESTRATION_PRESENTATION_KEY = "pi-orchestrate";
 export const MAX_RESULT_PREVIEW_LINES = 6;
 export const MAX_WIDGET_WORKERS = 8;
 
-const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"] as const;
+const WORKER_ANIMATIONS = {
+  starting: {
+    frames: ["⠂", "⠌", "⡑", "⢕", "⣫", "⣿", "⣫", "⢕"],
+    color: "muted",
+  },
+  running: {
+    frames: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
+    color: "accent",
+  },
+  stopping: {
+    frames: ["⣿", "⣶", "⣤", "⣀", "⠠", "⠐", "⠈", "⠁"],
+    color: "dim",
+  },
+} as const;
+const ANIMATION_CYCLE_TICKS = 40;
 const SPINNER_INTERVAL_MS = 140;
 const ACTIVE_STATUSES: ReadonlySet<WorkerStatus> = new Set(["starting", "running", "stopping"]);
 
@@ -229,7 +243,7 @@ export class WorkerStatusComponent implements Component {
   private startTimer(): void {
     if (this.timer || activeWorkers(this.snapshot).length === 0) return;
     this.timer = setInterval(() => {
-      this.frameIndex = (this.frameIndex + 1) % SPINNER_FRAMES.length;
+      this.frameIndex = (this.frameIndex + 1) % ANIMATION_CYCLE_TICKS;
       this.tui?.requestRender();
     }, SPINNER_INTERVAL_MS);
     const timer = this.timer;
@@ -243,13 +257,19 @@ export class WorkerStatusComponent implements Component {
   }
 
   private workerLine(worker: WorkerRecord, width: number): string {
-    const glyph = this.theme.fg("warning", SPINNER_FRAMES[this.frameIndex] ?? SPINNER_FRAMES[0]);
+    const animation = worker.status === "starting"
+      ? WORKER_ANIMATIONS.starting
+      : worker.status === "stopping"
+        ? WORKER_ANIMATIONS.stopping
+        : WORKER_ANIMATIONS.running;
+    const glyph = this.theme.fg(
+      animation.color,
+      animation.frames[this.frameIndex % animation.frames.length] ?? animation.frames[0],
+    );
     const turns = `${numberOrZero(worker.usage?.turns)}t`;
     const context = `${formatCompactNumber(numberOrZero(worker.usage?.contextTokens))} ctx`;
     const suffixFields = width >= 28 ? [turns, context] : width >= 12 ? [turns] : [];
-    const activity = workerStateLabel(worker);
     const requiredWidth = (fields: readonly string[]) => visibleWidth(`⠋  · ${fields.join(" · ")}`) + 10;
-    if (width >= 42 && requiredWidth([activity, ...suffixFields]) <= width) suffixFields.unshift(activity);
     const showWorker = width >= 72 && requiredWidth([worker.worker, ...suffixFields]) <= width;
     const prefix = showWorker ? `${glyph} ${this.theme.fg("muted", worker.worker)} → ` : `${glyph} `;
     const suffix = suffixFields.length ? ` · ${suffixFields.join(" · ")}` : "";
