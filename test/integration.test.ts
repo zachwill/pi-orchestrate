@@ -25,9 +25,9 @@ import {
   type OrchestrationExtensionDependencies,
 } from "../extension/index.js";
 import type {
-  CompletedWave,
   OrchestrationContext,
   RuntimeSnapshot,
+  WorkerSettlement,
 } from "../extension/runtime.js";
 
 const TOOL_NAMES = [
@@ -80,7 +80,11 @@ class FakePi {
 }
 
 class FakeRuntime {
-  readonly orchestrateCalls: Array<{ context: OrchestrationContext; mode: string }> = [];
+  readonly orchestrateCalls: Array<{
+    context: OrchestrationContext;
+    tasks: readonly unknown[];
+    mode: string;
+  }> = [];
   readonly sendCalls: Array<{ context: OrchestrationContext; mode: string }> = [];
   readonly stateListeners = new Set<(ownerSessionId: string) => void>();
   readonly snapshotOwners: string[] = [];
@@ -91,11 +95,18 @@ class FakeRuntime {
     context: OrchestrationContext,
     _tasks: readonly unknown[],
     mode: "async" | "inline",
+    _signal?: AbortSignal,
+    onSettlement?: (settlement: WorkerSettlement) => void,
   ): Promise<unknown> {
-    this.orchestrateCalls.push({ context, mode });
-    return mode === "async"
-      ? { id: "wave-accepted", workerIds: ["worker-accepted"] }
-      : completedWave(context.ownerSessionId, "inline");
+    this.orchestrateCalls.push({ context, tasks: _tasks, mode });
+    if (mode === "async") {
+      return { id: "wave-accepted", workerIds: ["worker-accepted"] };
+    }
+    onSettlement?.(workerSettlement(context.ownerSessionId, {
+      eventId: "inline-result",
+      mode: "inline",
+    }));
+    return inlineCompletedWave(context.ownerSessionId);
   }
 
   async send(
@@ -107,7 +118,7 @@ class FakeRuntime {
     this.sendCalls.push({ context, mode });
     return mode === "async"
       ? { id: "wave-send", workerIds: ["worker-ready"] }
-      : completedWave(context.ownerSessionId, "inline");
+      : inlineCompletedWave(context.ownerSessionId);
   }
 
   async abort(): Promise<void> {}
@@ -146,33 +157,60 @@ function definition(name = "scout"): WorkerDefinition {
   };
 }
 
-function completedWave(
-  ownerSessionId: string,
-  mode: "async" | "inline" = "async",
-): CompletedWave {
+function inlineCompletedWave(ownerSessionId: string) {
+  const settlement = workerSettlement(ownerSessionId, { mode: "inline" });
   return {
-    id: "wave-complete" as WaveId,
+    id: settlement.waveId,
     ownerSessionId,
-    mode,
-    results: [
-      {
-        workerId: "worker-complete" as WorkerId,
-        worker: "scout",
-        title: "Inspect",
-        status: "completed",
-        outcome: { status: "completed", assistantText: "Inspection complete." },
-        usage: {
-          input: 1,
-          output: 1,
-          cacheRead: 0,
-          cacheWrite: 0,
-          cost: 0,
-          contextTokens: 2,
-          turns: 1,
-        },
-        sessionFile: "/sessions/worker.jsonl",
-      },
-    ],
+    mode: "inline" as const,
+    results: [{
+      workerId: settlement.workerId,
+      worker: settlement.worker,
+      title: settlement.title,
+      status: settlement.status,
+      outcome: settlement.outcome,
+      usage: settlement.usage,
+      sessionFile: settlement.sessionFile,
+    }],
+  };
+}
+
+function workerSettlement(
+  ownerSessionId: string,
+  overrides: Partial<WorkerSettlement> = {},
+): WorkerSettlement {
+  const workerId = overrides.workerId ?? "worker-complete" as WorkerId;
+  return {
+    eventId: overrides.eventId ?? `${ownerSessionId}:${workerId}:1`,
+    sequence: overrides.sequence ?? 1,
+    ownerSessionId,
+    waveId: overrides.waveId ?? "wave-complete" as WaveId,
+    workerId,
+    generation: overrides.generation ?? 1,
+    mode: overrides.mode ?? "async",
+    worker: overrides.worker ?? "scout",
+    title: overrides.title ?? "Inspect",
+    lifecycle: overrides.lifecycle ?? "one-shot",
+    status: overrides.status ?? "completed",
+    outcome: overrides.outcome ?? {
+      status: "completed",
+      assistantText: "Inspection complete.",
+    },
+    usage: overrides.usage ?? {
+      input: 1,
+      output: 1,
+      cacheRead: 0,
+      cacheWrite: 0,
+      cost: 0,
+      contextTokens: 2,
+      turns: 1,
+    },
+    startedAt: overrides.startedAt ?? 1,
+    settledAt: overrides.settledAt ?? 2,
+    remainingActive: overrides.remainingActive ?? 0,
+    waveSize: overrides.waveSize ?? 1,
+    waveComplete: overrides.waveComplete ?? true,
+    sessionFile: overrides.sessionFile ?? "/sessions/worker.jsonl",
   };
 }
 
@@ -242,12 +280,13 @@ async function invoke(
   toolCallId: string,
   params: unknown,
   ctx: ExtensionContext,
+  onUpdate?: (update: unknown) => void,
 ) {
   return pi.tool(name).execute(
     toolCallId,
     params as never,
     undefined,
-    undefined,
+    onUpdate as never,
     ctx,
   );
 }
@@ -263,7 +302,7 @@ describe("Pi Orchestrate extension integration", () => {
     install(pi, shared.host);
 
     expect(pi.tools.map((tool) => tool.name)).toEqual(TOOL_NAMES);
-    expect(pi.renderers).toEqual(["pi-orchestrate-wave"]);
+    expect(pi.renderers).toEqual(["pi-orchestrate-worker-result"]);
     expect(pi.tools.map((tool) => tool.name)).not.toContain("worker_status");
     expect(pi.tools.map((tool) => tool.name)).not.toContain("worker_respond");
     expect(shared.runtime.stateListeners.size).toBe(0);
@@ -300,6 +339,7 @@ describe("Pi Orchestrate extension integration", () => {
     expect((promptResult as { systemPrompt: string }).systemPrompt).toContain("trusted-scout");
     expect(runtime.orchestrateCalls[0]?.context.catalog).toBe(catalog);
     expect(runtime.orchestrateCalls[0]?.context.projectTrusted).toBe(true);
+    expect(runtime.orchestrateCalls[0]?.tasks).toEqual(orchestrationParams.tasks);
   });
 
   test("classifies a pure dispatch async and clears its mode after tool execution", async () => {
@@ -308,6 +348,7 @@ describe("Pi Orchestrate extension integration", () => {
     install(pi, host);
     const { ctx } = createContext();
     await pi.emit("session_start", { reason: "startup" }, ctx);
+    const snapshotCallsBeforeDispatch = [...runtime.snapshotOwners];
     await pi.emit(
       "message_end",
       { message: assistantToolCalls([{ id: "pure", name: "orchestrate" }]) },
@@ -324,6 +365,7 @@ describe("Pi Orchestrate extension integration", () => {
 
     expect(runtime.orchestrateCalls.map((call) => call.mode)).toEqual(["async", "inline"]);
     expect(asyncResult.terminate).toBe(true);
+    expect(runtime.snapshotOwners).toEqual(snapshotCallsBeforeDispatch);
   });
 
   test("classifies dispatches inline when their assistant message contains mixed or multiple calls", async () => {
@@ -343,7 +385,15 @@ describe("Pi Orchestrate extension integration", () => {
       },
       ctx,
     );
-    await invoke(pi, "orchestrate", "mixed-dispatch", orchestrationParams, ctx);
+    const inlineUpdates: unknown[] = [];
+    const inlineResult = await invoke(
+      pi,
+      "orchestrate",
+      "mixed-dispatch",
+      orchestrationParams,
+      ctx,
+      (update) => inlineUpdates.push(update),
+    );
 
     await pi.emit(
       "message_end",
@@ -368,9 +418,23 @@ describe("Pi Orchestrate extension integration", () => {
 
     expect(runtime.orchestrateCalls.map((call) => call.mode)).toEqual(["inline", "inline"]);
     expect(runtime.sendCalls.map((call) => call.mode)).toEqual(["inline"]);
+    expect(inlineUpdates).toEqual([{
+      content: [{ type: "text", text: "1 worker response(s) received." }],
+      details: {
+        mode: "inline",
+        settlements: [expect.objectContaining({
+          eventId: "inline-result",
+          mode: "inline",
+          workerId: "worker-complete",
+        })],
+      },
+    }]);
+    expect(inlineResult).not.toHaveProperty("terminate");
+    expect(inlineResult.details).toMatchObject({ mode: "inline" });
+    expect(pi.sent).toEqual([]);
   });
 
-  test("binds the exact session owner and generation, then forwards delivery only after agent settlement", async () => {
+  test("queues per-worker results for a busy owner and flushes them in settlement order with one synthesis turn", async () => {
     const pi = new FakePi();
     const { host } = fakeHost();
     install(pi, host);
@@ -378,18 +442,40 @@ describe("Pi Orchestrate extension integration", () => {
 
     await pi.emit("session_start", { reason: "startup" }, parent.ctx);
     await pi.emit("agent_start", {}, parent.ctx);
-    expect(host.delivery.accept(completedWave("owner-delivery"))).toBe(true);
+    expect(host.delivery.accept(workerSettlement("owner-delivery", {
+      eventId: "first",
+      sequence: 1,
+      workerId: "worker-first" as WorkerId,
+      title: "First",
+      remainingActive: 1,
+      waveComplete: false,
+    }))).toBe(true);
+    expect(host.delivery.accept(workerSettlement("owner-delivery", {
+      eventId: "second",
+      sequence: 2,
+      workerId: "worker-second" as WorkerId,
+      title: "Second",
+    }))).toBe(true);
     expect(pi.sent).toEqual([]);
 
     parent.setIdle(true);
     await pi.emit("agent_settled", {}, parent.ctx);
 
-    expect(pi.sent).toHaveLength(1);
-    expect(pi.sent[0]?.options).toEqual({ triggerTurn: true });
-    expect(pi.sent[0]?.message).toMatchObject({
-      customType: "pi-orchestrate-wave",
-      details: { ownerSessionId: "owner-delivery" },
-    });
+    expect(pi.sent).toHaveLength(2);
+    expect(pi.sent.map(({ options }) => options)).toEqual([
+      { triggerTurn: false },
+      { triggerTurn: true },
+    ]);
+    expect(pi.sent.map(({ message }) => message)).toEqual([
+      expect.objectContaining({
+        customType: "pi-orchestrate-worker-result",
+        details: expect.objectContaining({ eventId: "first", workerId: "worker-first" }),
+      }),
+      expect.objectContaining({
+        customType: "pi-orchestrate-worker-result",
+        details: expect.objectContaining({ eventId: "second", workerId: "worker-second" }),
+      }),
+    ]);
   });
 
   test("keeps two SDK owners bound and quitting one leaves the other host attachment live", async () => {
@@ -410,8 +496,8 @@ describe("Pi Orchestrate extension integration", () => {
 
     await ownerPi.emit("session_start", { reason: "startup" }, owner.ctx);
     await otherPi.emit("session_start", { reason: "startup" }, other.ctx);
-    shared.host.delivery.accept(completedWave("owner-a"));
-    shared.host.delivery.accept(completedWave("owner-b"));
+    shared.host.delivery.accept(workerSettlement("owner-a", { sequence: 1 }));
+    shared.host.delivery.accept(workerSettlement("owner-b", { sequence: 2 }));
 
     expect(ownerPi.sent).toHaveLength(1);
     expect(otherPi.sent).toHaveLength(1);
@@ -420,7 +506,11 @@ describe("Pi Orchestrate extension integration", () => {
     expect(destroyCalls).toBe(0);
     expect(shared.runtime.shutdownCalls).toBe(0);
 
-    shared.host.delivery.accept(completedWave("owner-b"));
+    await otherPi.emit("agent_settled", {}, other.ctx);
+    shared.host.delivery.accept(workerSettlement("owner-b", {
+      eventId: "owner-b:second",
+      sequence: 3,
+    }));
     expect(ownerPi.sent).toHaveLength(1);
     expect(otherPi.sent).toHaveLength(2);
 
@@ -429,7 +519,7 @@ describe("Pi Orchestrate extension integration", () => {
     expect(shared.runtime.shutdownCalls).toBe(1);
   });
 
-  test("queues A's completion while B is active and delivers it once when A resumes", async () => {
+  test("keeps A's pending worker result isolated while B is active and delivers it when A resumes", async () => {
     const shared = fakeHost();
     const firstA = new FakePi();
     const ownerB = new FakePi();
@@ -448,15 +538,11 @@ describe("Pi Orchestrate extension integration", () => {
     install(ownerB, shared.host, overrides);
     const sessionB = createContext("owner-b");
     await ownerB.emit("session_start", { reason: "resume" }, sessionB.ctx);
-    shared.host.delivery.accept(completedWave("owner-a"));
+    shared.host.delivery.accept(workerSettlement("owner-a"));
 
     expect(firstA.sent).toEqual([]);
     expect(ownerB.sent).toEqual([]);
     expect(shared.host.delivery.pendingCount("owner-a")).toBe(1);
-
-    shared.runtime.snapshotOwners.length = 0;
-    await invoke(ownerB, "orchestration_status", "status-b", {}, sessionB.ctx);
-    expect(shared.runtime.snapshotOwners).toEqual(["owner-b"]);
 
     await ownerB.emit("session_shutdown", { reason: "resume" }, sessionB.ctx);
     install(resumedA, shared.host, overrides);
@@ -486,7 +572,7 @@ describe("Pi Orchestrate extension integration", () => {
     await oldPi.emit("session_start", { reason: "startup" }, oldParent.ctx);
     await newPi.emit("session_start", { reason: "reload" }, newParent.ctx);
     await newPi.emit("agent_start", {}, newParent.ctx);
-    shared.host.delivery.accept(completedWave("same-owner"));
+    shared.host.delivery.accept(workerSettlement("same-owner"));
     await oldPi.emit("session_shutdown", { reason: "reload" }, oldParent.ctx);
 
     newParent.setIdle(true);
@@ -525,6 +611,26 @@ describe("Pi Orchestrate extension integration", () => {
     releaseDestroy();
     await shutdown;
     expect(destroyFinished).toBe(true);
+  });
+
+  test("retires a legacy v1 process host before installing v2", async () => {
+    await quitProcessHost();
+    const legacyRuntime = new FakeRuntime();
+    const legacyDelivery = new DeliveryCoordinator();
+    let unsubscribed = 0;
+    const legacyKey = Symbol.for("@zachwill/pi-orchestrate/process-host/v1");
+    (globalThis as Record<symbol, unknown>)[legacyKey] = {
+      runtime: legacyRuntime,
+      delivery: legacyDelivery,
+      unsubscribeCompletion() { unsubscribed += 1; },
+    };
+
+    const current = createProcessHost();
+    expect(current.runtime).not.toBe(legacyRuntime as unknown as ProcessHost["runtime"]);
+    expect(unsubscribed).toBe(1);
+    expect(legacyRuntime.shutdownCalls).toBe(1);
+    expect((globalThis as Record<symbol, unknown>)[legacyKey]).toBeUndefined();
+    await quitProcessHost();
   });
 
   test("the versioned process host survives reloads and refuses quit while attached", async () => {

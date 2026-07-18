@@ -4,10 +4,12 @@ import type {
   ExtensionContext,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Text } from "@earendil-works/pi-tui";
+import { Container, Markdown, Spacer, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
 import {
   formatSize,
   getAgentDir,
+  getMarkdownTheme,
+  keyHint,
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -113,21 +115,30 @@ export function registerOrchestrationTools(
       "Use orchestrate for one independent worker wave, with a complete brief for every task.",
     ],
     parameters: orchestrateSchema,
-    renderCall(args, theme) {
-      return renderDispatchCall(theme, args.tasks);
+    renderCall(args, theme, { expanded }) {
+      return renderDispatchCall(theme, args.tasks, expanded);
     },
-    renderResult(result, { isPartial }, theme) {
-      return renderOrchestrationResult(result, isPartial, theme);
+    renderResult(result, { isPartial, expanded }, theme, context) {
+      return renderOrchestrationResult(result, isPartial, expanded, theme, context.lastComponent);
     },
-    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       const mode = deps.getDispatchMode(toolCallId);
       const runtimeContext = await buildRuntimeContext(ctx, deps);
+      const settlements: unknown[] = [];
+      const onSettlement = mode === "inline" ? (settlement: unknown) => {
+        settlements.push(settlement);
+        onUpdate?.({
+          content: [{ type: "text", text: `${settlements.length} worker response(s) received.` }],
+          details: { mode: "inline", settlements: [...settlements] },
+        });
+      } : undefined;
       const wave = await orchestrateWithMode(
         deps.runtime,
         runtimeContext,
         params.tasks,
         mode,
         signal,
+        onSettlement,
       );
 
       if (mode === "async") {
@@ -176,7 +187,7 @@ export function registerOrchestrationTools(
       return new Text(theme.fg("toolTitle", theme.bold("orchestration_status")), 0, 0);
     },
     renderResult(result, { isPartial }, theme) {
-      return renderSimpleResult(result, isPartial ? "Reading orchestration state…" : "Orchestration state ready", theme);
+      return renderDiagnosticsResult(result, isPartial, theme);
     },
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const ownerSessionId = requireNonblank(
@@ -210,16 +221,24 @@ export function registerOrchestrationTools(
       "Use worker_send only for follow-up work on an owned ready reusable worker.",
     ],
     parameters: workerSendSchema,
-    renderCall(args, theme) {
-      return renderWorkerMessageCall(theme, "worker_send", args.worker_id, args.instructions);
+    renderCall(args, theme, { expanded }) {
+      return renderWorkerMessageCall(theme, "worker_send", args.worker_id, args.instructions, expanded);
     },
-    renderResult(result, { isPartial }, theme) {
-      return renderOrchestrationResult(result, isPartial, theme);
+    renderResult(result, { isPartial, expanded }, theme, context) {
+      return renderOrchestrationResult(result, isPartial, expanded, theme, context.lastComponent);
     },
-    async execute(toolCallId, params, signal, _onUpdate, ctx) {
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
       const workerId = asWorkerId(params.worker_id);
       const mode = deps.getDispatchMode(toolCallId);
       const runtimeContext = await buildRuntimeContext(ctx, deps);
+      const settlements: unknown[] = [];
+      const onSettlement = mode === "inline" ? (settlement: unknown) => {
+        settlements.push(settlement);
+        onUpdate?.({
+          content: [{ type: "text", text: `${settlements.length} worker response(s) received.` }],
+          details: { mode: "inline", settlements: [...settlements] },
+        });
+      } : undefined;
       const wave = await sendWithMode(
         deps.runtime,
         runtimeContext,
@@ -227,6 +246,7 @@ export function registerOrchestrationTools(
         params.instructions,
         mode,
         signal,
+        onSettlement,
       );
 
       if (mode === "async") {
@@ -280,7 +300,7 @@ export function registerOrchestrationTools(
       return renderCompactCall(theme, "worker_abort", target);
     },
     renderResult(result, { isPartial }, theme) {
-      return renderSimpleResult(result, isPartial ? "Stopping workers…" : "✓ Workers stopped", theme);
+      return renderSimpleResult(result, isPartial ? "Requesting worker stop…" : "Worker stop requested", theme, "warning");
     },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const ownerSessionId = requireNonblank(
@@ -363,16 +383,10 @@ function orchestrateWithMode(
   tasks: readonly OrchestrateTaskInput[],
   mode: "async" | "inline",
   signal: AbortSignal | undefined,
+  onSettlement?: (settlement: unknown) => void,
 ): Promise<AcceptedWave | CompletedWave> {
   if (mode === "async") return runtime.orchestrate(context, tasks, "async");
-
-  const orchestrateInline = runtime.orchestrate as unknown as (
-    context: OrchestrationContext,
-    tasks: readonly OrchestrateTaskInput[],
-    mode: "inline",
-    signal?: AbortSignal,
-  ) => Promise<CompletedWave>;
-  return orchestrateInline.call(runtime, context, tasks, "inline", signal);
+  return runtime.orchestrate(context, tasks, "inline", signal, onSettlement);
 }
 
 function sendWithMode(
@@ -382,17 +396,10 @@ function sendWithMode(
   instructions: string,
   mode: "async" | "inline",
   signal: AbortSignal | undefined,
+  onSettlement?: (settlement: unknown) => void,
 ): Promise<AcceptedWave | CompletedWave> {
   if (mode === "async") return runtime.send(context, workerId, instructions, "async");
-
-  const sendInline = runtime.send as unknown as (
-    context: OrchestrationContext,
-    workerId: WorkerId,
-    instructions: string,
-    mode: "inline",
-    signal?: AbortSignal,
-  ) => Promise<CompletedWave>;
-  return sendInline.call(runtime, context, workerId, instructions, "inline", signal);
+  return runtime.send(context, workerId, instructions, "inline", signal, onSettlement);
 }
 
 function requireNonblank(name: string, value: string): string {
@@ -598,33 +605,42 @@ function readableDetails(title: string, details: unknown): string {
 
 function renderDispatchCall(
   theme: Theme,
-  tasks: readonly { worker: string; title: string }[],
-): Container {
+  tasks: readonly { worker: string; title: string; instructions: string }[],
+  expanded: boolean,
+): Component {
   const container = new Container();
   const count = tasks.length;
-  container.addChild(
-    new Text(
-      theme.fg("toolTitle", theme.bold("orchestrate ")) +
-        theme.fg("muted", `${count} worker${count === 1 ? "" : "s"}`),
-      0,
-      0,
-    ),
-  );
+  container.addChild(new Text(
+    theme.fg("toolTitle", theme.bold("orchestrate ")) + theme.fg("muted", `${count} worker${count === 1 ? "" : "s"}`),
+    0, 0,
+  ));
+  if (expanded) {
+    for (const task of tasks) {
+      container.addChild(new Spacer(1));
+      container.addChild(new Text(`${theme.fg("accent", "→")} ${theme.fg("muted", task.worker)} · ${theme.fg("text", theme.bold(task.title))}`, 0, 0));
+      container.addChild(new Text(safeTerminalText(task.instructions), 2, 0));
+    }
+    return new WidthBoundComponent(container);
+  }
+  container.addChild(new InstructionPreview(tasks, theme));
+  container.addChild(new Text(theme.fg("dim", keyHint("app.tools.expand", "to inspect full instructions")), 0, 0));
+  return new WidthBoundComponent(container);
+}
 
-  const visibleTasks = tasks.slice(0, 6);
-  for (const task of visibleTasks) {
-    container.addChild(
-      new Text(
-        `${theme.fg("accent", "→")} ${theme.fg("muted", task.worker)} · ${theme.fg("dim", task.title)}`,
-        0,
-        0,
-      ),
-    );
+class InstructionPreview implements Component {
+  constructor(
+    private readonly tasks: readonly { worker: string; title: string; instructions: string }[],
+    private readonly theme: Theme,
+  ) {}
+  render(width: number): string[] {
+    const bounded = Math.max(1, width);
+    return this.tasks.map((task) => {
+      const preview = firstInstructionLine(task.instructions) ?? "";
+      const row = `${this.theme.fg("accent", "→")} ${safeTerminalText(task.worker)} · ${safeTerminalText(task.title)}${preview ? ` — ${safeTerminalText(preview)}` : ""}`;
+      return truncateToWidth(row, bounded, "…");
+    });
   }
-  if (tasks.length > visibleTasks.length) {
-    container.addChild(new Text(theme.fg("dim", `… ${tasks.length - visibleTasks.length} more`), 0, 0));
-  }
-  return container;
+  invalidate(): void {}
 }
 
 function renderWorkerMessageCall(
@@ -632,20 +648,44 @@ function renderWorkerMessageCall(
   tool: string,
   workerId: string,
   instructions: string,
-): Container {
+  expanded: boolean,
+): Component {
   const container = new Container();
-  container.addChild(
-    new Text(
-      theme.fg("toolTitle", theme.bold(`${tool} `)) + theme.fg("muted", workerId),
-      0,
-      0,
-    ),
-  );
-  const firstLine = instructions.split("\n").find((line) => line.trim())?.trim();
-  if (firstLine) {
-    container.addChild(new Text(`${theme.fg("accent", "→")} ${theme.fg("dim", firstLine)}`, 0, 0));
+  container.addChild(new Text(theme.fg("toolTitle", theme.bold(`${tool} `)) + theme.fg("muted", workerId), 0, 0));
+  if (expanded) container.addChild(new Text(safeTerminalText(instructions), 2, 0));
+  else {
+    container.addChild(new Text(`${theme.fg("accent", "→")} ${truncateInstruction(instructions, 240)}`, 0, 0));
+    container.addChild(new Text(theme.fg("dim", keyHint("app.tools.expand", "to inspect full message")), 0, 0));
   }
-  return container;
+  return new WidthBoundComponent(container);
+}
+
+class WidthBoundComponent implements Component {
+  constructor(private readonly child: Component, private readonly maxLines?: number) {}
+  render(width: number): string[] {
+    const bounded = Math.max(1, Math.floor(width));
+    const lines = this.child.render(bounded);
+    return (this.maxLines === undefined ? lines : lines.slice(0, this.maxLines))
+      .map((line) => truncateToWidth(line, bounded, "…"));
+  }
+  invalidate(): void { this.child.invalidate(); }
+  dispose(): void { (this.child as Component & { dispose?: () => void }).dispose?.(); }
+}
+
+function safeTerminalText(value: string): string {
+  return value.replace(/\r\n?/g, "\n").replace(/\t/g, "    ").replace(/[\x00-\x08\x0B-\x1F\x7F]/g, (character) => {
+    const code = character.charCodeAt(0);
+    return code === 0x7f ? "␡" : String.fromCodePoint(0x2400 + code);
+  });
+}
+
+function firstInstructionLine(instructions: string): string | undefined {
+  return instructions.split(/\r\n?|\n/).find((line) => line.trim().length > 0);
+}
+
+function truncateInstruction(instructions: string, limit: number): string {
+  const first = firstInstructionLine(instructions) ?? "";
+  return first.length > limit ? `${first.slice(0, limit - 1)}…` : first;
 }
 
 function renderCompactCall(theme: Theme, tool: string, target: string): Text {
@@ -659,38 +699,130 @@ function renderCompactCall(theme: Theme, tool: string, target: string): Text {
 function renderOrchestrationResult(
   result: AgentToolResult<unknown>,
   isPartial: boolean,
+  expanded: boolean,
   theme: Theme,
-): Text {
-  if (isPartial) return new Text(theme.fg("warning", "Sending work…"), 0, 0);
-
+  lastComponent: unknown,
+): Component {
   const details = result.details;
-  if (isRecord(details) && Array.isArray(details.workerIds)) {
+  if (isRecord(details) && typeof details.id === "string" && Array.isArray(details.workerIds) && details.workerIds.every((id) => typeof id === "string")) {
     const count = details.workerIds.length;
-    return new Text(
-      theme.fg("success", `✓ Sent to ${count} worker${count === 1 ? "" : "s"}`) +
-        theme.fg("dim", " · replies return automatically"),
-      0,
-      0,
-    );
+    return new WidthBoundComponent(new Text(theme.fg("success", `Sent to ${count} worker${count === 1 ? "" : "s"}`) + theme.fg("dim", " · responses arrive as they complete"), 0, 0));
   }
-  if (isRecord(details) && Array.isArray(details.results)) {
-    const count = details.results.length;
-    return new Text(
-      theme.fg("success", `✓ ${count} worker${count === 1 ? " replied" : "s replied"}`),
-      0,
-      0,
-    );
+  const settlements = inlineSettlements(details);
+  if (settlements.length > 0) {
+    const component = lastComponent instanceof InlineResultComponent
+      ? lastComponent
+      : new InlineResultComponent(theme);
+    component.update(settlements, isPartial, expanded);
+    return component;
   }
-  return renderSimpleResult(result, firstResultLine(result) || "Work sent", theme);
+  if (isRecord(details) && (Array.isArray(details.settlements) || Array.isArray(details.results) || "workerIds" in details)) {
+    return new WidthBoundComponent(new Text(theme.fg("warning", "Worker result details unavailable"), 0, 0));
+  }
+  if (isPartial) return new WidthBoundComponent(new Text(theme.fg("warning", "Sending work…"), 0, 0));
+  return new WidthBoundComponent(renderSimpleResult(result, firstResultLine(result) || "Work sent", theme, "warning"));
+}
+
+interface InlineSettlement {
+  worker: string;
+  title: string;
+  status: "completed" | "ready" | "failed" | "aborted";
+  response: string;
+}
+
+class InlineResultComponent implements Component {
+  private settlements: readonly InlineSettlement[] = [];
+  private partial = false;
+  private expanded = false;
+  private child: Component = new Container();
+  constructor(private readonly theme: Theme) {}
+  update(settlements: readonly InlineSettlement[], partial: boolean, expanded: boolean): void {
+    this.settlements = settlements;
+    this.partial = partial;
+    this.expanded = expanded;
+    this.rebuild();
+  }
+  render(width: number): string[] { return new WidthBoundComponent(this.child).render(width); }
+  invalidate(): void { this.rebuild(); }
+  dispose(): void { (this.child as Component & { dispose?: () => void }).dispose?.(); }
+  private rebuild(): void {
+    (this.child as Component & { dispose?: () => void }).dispose?.();
+    const container = new Container();
+    for (const settlement of this.settlements) {
+      const failed = settlement.status === "failed";
+      const aborted = settlement.status === "aborted";
+      const color = failed ? "error" : aborted ? "warning" : "success";
+      const icon = failed ? "✗" : aborted ? "■" : "✓";
+      container.addChild(new WidthBoundComponent(new Text(this.theme.fg(color, this.theme.bold(`${icon} ${settlement.worker} · ${settlement.title} · ${settlement.status}`)), 0, 0), 1));
+      if (settlement.response) {
+        const markdown = new Markdown(settlement.response, this.expanded ? 2 : 0, 0, getMarkdownTheme());
+        container.addChild(new WidthBoundComponent(markdown, this.expanded ? undefined : 2));
+      }
+      container.addChild(new Spacer(1));
+    }
+    if (this.partial) container.addChild(new Text(this.theme.fg("warning", "Waiting for remaining workers…"), 0, 0));
+    else if (!this.expanded) container.addChild(new Text(this.theme.fg("dim", keyHint("app.tools.expand", "to inspect full responses")), 0, 0));
+    this.child = container;
+  }
+}
+
+function inlineSettlements(details: unknown): InlineSettlement[] {
+  if (!isRecord(details)) return [];
+  const values = Array.isArray(details.settlements) ? details.settlements : Array.isArray(details.results) ? details.results : [];
+  const parsed: InlineSettlement[] = [];
+  for (const value of values) {
+    const settlement = readInlineSettlement(value);
+    if (settlement) parsed.push(settlement);
+  }
+  return parsed;
+}
+
+function readInlineSettlement(value: unknown): InlineSettlement | undefined {
+  if (!isRecord(value) || typeof value.worker !== "string" || typeof value.title !== "string" || !isRecord(value.outcome)) return undefined;
+  const outcome = value.outcome;
+  const statuses = ["completed", "ready", "failed", "aborted"] as const;
+  const status = statuses.find((item) => item === value.status);
+  const outcomeStatus = statuses.find((item) => item === outcome.status);
+  if (!status || outcomeStatus !== status) return undefined;
+  const message = outcome.message;
+  const camelAssistant = outcome.assistantText;
+  const snakeAssistant = outcome.assistant_text;
+  if (message !== undefined && typeof message !== "string") return undefined;
+  if (camelAssistant !== undefined && typeof camelAssistant !== "string") return undefined;
+  if (snakeAssistant !== undefined && typeof snakeAssistant !== "string") return undefined;
+  const assistantText = typeof camelAssistant === "string" ? camelAssistant : snakeAssistant;
+  if ((status === "completed" || status === "ready") && typeof assistantText !== "string") return undefined;
+  if (status === "failed" && typeof message !== "string") return undefined;
+  return {
+    worker: value.worker,
+    title: value.title,
+    status,
+    response: [message, assistantText].filter((item): item is string => typeof item === "string" && item.length > 0).join("\n\n"),
+  };
+}
+
+function renderDiagnosticsResult(result: AgentToolResult<unknown>, isPartial: boolean, theme: Theme): Text {
+  if (isPartial) return new Text(theme.fg("muted", "Reading orchestration diagnostics…"), 0, 0);
+  const details = result.details;
+  if (isRecord(details) && isRecord(details.snapshot) && Array.isArray(details.snapshot.workers)) {
+    const workers = details.snapshot.workers.filter(isRecord);
+    const active = workers.filter((worker) => ["starting", "running", "stopping"].includes(String(worker.status))).length;
+    const ready = workers.filter((worker) => worker.status === "ready").length;
+    const diagnostics = isRecord(details.catalog) && Array.isArray(details.catalog.diagnostics) ? details.catalog.diagnostics.length : 0;
+    const facts = [active ? `${active} active` : "No active workers", ready ? `${ready} available for follow-up` : undefined, diagnostics ? `${diagnostics} catalog diagnostic${diagnostics === 1 ? "" : "s"}` : undefined].filter(Boolean);
+    return new Text(theme.fg("muted", facts.join(" · ")), 0, 0);
+  }
+  return new Text(theme.fg("muted", firstResultLine(result) || "Diagnostics unavailable"), 0, 0);
 }
 
 function renderSimpleResult(
   result: AgentToolResult<unknown>,
   message: string,
   theme: Theme,
+  normalColor: "success" | "warning" = "success",
 ): Text {
   const failed = "isError" in result && result.isError === true;
-  return new Text(theme.fg(failed ? "error" : "success", failed ? firstResultLine(result) || message : message), 0, 0);
+  return new Text(theme.fg(failed ? "error" : normalColor, failed ? firstResultLine(result) || message : message), 0, 0);
 }
 
 function firstResultLine(result: AgentToolResult<unknown>): string | undefined {

@@ -1,14 +1,8 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import {
-  initTheme,
-  type ExtensionAPI,
-  type ExtensionContext,
-  type MessageRenderer,
-  type Theme,
-} from "@earendil-works/pi-coding-agent";
+import { initTheme, type ExtensionAPI, type ExtensionContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type Component } from "@earendil-works/pi-tui";
+import type { WorkerRecord, WorkerStatus } from "../extension/domain.ts";
 import type { RuntimeSnapshot } from "../extension/runtime.ts";
-import type { WaveRecord, WorkerRecord, WorkerStatus } from "../extension/domain.ts";
 import {
   MAX_RESULT_PREVIEW_LINES,
   MAX_WIDGET_WORKERS,
@@ -16,604 +10,291 @@ import {
   StatusController,
   WorkerStatusComponent,
   formatFooterStatus,
-  formatResultPreviews,
-  formatResultStatusSummary,
-  formatWorkerStatusLine,
-  formatWorkerUsage,
   registerOrchestrationPresentation,
   type PresentationRuntime,
 } from "../extension/presentation.ts";
 
 beforeAll(() => initTheme("dark", false));
+const theme = { fg: (_: string, text: string) => text, bg: (_: string, text: string) => text, bold: (text: string) => text, italic: (text: string) => text, underline: (text: string) => text, inverse: (text: string) => text, strikethrough: (text: string) => text } as Theme;
+const usage = { input: 1200, output: 345, cacheRead: 12, cacheWrite: 3, cost: 0.0123, contextTokens: 12345, turns: 2 };
 
-const theme = {
-  fg: (_color: string, text: string) => text,
-  bg: (_color: string, text: string) => text,
-  bold: (text: string) => text,
-  italic: (text: string) => text,
-  underline: (text: string) => text,
-  inverse: (text: string) => text,
-  strikethrough: (text: string) => text,
-} as Theme;
-
-const usage = {
-  input: 1_200,
-  output: 345,
-  cacheRead: 0,
-  cacheWrite: 0,
-  cost: 0.0123,
-  contextTokens: 12_345,
-  turns: 2,
-};
-
-function worker(
-  id: string,
-  status: WorkerStatus,
-  overrides: Partial<WorkerRecord> = {},
-): WorkerRecord {
-  return {
-    id,
-    worker: "scout",
-    ownerSessionId: "owner",
-    waveId: "wave-1",
-    title: `Human title ${id}`,
-    instructions: "Inspect the repository",
-    lifecycle: status === "ready" ? "reusable" : "one-shot",
-    status,
-    usage,
-    ...overrides,
-  } as WorkerRecord;
+function worker(id: string, status: WorkerStatus, overrides: Partial<WorkerRecord> = {}): WorkerRecord {
+  return { id, worker: "scout", ownerSessionId: "owner", waveId: "wave", title: `Task ${id}`, instructions: "Do it", lifecycle: status === "ready" ? "reusable" : "one-shot", status, usage, startedAt: Date.now() - 78_000, ...overrides } as WorkerRecord;
 }
-
-function wave(
-  id = "wave-1",
-  workerIds: readonly string[] = ["worker-1"],
-  state: WaveRecord["state"] = "running",
-  createdAt = 10_000,
-): WaveRecord {
-  return {
-    id,
-    ownerSessionId: "owner",
-    workerIds,
-    mode: "async",
-    state,
-    createdAt,
-  } as WaveRecord;
+function snapshot(workers: readonly WorkerRecord[]): RuntimeSnapshot {
+  return { workers, waves: [{ id: "wave", ownerSessionId: "owner", workerIds: workers.map((item) => item.id), mode: "async", state: "running", createdAt: Date.now() - 78_000 }] } as RuntimeSnapshot;
 }
-
-function snapshot(
-  workers: readonly WorkerRecord[],
-  waves: readonly WaveRecord[] = [wave()],
-): RuntimeSnapshot {
-  return { workers, waves };
-}
-
-function resultDetails(count = 2): unknown {
-  const statuses = ["completed", "failed", "aborted", "ready", "completed", "completed"];
+function settlement(status: "completed" | "ready" | "failed" | "aborted" = "completed", text = "A useful worker response.") {
   return {
-    id: "wave-results",
-    ownerSessionId: "owner",
-    mode: "async",
-    results: Array.from({ length: count }, (_, index) => {
-      const status = statuses[index] ?? "completed";
-      return {
-        workerId: `worker-${index + 1}`,
-        worker: index % 2 === 0 ? "scout" : "worker",
-        title: `Task ${index + 1}`,
-        status,
-        outcome: index === 1
-          ? { status: "failed", message: "Tests failed", assistantText: "Partial result" }
-          : index === 2
-            ? { status: "aborted", message: "Stopped" }
-            : index === 3
-              ? { status: "ready", assistantText: "Waiting for follow-up" }
-              : { status: "completed", assistantText: `Result body ${index + 1}` },
-        usage,
-        sessionFile: `/sessions/worker-${index + 1}.jsonl`,
-      };
-    }),
+    eventId: "event", sequence: 1, ownerSessionId: "owner", waveId: "wave", workerId: "worker-1", generation: 2,
+    mode: "async", worker: "scout", title: "Inspect code", lifecycle: status === "ready" ? "reusable" : "one-shot", status,
+    outcome: status === "completed" || status === "ready" ? { status, assistantText: text } : { status, message: text, assistantText: "Partial evidence." },
+    usage, startedAt: 1000, settledAt: 6200, remainingActive: 0, waveComplete: true, sessionFile: "/sessions/worker.jsonl",
   };
 }
-
-function registeredRenderer(): MessageRenderer {
-  let renderer: MessageRenderer | undefined;
-  const pi = {
-    registerMessageRenderer(customType: string, candidate: MessageRenderer) {
-      expect(customType).toBe("pi-orchestrate-wave");
-      renderer = candidate;
-    },
-  } as unknown as ExtensionAPI;
-  registerOrchestrationPresentation(pi);
-  return renderer!;
+function renderer(): MessageRenderer {
+  let result: MessageRenderer | undefined;
+  registerOrchestrationPresentation({ registerMessageRenderer(type: string, candidate: MessageRenderer) { expect(type).toBe("pi-orchestrate-worker-result"); result = candidate; } } as unknown as ExtensionAPI);
+  return result!;
+}
+function renderResult(details: unknown, expanded: boolean, width: number, content = "fallback content"): string[] {
+  return renderer()({ role: "custom", customType: "pi-orchestrate-worker-result", content, display: true, details, timestamp: 1 }, { expanded }, theme)!.render(width);
 }
 
-function renderMessage(
-  expanded: boolean,
-  details: unknown = resultDetails(),
-  content = "## Capped worker results\n\nDelivery preview only.",
-  width = 60,
-): string[] {
-  const component = registeredRenderer()(
-    {
-      role: "custom",
-      customType: "pi-orchestrate-wave",
-      content,
-      display: true,
-      details,
-      timestamp: Date.now(),
-    },
-    { expanded },
-    theme,
-  );
-  expect(component).toBeDefined();
-  return component!.render(width);
-}
+describe("per-worker result messages", () => {
+  test.each([
+    ["completed", "✓ completed"], ["ready", "✓ response complete"], ["failed", "✗ failed"], ["aborted", "■ aborted"],
+  ] as const)("renders truthful %s styling", (status, heading) => {
+    const output = Bun.stripANSI(renderResult(settlement(status), false, 80).join("\n"));
+    expect(output).toContain(heading);
+    expect(output).toContain("scout · Inspect code · 5s");
+    expect(output).toContain("to expand");
+    if (status === "failed" || status === "aborted") expect(output).not.toContain("✓");
+  });
 
-class Deferred<T> {
-  readonly promise: Promise<T>;
-  private resolvePromise!: (value: T) => void;
+  test("expanded output reconstructs full response and adjacent metadata", () => {
+    const text = `# Full response\n\n${"detail ".repeat(200)}TAIL`;
+    const output = Bun.stripANSI(renderResult(settlement("completed", text), true, 50, "capped").join("\n"));
+    expect(output).toContain("TAIL");
+    expect(output).toContain("worker ID worker-1 · wave ID wave");
+    expect(output).toContain("status completed · generation 2");
+    expect(output).toContain("turns 2 · current context 12.3k");
+    expect(output).toContain("session /sessions/worker.jsonl");
+  });
 
-  constructor() {
-    this.promise = new Promise((resolve) => {
-      this.resolvePromise = resolve;
-    });
-  }
+  test("caps collapsed content by rendered visual height and safely falls back", () => {
+    const long = "word ".repeat(1000);
+    const collapsed = renderResult(settlement("completed", long), false, 32);
+    expect(collapsed.length).toBeLessThanOrEqual(MAX_RESULT_PREVIEW_LINES + 7);
+    const malformed = Bun.stripANSI(renderResult({ bad: true }, false, 32, long).join("\n"));
+    expect(malformed).toContain("Worker result");
+    expect(malformed).toContain("to expand");
+  });
 
-  resolve(value: T): void {
-    this.resolvePromise(value);
-  }
-}
+  test("expanded malformed fallback never silently omits content", () => {
+    const content = Array.from({ length: 150 }, (_, index) => `fallback line ${index}`).join("\n");
+    const output = Bun.stripANSI(renderResult({ bad: true }, true, 40, content).join("\n"));
+    expect(output).toContain("fallback line 0");
+    expect(output).toContain("fallback line 149");
+  });
+
+  test("rejects contradictory and malformed details without optimistic success", () => {
+    for (const details of [
+      { ...settlement(), mode: "background" },
+      { ...settlement(), generation: 1.5 },
+      { ...settlement(), usage: { ...usage, turns: Number.NaN } },
+      { ...settlement(), status: "completed", outcome: { status: "failed", message: "no" } },
+    ]) {
+      const output = Bun.stripANSI(renderResult(details, false, 80).join("\n"));
+      expect(output).toContain("details unavailable");
+      expect(output).not.toContain("✓ completed");
+    }
+  });
+
+  test("uses explicit startup failure stage and keeps ordinary zero-turn failures truthful", () => {
+    const ordinary = { ...settlement("failed"), usage: { ...usage, turns: 0 }, sessionFile: undefined };
+    expect(Bun.stripANSI(renderResult(ordinary, false, 80).join("\n"))).toContain("✗ failed");
+    expect(Bun.stripANSI(renderResult({ ...ordinary, failureStage: "startup" }, false, 80).join("\n"))).toContain("✗ could not start");
+  });
+
+  test("keeps every line width-safe down to one column", () => {
+    const details = settlement("completed", "x".repeat(100_000));
+    for (const width of [120, 80, 50, 32, 3, 2, 1]) for (const expanded of [false, true]) {
+      expect(renderResult(details, expanded, width).every((line) => visibleWidth(line) <= width)).toBe(true);
+    }
+  });
+
+  test("rebuilds themed worker-result children on invalidation", () => {
+    let marker = "old";
+    const mutableTheme = { ...theme, fg: (_: string, text: string) => `${marker}:${text}` } as Theme;
+    const component = renderer()({ role: "custom", customType: "pi-orchestrate-worker-result", content: "fallback", display: true, details: settlement(), timestamp: 1 }, { expanded: false }, mutableTheme)!;
+    expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("old:✓ completed");
+    marker = "new";
+    component.invalidate();
+    const refreshed = Bun.stripANSI(component.render(80).join("\n"));
+    expect(refreshed).toContain("new:✓ completed");
+    expect(refreshed).not.toContain("old:✓ completed");
+  });
+});
+
+describe("active widget", () => {
+  test("reserves exact high-priority fields before long-title truncation at every width", () => {
+    const component = new WorkerStatusComponent(snapshot([worker("long", "running", {
+      title: "A very long worker title that must be truncated only after suffixes are reserved",
+      activity: "grep",
+    })]), theme);
+    for (const width of [120, 80, 50, 42, 32]) {
+      const row = Bun.stripANSI(component.render(width)[1]!);
+      expect(visibleWidth(row)).toBeLessThanOrEqual(width);
+      expect(row).toContain("2t");
+      expect(row).toContain("12.3k ctx");
+      expect(row).toContain("A very");
+      if (width >= 72) expect(row).toContain("scout →");
+      else expect(row).not.toContain("scout →");
+      if (width >= 42) expect(row).toContain("searching");
+      else expect(row).not.toContain("searching");
+    }
+    component.dispose();
+  });
+
+  test("shows active rows only with stable adaptive usage", () => {
+    const component = new WorkerStatusComponent(snapshot([
+      worker("run", "running", { activity: "grep" }), worker("start", "starting", { usage: undefined }),
+      worker("done", "completed"), worker("ready", "ready"), worker("failed", "failed"),
+    ]), theme);
+    for (const width of [120, 80, 50, 32]) {
+      const output = Bun.stripANSI(component.render(width).join("\n"));
+      expect(output).toContain("Workers · 2 active · 1m 18s");
+      expect(output).toContain("Task run");
+      expect(output).toContain("2t");
+      expect(output).toContain("Task start");
+      expect(output).toContain("0t");
+      expect(output).not.toContain("Task done");
+      expect(output).not.toContain("Task ready");
+      expect(component.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
+    }
+    component.dispose();
+  });
+
+  test("limits rows and reports active overflow", () => {
+    const workers = Array.from({ length: 10 }, (_, index) => worker(String(index), "running"));
+    const lines = new WorkerStatusComponent(snapshot(workers), theme).render(80).map(Bun.stripANSI);
+    expect(lines).toHaveLength(MAX_WIDGET_WORKERS + 2);
+    expect(lines.at(-1)).toBe("… 2 more active");
+  });
+
+  test("animates only the glyph and disposes its timer", async () => {
+    let requests = 0;
+    const component = new WorkerStatusComponent(snapshot([worker("run", "running")]), theme, { requestRender: () => { requests += 1; } });
+    const before = Bun.stripANSI(component.render(80)[1]!);
+    await Bun.sleep(155);
+    const after = Bun.stripANSI(component.render(80)[1]!);
+    expect(requests).toBeGreaterThan(0);
+    expect(after.slice(2)).toBe(before.slice(2));
+    component.dispose();
+    const stopped = requests;
+    await Bun.sleep(155);
+    expect(requests).toBe(stopped);
+  });
+
+  test("footer contains reusable facts only", () => {
+    expect(formatFooterStatus(snapshot([worker("run", "running"), worker("ready", "ready")]))).toBe("1 available for follow-up");
+    expect(formatFooterStatus(snapshot([worker("run", "running")]))).toBeUndefined();
+  });
+});
 
 class RuntimeHarness implements PresentationRuntime {
-  readonly listeners = new Set<(ownerSessionId: string) => void>();
-  readonly snapshotOwners: string[] = [];
-  subscribeCalls = 0;
-  unsubscribeCalls = 0;
-  snapshotImpl: (ownerSessionId: string) => Promise<RuntimeSnapshot> = async () => snapshot([], []);
-
-  snapshot(ownerSessionId: string): Promise<RuntimeSnapshot> {
-    this.snapshotOwners.push(ownerSessionId);
-    return this.snapshotImpl(ownerSessionId);
-  }
-
-  subscribeState(listener: (ownerSessionId: string) => void): () => void {
-    this.subscribeCalls += 1;
-    this.listeners.add(listener);
-    return () => {
-      if (!this.listeners.delete(listener)) return;
-      this.unsubscribeCalls += 1;
-    };
-  }
-
-  emit(ownerSessionId: string): void {
-    for (const listener of this.listeners) listener(ownerSessionId);
-  }
+  listeners = new Set<(owner: string) => void>();
+  value = snapshot([]);
+  snapshot(): Promise<RuntimeSnapshot> { return Promise.resolve(this.value); }
+  subscribeState(listener: (owner: string) => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
+  emit(): void { for (const listener of this.listeners) listener("owner"); }
 }
 
-interface UiHarness {
-  readonly ctx: ExtensionContext;
-  readonly statuses: Array<string | undefined>;
-  readonly widgets: Array<unknown>;
-}
-
-function context(mode: ExtensionContext["mode"] = "tui"): UiHarness {
-  const statuses: Array<string | undefined> = [];
-  const widgets: Array<unknown> = [];
-  const ui = {
-    setStatus(key: string, value: string | undefined) {
-      expect(key).toBe(ORCHESTRATION_PRESENTATION_KEY);
-      statuses.push(value);
-    },
-    setWidget(key: string, value: unknown) {
-      expect(key).toBe(ORCHESTRATION_PRESENTATION_KEY);
-      widgets.push(value);
-    },
+test("controller ignores stale owner and out-of-order same-owner snapshots", async () => {
+  let listeners = new Set<(owner: string) => void>();
+  const requests: Array<{ owner: string; resolve: (value: RuntimeSnapshot) => void }> = [];
+  const runtime: PresentationRuntime = {
+    snapshot(owner) { return new Promise((resolve) => requests.push({ owner, resolve })); },
+    subscribeState(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
   };
-  return {
-    ctx: { mode, ui } as unknown as ExtensionContext,
-    statuses,
-    widgets,
-  };
-}
-
-function latestWidget(ui: UiHarness): Component {
-  const factory = ui.widgets.at(-1) as (tui: unknown, theme: Theme) => Component;
-  expect(typeof factory).toBe("function");
-  return factory({ requestRender() {} }, theme);
-}
-
-async function settle(): Promise<void> {
-  await Promise.resolve();
-  await Promise.resolve();
-}
-
-describe("pure result formatting", () => {
-  test("summarizes statuses and keeps ordered previews to five lines", () => {
-    expect(formatResultStatusSummary(resultDetails(4))).toBe(
-      "4 replies · 1 completed · 1 ready · 1 failed · 1 aborted",
-    );
-
-    const previews = formatResultPreviews(resultDetails(7));
-    expect(previews).toHaveLength(MAX_RESULT_PREVIEW_LINES);
-    expect(previews[0]).toContain("✓ scout ← Task 1 — Result body 1");
-    expect(previews[1]).toContain("✗ worker ← Task 2 — Tests failed");
-    expect(previews[2]).toContain("■ scout ← Task 3 — Stopped");
-    expect(previews[3]).toContain("○ worker ← Task 4 — Waiting for follow-up");
-    expect(previews[4]).toBe("… 3 more replies");
-  });
-
-  test("handles malformed details with a bounded content fallback", () => {
-    const fallback = `${"first line ".repeat(1_000)}\nsecond\nthird`;
-    expect(formatResultStatusSummary(undefined)).toBe("Result details unavailable");
-    expect(formatResultPreviews({ id: 42, results: "bad" }, fallback, 2)).toEqual([
-      "first line ".repeat(1_000).trim(),
-      "second",
-    ]);
-  });
-
-  test("formats compact usage and tolerates missing usage", () => {
-    expect(formatWorkerUsage(undefined)).toBeUndefined();
-    expect(formatWorkerUsage({})).toBeUndefined();
-    expect(formatWorkerUsage(usage)).toBe("12.3k ctx · 2 turns · ↑1.2k · ↓345 · $0.0123");
-  });
+  const statuses: unknown[] = [];
+  const context = { mode: "non-interactive", ui: {
+    setStatus(_key: string, value: unknown) { statuses.push(value); },
+    setWidget() { throw new Error("non-TUI must not install widgets"); },
+  } } as unknown as ExtensionContext;
+  const controller = new StatusController(runtime);
+  controller.bind("old", context);
+  controller.bind("new", context);
+  expect(listeners.size).toBe(1);
+  requests[0]!.resolve(snapshot([worker("stale", "ready")]));
+  await Promise.resolve(); await Promise.resolve();
+  expect(statuses).not.toContain("1 available for follow-up");
+  requests[1]!.resolve(snapshot([]));
+  await Promise.resolve(); await Promise.resolve();
+  const listener = [...listeners][0]!;
+  listener("new"); listener("new");
+  requests[3]!.resolve(snapshot([worker("latest", "ready")]));
+  requests[2]!.resolve(snapshot([]));
+  await Promise.resolve(); await Promise.resolve();
+  expect(statuses.at(-1)).toBe("1 available for follow-up");
+  controller.dispose();
+  controller.dispose();
+  expect(listeners.size).toBe(0);
 });
 
-describe("worker activity presentation", () => {
-  test.each([
-    ["read", "reading"],
-    ["grep", "searching"],
-    ["find", "finding files"],
-    ["ls", "listing"],
-    ["bash", "running command"],
-    ["edit", "editing"],
-    ["write", "writing"],
-    [undefined, "thinking"],
-  ] as const)("maps %s to %s", (activity, expected) => {
-    const line = formatWorkerStatusLine(
-      worker("worker-activity", "running", { activity }),
-    );
-    expect(line).toStartWith(`scout → Human title worker-activity · ${expected}`);
-    expect(line).toContain("· 12.3k ctx · $0.0123");
-    expect(line).not.toMatch(/ · \d+[smh](?: | ·)/);
-    expect(line).not.toContain("worker-activity · scout");
-  });
-
-  test("starting and stopping override tool activity", () => {
-    expect(formatWorkerStatusLine(worker("start", "starting", { activity: "bash" })))
-      .toContain("scout → Human title start · starting ·");
-    expect(formatWorkerStatusLine(worker("stop", "stopping", { activity: "read" })))
-      .toContain("scout → Human title stop · stopping ·");
-  });
-
-  test("footer has only active and ready counts and clears when both are zero", () => {
-    expect(formatFooterStatus(snapshot([
-      worker("running", "running"),
-      worker("starting", "starting"),
-      worker("ready", "ready"),
-      worker("done", "completed"),
-    ]))).toBe("Workers: 2 working · 1 ready");
-    expect(formatFooterStatus(snapshot([worker("ready", "ready")]))).toBe(
-      "Workers: 1 ready",
-    );
-    expect(formatFooterStatus(snapshot([worker("done", "completed")]))).toBeUndefined();
-  });
+test("controller bind, unbind, and rebind subscriptions are isolated", async () => {
+  const runtime = new RuntimeHarness();
+  const statusValues: unknown[] = [];
+  const ctx = { mode: "non-interactive", ui: {
+    setStatus(_key: string, value: unknown) { statusValues.push(value); },
+    setWidget() { throw new Error("non-TUI must not install widgets"); },
+  } } as unknown as ExtensionContext;
+  const controller = new StatusController(runtime);
+  controller.bind("owner", ctx);
+  await Promise.resolve(); await Promise.resolve();
+  expect(runtime.listeners.size).toBe(1);
+  controller.unbind("different");
+  expect(runtime.listeners.size).toBe(1);
+  controller.unbind("owner");
+  expect(runtime.listeners.size).toBe(0);
+  controller.bind("owner", ctx);
+  expect(runtime.listeners.size).toBe(1);
+  controller.dispose();
+  controller.dispose();
+  expect(runtime.listeners.size).toBe(0);
+  expect(statusValues.at(-1)).toBeUndefined();
 });
 
-describe("wave result renderer", () => {
-  test("collapsed rendering makes returned worker replies prominent and bounded", () => {
-    const plain = renderMessage(false, resultDetails(7))
-      .map((line) => Bun.stripANSI(line).trim())
-      .filter(Boolean);
-    expect(plain[0]).toBe("✓ 7 workers replied");
-    expect(plain[1]).toContain("7 replies");
-    expect(plain).toHaveLength(2 + MAX_RESULT_PREVIEW_LINES + 1);
-    expect(plain[2]).toContain("scout ← Task 1 — Result body 1");
-    expect(plain[3]).toContain("worker ← Task 2 — Tests failed");
-    expect(plain[4]).toContain("scout ← Task 3 — Stopped");
-    expect(plain.at(-1)).toContain("to expand replies");
-    expect(plain.join("\n")).not.toContain("wave-results");
-  });
-
-  test("expanded rendering reconstructs full outcome Markdown instead of capped content", () => {
-    const fullAssistantText = `# Full structured result\n\n${"complete detail ".repeat(4_500)}\n\nTAIL-ONLY-IN-DETAILS`;
-    const details = {
-      id: "wave-large",
-      results: [{
-        workerId: "worker-full-id",
-        worker: "investigator",
-        title: "Deep review",
-        status: "completed",
-        outcome: { status: "completed", assistantText: fullAssistantText },
-        usage,
-        sessionFile: "/sessions/full.jsonl",
-      }],
-    };
-    const cappedContent = `${fullAssistantText.slice(0, 50 * 1024)}\n[truncated at 50KB]`;
-    const expanded = Bun.stripANSI(renderMessage(true, details, cappedContent, 80).join("\n"));
-
-    expect(expanded).toContain("Full structured result");
-    expect(expanded).toContain("TAIL-ONLY-IN-DETAILS");
-    expect(expanded).toContain("investigator — Deep review");
-    expect(expanded).toContain("ID worker-full-id · status completed");
-    expect(expanded).toContain("usage 12.3k ctx");
-    expect(expanded).toContain("session /sessions/full.jsonl");
-  });
-
-  test("expanded failures and aborts retain full text and visible reasons", () => {
-    const plain = Bun.stripANSI(renderMessage(true, resultDetails(3), "capped fallback", 80).join("\n"));
-    expect(plain).toContain("Failed: Tests failed");
-    expect(plain).toContain("Partial result");
-    expect(plain).toContain("Aborted: Stopped");
-    expect(plain).toContain("ID worker-2 · status failed");
-    expect(plain).toContain("ID worker-3 · status aborted");
-  });
-
-  test("malformed details use capped content as the safe fallback", () => {
-    const malformed = {
-      id: "wave-bad",
-      results: [{ workerId: "worker-1", worker: "scout", title: "Bad", status: "completed" }],
-    };
-    const collapsed = Bun.stripANSI(renderMessage(false, malformed, "fallback result").join("\n"));
-    const expanded = Bun.stripANSI(renderMessage(true, malformed, "fallback **Markdown**").join("\n"));
-    expect(collapsed).toContain("fallback result");
-    expect(expanded).toContain("fallback Markdown");
-    expect(expanded).toContain("Structured worker metadata unavailable");
-  });
-
-  test("collapsed and expanded renderers are safe at 120/80/50/32 columns", () => {
-    const longDetails = resultDetails(4) as { results: Array<Record<string, unknown>> };
-    longDetails.results[0]!.title = "A very long human title ".repeat(20);
-    longDetails.results[0]!.sessionFile = `/sessions/${"deep/".repeat(30)}worker.jsonl`;
-
-    for (const width of [120, 80, 50, 32]) {
-      for (const expanded of [false, true]) {
-        for (const line of renderMessage(expanded, longDetails, "Long markdown content ".repeat(50), width)) {
-          expect(visibleWidth(line)).toBeLessThanOrEqual(width);
-        }
+test("lets Pi dispose installed widgets exactly once", async () => {
+  const runtime = new RuntimeHarness();
+  runtime.value = snapshot([worker("active", "running")]);
+  let installed: Component | undefined;
+  let disposals = 0;
+  const ctx = { mode: "tui", ui: {
+    setStatus() {},
+    setWidget(_key: string, value: unknown) {
+      if (typeof value === "function") {
+        installed = (value as (tui: unknown, theme: Theme) => Component)({ requestRender() {} }, theme);
+        const original = (installed as WorkerStatusComponent).dispose.bind(installed);
+        (installed as WorkerStatusComponent).dispose = () => { disposals += 1; original(); };
+      } else if (installed) {
+        (installed as WorkerStatusComponent).dispose();
+        installed = undefined;
       }
-    }
-  });
+    },
+  } } as unknown as ExtensionContext;
+  const controller = new StatusController(runtime);
+  controller.bind("owner", ctx);
+  await Promise.resolve(); await Promise.resolve();
+  runtime.value = snapshot([]);
+  runtime.emit();
+  await Promise.resolve(); await Promise.resolve();
+  controller.dispose();
+  expect(disposals).toBe(1);
 });
 
-describe("StatusController", () => {
-  test("subscribes only while bound and can rebind after unbinding", async () => {
-    const runtime = new RuntimeHarness();
-    const first = context();
-    const second = context();
-    const controller = new StatusController(runtime);
-
-    expect(runtime.subscribeCalls).toBe(0);
-    expect(runtime.listeners.size).toBe(0);
-
-    controller.bind("owner-a", first.ctx);
-    await settle();
-    expect(runtime.subscribeCalls).toBe(1);
-    expect(runtime.listeners.size).toBe(1);
-
-    controller.unbind("owner-a");
-    expect(runtime.unsubscribeCalls).toBe(1);
-    expect(runtime.listeners.size).toBe(0);
-
-    controller.bind("owner-b", second.ctx);
-    await settle();
-    expect(runtime.subscribeCalls).toBe(2);
-    expect(runtime.listeners.size).toBe(1);
-
-    controller.dispose();
-    expect(runtime.unsubscribeCalls).toBe(2);
-    expect(runtime.listeners.size).toBe(0);
-  });
-
-  test("groups running waves with progress and includes their settled rows", async () => {
-    const runtime = new RuntimeHarness();
-    runtime.snapshotImpl = async () => snapshot(
-      [
-        worker("worker-alpha", "running", { waveId: "wave-a", title: "Inspect code", activity: "read" }),
-        worker("worker-beta", "completed", { waveId: "wave-a", title: "Review tests" }),
-        worker("worker-gamma", "ready", {
-          waveId: "wave-a",
-          title: "Await follow-up",
-          lifecycle: "reusable",
-        }),
-        worker("worker-delta", "running", { waveId: "wave-b", title: "Run checks", activity: "bash" }),
-      ],
-      [
-        wave("wave-a", ["worker-alpha", "worker-beta", "worker-gamma"], "running", 10_000),
-        wave("wave-b", ["worker-delta"], "running", 70_000),
-      ],
-    );
-    const ui = context();
-    const controller = new StatusController(runtime);
-
-    controller.bind("owner", ui.ctx);
-    await settle();
-    const plain = Bun.stripANSI(latestWidget(ui).render(120).join("\n"));
-    expect(plain).toContain("Workers · wave 1 · 2/3 replied");
-    expect(plain).toContain("scout → Inspect code · reading");
-    expect(plain).toContain("✓ scout ← Review tests · replied");
-    expect(plain).toContain("○ scout ← Await follow-up · ready");
-    expect(plain).toContain("Workers · wave 2 · 0/1 replied");
-    expect(plain).not.toMatch(/replied · \d+[smh]/);
-    expect(plain).toContain("running command");
-    expect(plain).not.toContain("Ready ·");
-    controller.dispose();
-  });
-
-  test("moves reusable workers to Ready and removes terminal rows after wave completion", async () => {
-    const runtime = new RuntimeHarness();
-    let current = snapshot(
-      [
-        worker("worker-terminal", "completed", { waveId: "wave-a", title: "Finished task" }),
-        worker("worker-ready", "ready", {
-          waveId: "wave-a",
-          title: "Reusable reviewer",
-          lifecycle: "reusable",
-        }),
-        worker("worker-live", "running", { waveId: "wave-a", title: "Still working" }),
-      ],
-      [wave("wave-a", ["worker-terminal", "worker-ready", "worker-live"], "running")],
-    );
-    runtime.snapshotImpl = async () => current;
-    const ui = context();
-    const controller = new StatusController(runtime);
-
-    controller.bind("owner", ui.ctx);
-    await settle();
-    expect(Bun.stripANSI(latestWidget(ui).render(80).join("\n"))).toContain("Finished task");
-
-    current = snapshot(
-      [
-        worker("worker-terminal", "completed", { waveId: "wave-a", title: "Finished task" }),
-        worker("worker-ready", "ready", {
-          waveId: "wave-a",
-          title: "Reusable reviewer",
-          lifecycle: "reusable",
-        }),
-        worker("worker-live", "completed", { waveId: "wave-a", title: "Last result" }),
-      ],
-      [wave("wave-a", ["worker-terminal", "worker-ready", "worker-live"], "complete")],
-    );
-    runtime.emit("owner");
-    await settle();
-    const ready = Bun.stripANSI(latestWidget(ui).render(80).join("\n"));
-    expect(ready).toContain("Ready · 1");
-    expect(ready).toContain("scout ← Reusable reviewer · ready");
-    expect(ready).not.toContain("worker-ready");
-    expect(ready).not.toContain("Finished task");
-    expect(ready).not.toContain("Last result");
-    expect(ui.statuses.at(-1)).toBe("Workers: 1 ready");
-
-    current = snapshot([worker("worker-terminal", "completed")], [wave("wave-a", ["worker-terminal"], "complete")]);
-    runtime.emit("owner");
-    await settle();
-    expect(ui.statuses.at(-1)).toBeUndefined();
-    expect(ui.widgets.at(-1)).toBeUndefined();
-    controller.dispose();
-  });
-
-  test("keeps worker type, task, and state visible without UUID noise at common widths", async () => {
-    const runtime = new RuntimeHarness();
-    runtime.snapshotImpl = async () => snapshot(
-      [worker("worker-alpha", "running", {
-        waveId: "wave-a",
-        title: "A long human-readable investigation title",
-        activity: "grep",
-      })],
-      [wave("wave-a", ["worker-alpha"], "running")],
-    );
-    const ui = context();
-    const controller = new StatusController(runtime);
-    controller.bind("owner", ui.ctx);
-    await settle();
-    const component = latestWidget(ui);
-
-    for (const width of [120, 80, 50, 32]) {
-      const lines = component.render(width);
-      expect(lines).toEqual(component.render(width));
-      expect(lines.every((line) => visibleWidth(line) <= width)).toBe(true);
-      const workerLine = Bun.stripANSI(lines.find((line) => line.includes("scout")) ?? "");
-      expect(workerLine).toContain("scout →");
-      expect(workerLine).toContain("searching");
-      expect(workerLine).not.toContain("worker-alpha");
-    }
-    controller.dispose();
-  });
-
-  test("limits worker rows to eight and adds a clear overflow line", async () => {
-    const runtime = new RuntimeHarness();
-    const workers = Array.from({ length: 10 }, (_, index) => worker(`ready-${index + 1}`, "ready"));
-    runtime.snapshotImpl = async () => snapshot(workers, [wave("wave-complete", [], "complete")]);
-    const ui = context();
-    const controller = new StatusController(runtime);
-    controller.bind("owner", ui.ctx);
-    await settle();
-
-    const plainLines = latestWidget(ui).render(80).map((line) => Bun.stripANSI(line));
-    expect(plainLines.filter((line) => line.startsWith("○ "))).toHaveLength(MAX_WIDGET_WORKERS);
-    expect(plainLines.at(-1)).toBe("… 2 more workers");
-    controller.dispose();
-  });
-
-  test("animates active workers and stops requesting renders after disposal", async () => {
-    let renderRequests = 0;
-    const component = new WorkerStatusComponent(
-      snapshot([worker("animated", "running")], [wave("wave-1", ["animated"])]),
-      theme,
-      { requestRender: () => { renderRequests += 1; } },
-    );
-    const before = Bun.stripANSI(component.render(80)[1] ?? "");
-    await Bun.sleep(100);
-    const after = Bun.stripANSI(component.render(80)[1] ?? "");
-
-    expect(renderRequests).toBeGreaterThan(0);
-    expect(after).not.toBe(before);
-    component.dispose();
-    const requestsAtDispose = renderRequests;
-    await Bun.sleep(100);
-    expect(renderRequests).toBe(requestsAtDispose);
-  });
-
-  test("ignores stale owners and out-of-order refreshes, then cleans up once", async () => {
-    const runtime = new RuntimeHarness();
-    const ownerA = new Deferred<RuntimeSnapshot>();
-    const ownerB = new Deferred<RuntimeSnapshot>();
-    runtime.snapshotImpl = (owner) => owner === "owner-a" ? ownerA.promise : ownerB.promise;
-    const first = context();
-    const second = context();
-    const controller = new StatusController(runtime);
-
-    controller.bind("owner-a", first.ctx);
-    controller.bind("owner-b", second.ctx);
-    ownerB.resolve(snapshot([worker("ready", "ready")], []));
-    await settle();
-    ownerA.resolve(snapshot([worker("stale", "running")], [wave("wave-1", ["stale"])]));
-    await settle();
-
-    expect(second.statuses).toEqual(["Workers: 1 ready"]);
-    expect(first.statuses).toEqual([undefined]);
-    controller.unbind("owner-a");
-    expect(second.statuses.at(-1)).toBe("Workers: 1 ready");
-    controller.dispose();
-    controller.dispose();
-    expect(second.statuses.at(-1)).toBeUndefined();
-    expect(second.widgets.at(-1)).toBeUndefined();
-    expect(runtime.subscribeCalls).toBe(2);
-    expect(runtime.unsubscribeCalls).toBe(2);
-  });
-
-  test("ignores an older same-owner response", async () => {
-    const runtime = new RuntimeHarness();
-    const older = new Deferred<RuntimeSnapshot>();
-    const newer = new Deferred<RuntimeSnapshot>();
-    let call = 0;
-    runtime.snapshotImpl = () => (++call === 1 ? older.promise : newer.promise);
-    const ui = context();
-    const controller = new StatusController(runtime);
-
-    controller.bind("owner", ui.ctx);
-    runtime.emit("owner");
-    newer.resolve(snapshot([worker("ready", "ready")], []));
-    await settle();
-    older.resolve(snapshot([worker("stale", "running")], [wave("wave-1", ["stale"])]));
-    await settle();
-
-    expect(ui.statuses).toEqual(["Workers: 1 ready"]);
-    controller.dispose();
-  });
-
-  test("does not install widgets outside TUI mode", async () => {
-    const runtime = new RuntimeHarness();
-    runtime.snapshotImpl = async () => snapshot(
-      [worker("worker-1", "running")],
-      [wave("wave-1", ["worker-1"])],
-    );
-    const ui = context("rpc");
-    const controller = new StatusController(runtime);
-
-    controller.bind("owner", ui.ctx);
-    await settle();
-    expect(ui.statuses).toContain("Workers: 1 working");
-    expect(ui.widgets).toEqual([]);
-    controller.dispose();
-  });
+test("controller updates one widget instance, removes terminal rows, and clears at zero", async () => {
+  const runtime = new RuntimeHarness();
+  runtime.value = snapshot([worker("a", "running"), worker("b", "running")]);
+  const widgets: unknown[] = [];
+  const statuses: unknown[] = [];
+  const ctx = { mode: "tui", ui: {
+    setStatus(key: string, value: unknown) { expect(key).toBe(ORCHESTRATION_PRESENTATION_KEY); statuses.push(value); },
+    setWidget(key: string, value: unknown) { expect(key).toBe(ORCHESTRATION_PRESENTATION_KEY); widgets.push(value); },
+  } } as unknown as ExtensionContext;
+  const controller = new StatusController(runtime);
+  controller.bind("owner", ctx);
+  await Promise.resolve(); await Promise.resolve();
+  expect(widgets).toHaveLength(1);
+  const component = (widgets[0] as (tui: unknown, theme: Theme) => Component)({ requestRender() {} }, theme);
+  runtime.value = snapshot([worker("a", "completed"), worker("b", "running")]);
+  runtime.emit(); await Promise.resolve(); await Promise.resolve();
+  expect(widgets).toHaveLength(1);
+  expect(Bun.stripANSI(component.render(80).join("\n"))).not.toContain("Task a");
+  runtime.value = snapshot([worker("a", "completed"), worker("b", "ready")]);
+  runtime.emit(); await Promise.resolve(); await Promise.resolve();
+  expect(widgets.at(-1)).toBeUndefined();
+  expect(statuses.at(-1)).toBe("1 available for follow-up");
+  controller.dispose();
 });

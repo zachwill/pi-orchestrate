@@ -33,15 +33,49 @@ const MODEL_ID = "deterministic-agent";
 const API_ID = "pi-orchestrate-memory";
 const BASE_SYSTEM_PROMPT = "PARENT_BASE_PROMPT";
 
-type Scenario = "async" | "mixed";
+type Scenario = "async" | "mixed" | "failure";
 type ProviderConfig = Parameters<ModelRuntime["registerProvider"]>[1];
 
 interface ProviderRequest {
-  readonly kind: "parent-initial" | "parent-synthesis" | "child-alpha" | "child-beta" | "child-inline";
+  readonly kind: "parent-initial" | "parent-synthesis" | "child-alpha" | "child-beta" | "child-inline" | "child-failure";
   readonly provider: string;
   readonly model: string;
   readonly systemPrompt: string;
   readonly transcript: string;
+}
+
+class Deferred {
+  readonly promise: Promise<void>;
+  private resolvePromise!: () => void;
+
+  constructor(resolved = false) {
+    this.promise = new Promise<void>((resolve) => {
+      this.resolvePromise = resolve;
+    });
+    if (resolved) this.resolve();
+  }
+
+  resolve(): void {
+    this.resolvePromise();
+  }
+}
+
+class Counter {
+  value = 0;
+  private readonly waiters: Array<{ target: number; resolve: () => void }> = [];
+
+  increment(): void {
+    this.value += 1;
+    for (const waiter of this.waiters.splice(0)) {
+      if (this.value >= waiter.target) waiter.resolve();
+      else this.waiters.push(waiter);
+    }
+  }
+
+  waitFor(target: number): Promise<void> {
+    if (this.value >= target) return Promise.resolve();
+    return new Promise((resolve) => this.waiters.push({ target, resolve }));
+  }
 }
 
 interface SmokeHarness {
@@ -49,6 +83,8 @@ interface SmokeHarness {
   readonly runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>>;
   readonly requests: ProviderRequest[];
   readonly events: string[];
+  readonly customMessagesStarted: Counter;
+  readonly childGates: Readonly<Record<"child-alpha" | "child-beta" | "child-inline" | "child-failure", Deferred>>;
   readonly previousAgentDir: string | undefined;
   readonly previousOffline: string | undefined;
   disposed: boolean;
@@ -164,12 +200,16 @@ function transcriptText(context: Context): string {
 
 function providerKind(systemPrompt: string, transcript: string): ProviderRequest["kind"] {
   if (!systemPrompt.includes("direct child worker session")) {
-    return transcript.includes("Worker results — wave") || transcript.includes("Completed inline wave")
+    return transcript.includes("RESULT_ALPHA") ||
+      transcript.includes("RESULT_BETA") ||
+      transcript.includes("DETERMINISTIC_PROVIDER_FAILURE") ||
+      transcript.includes("Completed inline wave")
       ? "parent-synthesis"
       : "parent-initial";
   }
   if (transcript.includes("ALPHA_TASK")) return "child-alpha";
   if (transcript.includes("BETA_TASK")) return "child-beta";
+  if (transcript.includes("FAIL_TASK")) return "child-failure";
   return "child-inline";
 }
 
@@ -177,6 +217,7 @@ function createProviderExtension(
   scenario: Scenario,
   requests: ProviderRequest[],
   events: string[],
+  childGates: SmokeHarness["childGates"],
 ): InlineExtension {
   const streamSimple = (
     requestedModel: Model<Api>,
@@ -220,6 +261,21 @@ function createProviderExtension(
         ]);
       }
 
+      if (scenario === "failure") {
+        return streamToolCalls([{
+          type: "toolCall",
+          id: "dispatch-failure",
+          name: "orchestrate",
+          arguments: {
+            tasks: [{
+              worker: "scout",
+              title: "Failing provider task",
+              instructions: "FAIL_TASK: exercise deterministic provider failure.",
+            }],
+          },
+        }]);
+      }
+
       return streamToolCalls([
         {
           type: "toolCall",
@@ -247,9 +303,15 @@ function createProviderExtension(
     if (kind === "parent-synthesis") {
       const synthesis = scenario === "async"
         ? `SYNTHESIS:${transcript.includes("RESULT_ALPHA")}:${transcript.includes("RESULT_BETA")}`
-        : `INLINE_SYNTHESIS:${transcript.includes("RESULT_INLINE")}:${transcript.includes("fixture-content")}`;
+        : scenario === "failure"
+          ? `FAILURE_SYNTHESIS:${transcript.includes("DETERMINISTIC_PROVIDER_FAILURE")}`
+          : `INLINE_SYNTHESIS:${transcript.includes("RESULT_INLINE")}:${transcript.includes("fixture-content")}`;
       events.push("provider:parent-synthesis:done");
       return streamText(synthesis);
+    }
+
+    if (kind === "child-failure") {
+      throw new Error("DETERMINISTIC_PROVIDER_FAILURE");
     }
 
     const response = kind === "child-alpha"
@@ -257,9 +319,8 @@ function createProviderExtension(
       : kind === "child-beta"
         ? "RESULT_BETA"
         : "RESULT_INLINE";
-    const delayMs = kind === "child-alpha" ? 40 : kind === "child-beta" ? 5 : 10;
     const stream = createAssistantMessageEventStream();
-    void Bun.sleep(delayMs).then(() => {
+    void childGates[kind].promise.then(() => {
       events.push(`provider:${kind}:done`);
       const output = assistantMessage([], "stop");
       const block = { type: "text" as const, text: "" };
@@ -300,7 +361,11 @@ function createProviderExtension(
   };
 }
 
-function createObserverExtension(events: string[], effectivePrompts: string[]): ExtensionFactory {
+function createObserverExtension(
+  events: string[],
+  effectivePrompts: string[],
+  customMessagesStarted: Counter,
+): ExtensionFactory {
   return (pi) => {
     pi.on("before_agent_start", (event) => {
       effectivePrompts.push(event.systemPrompt);
@@ -317,7 +382,9 @@ function createObserverExtension(events: string[], effectivePrompts: string[]): 
     });
     pi.on("message_start", (event) => {
       const message = event.message as AgentMessage;
-      if (message.role === "custom") events.push(`parent:custom:${message.customType}`);
+      if (message.role !== "custom") return;
+      events.push(`parent:custom:${message.customType}`);
+      customMessagesStarted.increment();
     });
     pi.on("tool_execution_start", (event) => {
       events.push(`parent:tool_start:${event.toolName}`);
@@ -350,6 +417,13 @@ async function createHarness(scenario: Scenario): Promise<SmokeHarness & { effec
   const requests: ProviderRequest[] = [];
   const events: string[] = [];
   const effectivePrompts: string[] = [];
+  const customMessagesStarted = new Counter();
+  const childGates = {
+    "child-alpha": new Deferred(),
+    "child-beta": new Deferred(),
+    "child-inline": new Deferred(true),
+    "child-failure": new Deferred(true),
+  };
   const settingsManager = SettingsManager.inMemory(
     {
       compaction: { enabled: false },
@@ -374,9 +448,12 @@ async function createHarness(scenario: Scenario): Promise<SmokeHarness & { effec
       noContextFiles: true,
       systemPromptOverride: () => BASE_SYSTEM_PROMPT,
       extensionFactories: [
-        createProviderExtension(scenario, requests, events),
+        createProviderExtension(scenario, requests, events, childGates),
         { name: "pi-orchestrate", factory: createOrchestrationExtension() },
-        { name: "sdk-smoke-observer", factory: createObserverExtension(events, effectivePrompts) },
+        {
+          name: "sdk-smoke-observer",
+          factory: createObserverExtension(events, effectivePrompts, customMessagesStarted),
+        },
       ],
     });
     await resourceLoader.reload();
@@ -419,6 +496,8 @@ async function createHarness(scenario: Scenario): Promise<SmokeHarness & { effec
       requests,
       events,
       effectivePrompts,
+      customMessagesStarted,
+      childGates,
       previousAgentDir,
       previousOffline,
       disposed: false,
@@ -448,14 +527,6 @@ async function disposeHarness(harness: SmokeHarness): Promise<void> {
   await rm(harness.root, { recursive: true, force: true });
 }
 
-async function waitFor(description: string, condition: () => boolean): Promise<void> {
-  const deadline = Date.now() + 2_000;
-  while (!condition()) {
-    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${description}`);
-    await Bun.sleep(5);
-  }
-}
-
 function assistantTexts(messages: readonly AgentMessage[]): string[] {
   return messages
     .filter((message): message is AssistantMessage => message.role === "assistant")
@@ -479,10 +550,32 @@ describe("Pi 0.80.10 SDK integration", () => {
       expect(harness.requests.filter((request) => request.kind === "parent-synthesis")).toHaveLength(0);
       expect(session.isStreaming).toBe(false);
 
-      await waitFor(
-        "automatic parent synthesis",
-        () => assistantTexts(session.messages).includes("SYNTHESIS:true:true"),
+      const betaSettled = new Deferred();
+      let ownerSessionId = "";
+      const host = getProcessHost()!;
+      const unsubscribeSettlement = host.runtime.subscribeSettlement((settlement) => {
+        if (settlement.title !== "Beta task") return;
+        ownerSessionId = settlement.ownerSessionId;
+        betaSettled.resolve();
+      });
+      harness.childGates["child-beta"].resolve();
+      await betaSettled.promise;
+      unsubscribeSettlement();
+
+      let workerMessages = session.messages.filter(
+        (message) => message.role === "custom" &&
+          message.customType === "pi-orchestrate-worker-result",
       );
+      expect(workerMessages).toHaveLength(1);
+      expect(textContent(workerMessages[0]?.content)).toContain("RESULT_BETA");
+      expect(harness.requests.filter((request) => request.kind === "parent-synthesis")).toHaveLength(0);
+      const intermediateSnapshot = await host.runtime.snapshot(ownerSessionId);
+      expect(intermediateSnapshot.workers
+        .filter((worker) => worker.status === "starting" || worker.status === "running")
+        .map((worker) => worker.title)).toEqual(["Alpha task"]);
+
+      harness.childGates["child-alpha"].resolve();
+      await harness.customMessagesStarted.waitFor(1);
       await session.agent.waitForIdle();
 
       const initialParent = harness.requests.find((request) => request.kind === "parent-initial")!;
@@ -509,7 +602,25 @@ describe("Pi 0.80.10 SDK integration", () => {
         (message): message is AssistantMessage => message.role === "assistant",
       );
       expect(firstAssistant?.content.filter((part) => part.type === "toolCall")).toEqual([
-        expect.objectContaining({ id: "dispatch-wave", name: "orchestrate" }),
+        {
+          type: "toolCall",
+          id: "dispatch-wave",
+          name: "orchestrate",
+          arguments: {
+            tasks: [
+              {
+                worker: "scout",
+                title: "Alpha task",
+                instructions: "ALPHA_TASK: return deterministic alpha evidence.",
+              },
+              {
+                worker: "scout",
+                title: "Beta task",
+                instructions: "BETA_TASK: return deterministic beta evidence.",
+              },
+            ],
+          },
+        },
       ]);
       const acceptedResult = session.messages.find(
         (message) => message.role === "toolResult" && message.toolName === "orchestrate",
@@ -517,21 +628,27 @@ describe("Pi 0.80.10 SDK integration", () => {
       expect(textContent(acceptedResult?.content)).toContain("Accepted async wave");
       expect(acceptedResult?.details.workerIds).toHaveLength(2);
 
-      const customMessages = session.messages.filter(
-        (message) => message.role === "custom" && message.customType === "pi-orchestrate-wave",
+      workerMessages = session.messages.filter(
+        (message) => message.role === "custom" &&
+          message.customType === "pi-orchestrate-worker-result",
       );
-      expect(customMessages).toHaveLength(1);
-      const aggregate = customMessages[0]!;
-      expect(textContent(aggregate.content)).toContain("RESULT_ALPHA");
-      expect(textContent(aggregate.content)).toContain("RESULT_BETA");
-      expect(aggregate.details.results.map((result: { title: string }) => result.title)).toEqual([
-        "Alpha task",
-        "Beta task",
+      expect(workerMessages).toHaveLength(2);
+      expect(workerMessages.map((message) => textContent(message.content))).toEqual([
+        expect.stringContaining("RESULT_BETA"),
+        expect.stringContaining("RESULT_ALPHA"),
       ]);
-      expect(aggregate.details.results.map((result: { outcome: { assistantText: string } }) =>
-        result.outcome.assistantText)).toEqual(["RESULT_ALPHA", "RESULT_BETA"]);
-      expect(aggregate.details.results.every((result: { sessionFile?: string }) =>
-        typeof result.sessionFile === "string" && result.sessionFile.includes(harness.root))).toBe(true);
+      expect(workerMessages.map((message) => message.details.title)).toEqual([
+        "Beta task",
+        "Alpha task",
+      ]);
+      expect(workerMessages.map((message) => message.details.outcome.assistantText)).toEqual([
+        "RESULT_BETA",
+        "RESULT_ALPHA",
+      ]);
+      expect(workerMessages.map((message) => message.details.waveComplete)).toEqual([false, true]);
+      expect(workerMessages.every((message) =>
+        typeof message.details.sessionFile === "string" &&
+        message.details.sessionFile.includes(harness.root))).toBe(true);
 
       const synthesisRequests = harness.requests.filter((request) => request.kind === "parent-synthesis");
       expect(synthesisRequests).toHaveLength(1);
@@ -543,17 +660,56 @@ describe("Pi 0.80.10 SDK integration", () => {
       const betaDone = indexOfEvent(harness.events, "provider:child-beta:done");
       const alphaDone = indexOfEvent(harness.events, "provider:child-alpha:done");
       const initialSettled = indexOfEvent(harness.events, "parent:agent_settled");
-      const aggregateDelivered = indexOfEvent(harness.events, "parent:custom:pi-orchestrate-wave");
+      const resultDeliveries = harness.events
+        .map((event, index) => ({ event, index }))
+        .filter(({ event }) => event === "parent:custom:pi-orchestrate-worker-result")
+        .map(({ index }) => index);
       const synthesisStarted = indexOfEvent(harness.events, "provider:parent-synthesis:start");
       expect(betaDone).toBeLessThan(alphaDone);
-      expect(initialSettled).toBeLessThan(aggregateDelivered);
-      expect(alphaDone).toBeLessThan(aggregateDelivered);
-      expect(aggregateDelivered).toBeLessThan(synthesisStarted);
+      expect(initialSettled).toBeLessThan(alphaDone);
+      expect(alphaDone).toBeLessThan(resultDeliveries[0]!);
+      expect(resultDeliveries[0]!).toBeLessThan(synthesisStarted);
+      expect(session.messages.some((message) =>
+        message.role === "assistant" && message.content.some((part) =>
+          part.type === "toolCall" && part.name === "orchestration_status"))).toBe(false);
 
       await harness.runtime.dispose();
       harness.disposed = true;
       expect(harness.events.at(-1)).toBe("parent:session_shutdown:quit");
       expect(getProcessHost()).toBeUndefined();
+    } finally {
+      await disposeHarness(harness);
+    }
+  }, 4_000);
+
+  test.serial("delivers a provider failure as its own worker result and continues once", async () => {
+    const harness = await createHarness("failure");
+    try {
+      const session = harness.runtime.session;
+      await session.prompt("Dispatch the deterministic failing worker.");
+      await harness.customMessagesStarted.waitFor(1);
+      await session.agent.waitForIdle();
+
+      const workerMessages = session.messages.filter(
+        (message) => message.role === "custom" &&
+          message.customType === "pi-orchestrate-worker-result",
+      );
+      expect(workerMessages).toHaveLength(1);
+      expect(workerMessages[0]?.details).toMatchObject({
+        title: "Failing provider task",
+        status: "failed",
+        outcome: {
+          status: "failed",
+          message: "DETERMINISTIC_PROVIDER_FAILURE",
+        },
+        remainingActive: 0,
+        waveComplete: true,
+      });
+      expect(textContent(workerMessages[0]?.content)).toContain("DETERMINISTIC_PROVIDER_FAILURE");
+      expect(assistantTexts(session.messages).at(-1)).toBe("FAILURE_SYNTHESIS:true");
+      expect(harness.requests.filter((request) => request.kind === "parent-synthesis"))
+        .toHaveLength(1);
+      expect(harness.events.filter((event) => event === "parent:agent_start")).toHaveLength(2);
     } finally {
       await disposeHarness(harness);
     }
@@ -571,7 +727,8 @@ describe("Pi 0.80.10 SDK integration", () => {
       expect(harness.requests.filter((request) => request.kind === "parent-synthesis")).toHaveLength(1);
       expect(harness.requests.filter((request) => request.kind === "child-inline")).toHaveLength(1);
       expect(session.messages.filter((message) => message.role === "custom")).toHaveLength(0);
-      expect(harness.events.filter((event) => event === "parent:custom:pi-orchestrate-wave"))
+      expect(harness.events.filter((event) =>
+        event === "parent:custom:pi-orchestrate-worker-result"))
         .toHaveLength(0);
 
       const toolResults = session.messages.filter((message) => message.role === "toolResult");

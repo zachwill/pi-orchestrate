@@ -59,6 +59,13 @@ describe("orchestrator contract", () => {
     expect(result).toContain("yield the parent turn");
     expect(result).toContain("Do not duplicate delegated work");
     expect(result).toContain("poll `orchestration_status`");
+    expect(result).toContain("Exact worker instructions remain visible");
+    expect(result).toContain("can be expanded");
+    expect(result).toContain("responses arrive individually as each worker settles");
+    expect(result).toContain("final response starts parent synthesis");
+    expect(result).toContain("widget shows only workers currently starting, running, or stopping");
+    expect(result).toContain("Inline worker responses appear progressively in live tool output");
+    expect(result).toContain("normal completion mechanism");
     expect(result).toContain("synthesizes worker results");
     expect(result).toContain("`worker_abort` only when active work must stop");
     expect(result).toContain("`worker_close` when that ready worker is finished");

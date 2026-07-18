@@ -228,6 +228,8 @@ export interface WorkerRecord {
   readonly lifecycle: WorkerLifecycle;
   readonly status: WorkerStatus;
   readonly usage: WorkerUsage;
+  readonly startedAt: number;
+  readonly settledAt?: number;
   readonly activity?: string;
   readonly outcome?: WorkerOutcome;
   readonly sessionFile?: string;

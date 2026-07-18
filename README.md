@@ -1,6 +1,6 @@
 # Pi Orchestrate
 
-[`@zachwill/pi-orchestrate`](https://www.npmjs.com/package/@zachwill/pi-orchestrate) adds concurrent worker orchestration to [Pi](https://pi.dev). It helps a parent agent **delegate → dispatch → deliver**: delegate bounded work, dispatch independent tasks as one wave, then deliver one aggregate result to the parent.
+[`@zachwill/pi-orchestrate`](https://www.npmjs.com/package/@zachwill/pi-orchestrate) adds concurrent worker orchestration to [Pi](https://pi.dev). It helps a parent agent delegate bounded work, message independent workers concurrently, and synthesize each response as it arrives.
 
 ## Install
 
@@ -22,11 +22,13 @@ Pi Orchestrate adds exactly five tools:
 
 An `orchestrate` wave first performs atomic input, catalog, and model preflight. No worker starts if any task fails that preflight. After acceptance, worker resources start independently: a resource startup failure becomes that worker's `failed` result and does not roll back or stop its peers.
 
-All tasks in a wave execute concurrently, including a full 12-task wave. Pi Orchestrate applies no hidden concurrency throttle. The aggregate result preserves task order.
+All tasks in a wave execute concurrently, including a full 12-task wave. Pi Orchestrate applies no hidden concurrency throttle. Exact unchanged worker instructions remain visible in each tool call: collapsed calls preview every message, and expanded calls show every full brief. Titles are labels, never replacements for instructions.
 
 For asynchronous behavior, `orchestrate` or `worker_send` must be the sole tool call in its assistant message. Mixing either with any sibling tool call makes its wave inline and blocking. Inline work receives the parent turn's cancellation signal. Accepted async work does not retain that signal and continues independently.
 
-A successful async call yields the parent turn until aggregate results arrive. Do not poll `orchestration_status` for completion. If the owning session becomes inactive, its workers continue and completed results remain queued. Those results become available only when that exact owning session resumes; they are never delivered to another session.
+A successful async call yields the parent turn. Responses enter the transcript individually as workers settle, and the final response starts the parent's synthesis turn. The bottom widget is ephemeral and shows active work only; completed, failed, aborted, and reusable ready workers disappear immediately. Inline responses accumulate in the live tool output while the call blocks.
+
+`orchestration_status` is for diagnostics and recovery, never a normal completion mechanism. Do not poll it for completion. If the owning session becomes inactive, its workers continue and completed results remain queued. Those results become available only when that exact owning session resumes; they are never delivered to another session.
 
 Worker IDs identify live worker sessions. A reusable worker keeps the same worker ID across `worker_send` follow-ups, with each follow-up result belonging to a new wave. One-shot workers finish as `completed`. Reusable workers deliver as `ready` and wait for `worker_send` or `worker_close`. Use `worker_abort` only for active work, not to close a ready worker.
 

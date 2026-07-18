@@ -5,7 +5,8 @@ import {
 } from "./runtime.js";
 import { createWorkerSessionFactory } from "./worker-session.js";
 
-const PROCESS_HOST_KEY = Symbol.for("@zachwill/pi-orchestrate/process-host/v1");
+const PROCESS_HOST_KEY = Symbol.for("@zachwill/pi-orchestrate/process-host/v2");
+const LEGACY_PROCESS_HOST_KEY = Symbol.for("@zachwill/pi-orchestrate/process-host/v1");
 
 export interface ProcessHost {
   readonly runtime: OrchestratorRuntime;
@@ -21,12 +22,18 @@ interface AttachmentAwareProcessHost extends ProcessHost {
 }
 
 interface OwnedProcessHost extends AttachmentAwareProcessHost {
-  readonly unsubscribeCompletion: () => void;
+  readonly unsubscribeSettlement: () => void;
   destroyPromise?: Promise<void>;
+}
+
+interface LegacyProcessHost extends ProcessHost {
+  unsubscribeCompletion?: () => void;
+  unsubscribeSettlement?: () => void;
 }
 
 type ProcessGlobal = typeof globalThis & {
   [PROCESS_HOST_KEY]?: OwnedProcessHost;
+  [LEGACY_PROCESS_HOST_KEY]?: LegacyProcessHost;
 };
 
 function processGlobal(): ProcessGlobal {
@@ -42,6 +49,8 @@ export function createProcessHost(): ProcessHost {
   const existing = global[PROCESS_HOST_KEY];
   if (existing) return existing;
 
+  retireLegacyProcessHost(global);
+
   const runtime = createOrchestratorRuntime({
     workerSessionFactory: createWorkerSessionFactory(),
   });
@@ -50,8 +59,8 @@ export function createProcessHost(): ProcessHost {
     runtime,
     delivery,
     attachments: new Set(),
-    unsubscribeCompletion: runtime.subscribeCompletion((wave) => {
-      delivery.accept(wave);
+    unsubscribeSettlement: runtime.subscribeSettlement((settlement) => {
+      delivery.accept(settlement);
     }),
   };
   global[PROCESS_HOST_KEY] = host;
@@ -90,7 +99,7 @@ export async function destroyProcessHost(host: ProcessHost): Promise<void> {
       await ownedHost.runtime.shutdown();
     } finally {
       ownedHost.delivery.clear();
-      ownedHost.unsubscribeCompletion();
+      ownedHost.unsubscribeSettlement();
       const global = processGlobal();
       if (global[PROCESS_HOST_KEY] === ownedHost) {
         delete global[PROCESS_HOST_KEY];
@@ -104,4 +113,31 @@ export async function quitProcessHost(): Promise<void> {
   const host = getProcessHost();
   if (!host) return;
   await destroyProcessHost(host);
+}
+
+function retireLegacyProcessHost(global: ProcessGlobal): void {
+  const legacy = global[LEGACY_PROCESS_HOST_KEY];
+  if (!legacy) return;
+
+  delete global[LEGACY_PROCESS_HOST_KEY];
+  try {
+    legacy.unsubscribeCompletion?.();
+  } catch {
+    // A stale subscription cannot prevent installation of the current host.
+  }
+  try {
+    legacy.unsubscribeSettlement?.();
+  } catch {
+    // A stale subscription cannot prevent installation of the current host.
+  }
+  try {
+    legacy.delivery.close();
+  } catch {
+    // Legacy delivery cleanup is best-effort during reload migration.
+  }
+  try {
+    void legacy.runtime.shutdown().catch(() => undefined);
+  } catch {
+    // Legacy runtime shutdown is best-effort during reload migration.
+  }
 }

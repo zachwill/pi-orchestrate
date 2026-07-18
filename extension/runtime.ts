@@ -72,6 +72,31 @@ export interface CompletedWave {
   readonly results: readonly CompletedResult[];
 }
 
+export type SettlementFailureStage = "startup" | "prompt" | "workflow" | "cancellation";
+
+export interface WorkerSettlement {
+  readonly eventId: string;
+  readonly sequence: number;
+  readonly ownerSessionId: string;
+  readonly waveId: WaveId;
+  readonly workerId: WorkerId;
+  readonly generation: number;
+  readonly mode: WaveMode;
+  readonly worker: string;
+  readonly title: string;
+  readonly lifecycle: WorkerRecord["lifecycle"];
+  readonly status: Exclude<WaveCompleteWorkerStatus, "closed">;
+  readonly outcome: WorkerOutcome;
+  readonly failureStage?: SettlementFailureStage;
+  readonly usage: WorkerUsage;
+  readonly startedAt: number;
+  readonly settledAt: number;
+  readonly remainingActive: number;
+  readonly waveSize: number;
+  readonly waveComplete: boolean;
+  readonly sessionFile: string | undefined;
+}
+
 export interface RuntimeSnapshot {
   readonly waves: readonly WaveRecord[];
   readonly workers: readonly WorkerRecord[];
@@ -79,6 +104,8 @@ export interface RuntimeSnapshot {
 
 export type CompletionListener = (wave: CompletedWave) => void;
 export type UnsubscribeCompletion = () => void;
+export type SettlementListener = (settlement: WorkerSettlement) => void;
+export type UnsubscribeSettlement = () => void;
 export type StateListener = (ownerSessionId: string) => void;
 
 export type AbortTarget =
@@ -118,18 +145,21 @@ export interface OrchestratorRuntime {
     tasks: readonly OrchestrateTaskInput[],
     mode: "async",
     signal?: AbortSignal,
+    onSettlement?: SettlementListener,
   ): Promise<AcceptedWave>;
   orchestrate(
     context: OrchestrationContext,
     tasks: readonly OrchestrateTaskInput[],
     mode: "inline",
     signal?: AbortSignal,
+    onSettlement?: SettlementListener,
   ): Promise<CompletedWave>;
   orchestrate(
     context: OrchestrationContext,
     tasks: readonly OrchestrateTaskInput[],
     mode: WaveMode,
     signal?: AbortSignal,
+    onSettlement?: SettlementListener,
   ): Promise<AcceptedWave | CompletedWave>;
   send(
     context: OrchestrationContext,
@@ -137,6 +167,7 @@ export interface OrchestratorRuntime {
     instructions: string,
     mode: "async",
     signal?: AbortSignal,
+    onSettlement?: SettlementListener,
   ): Promise<AcceptedWave>;
   send(
     context: OrchestrationContext,
@@ -144,6 +175,7 @@ export interface OrchestratorRuntime {
     instructions: string,
     mode: "inline",
     signal?: AbortSignal,
+    onSettlement?: SettlementListener,
   ): Promise<CompletedWave>;
   send(
     context: OrchestrationContext,
@@ -151,11 +183,13 @@ export interface OrchestratorRuntime {
     instructions: string,
     mode: WaveMode,
     signal?: AbortSignal,
+    onSettlement?: SettlementListener,
   ): Promise<AcceptedWave | CompletedWave>;
   abort(ownerSessionId: string, target: AbortTarget): Promise<void>;
   close(ownerSessionId: string, workerId: WorkerId): Promise<void>;
   snapshot(ownerSessionId: string): Promise<RuntimeSnapshot>;
   subscribeCompletion(listener: CompletionListener): UnsubscribeCompletion;
+  subscribeSettlement(listener: SettlementListener): UnsubscribeSettlement;
   subscribeState(listener: StateListener): () => void;
   shutdown(): Promise<void>;
 }
@@ -208,7 +242,10 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
   private readonly terminalWorkerOrder: WorkerId[] = [];
   private readonly completedWaveOrder: WaveId[] = [];
   private readonly completionListeners = new Set<CompletionListener>();
+  private readonly settlementListeners = new Set<SettlementListener>();
+  private readonly waveSettlementListeners = new Map<WaveId, SettlementListener>();
   private readonly stateListeners = new Set<StateListener>();
+  private settlementSequence = 0;
   private readonly disposedSessions = new WeakSet<WorkerSessionHandle>();
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | undefined;
@@ -226,24 +263,28 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     tasks: readonly OrchestrateTaskInput[],
     mode: "async",
     signal?: AbortSignal,
+    onSettlement?: SettlementListener,
   ): Promise<AcceptedWave>;
   orchestrate(
     context: OrchestrationContext,
     tasks: readonly OrchestrateTaskInput[],
     mode: "inline",
     signal?: AbortSignal,
+    onSettlement?: SettlementListener,
   ): Promise<CompletedWave>;
   orchestrate(
     context: OrchestrationContext,
     tasks: readonly OrchestrateTaskInput[],
     mode: WaveMode,
     signal?: AbortSignal,
+    onSettlement?: SettlementListener,
   ): Promise<AcceptedWave | CompletedWave>;
   async orchestrate(
     context: OrchestrationContext,
     tasks: readonly OrchestrateTaskInput[],
     mode: WaveMode,
     signal?: AbortSignal,
+    onSettlement?: SettlementListener,
   ): Promise<AcceptedWave | CompletedWave> {
     this.assertOpen();
     throwIfAborted(signal);
@@ -275,12 +316,14 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
         lifecycle: definition.lifecycle,
         status: "starting",
         usage: copyUsage(EMPTY_WORKER_USAGE),
+        startedAt: this.clock(),
       };
     });
 
     const waiter = makeWaveWaiter();
     this.waves.set(waveId, wave);
     this.waveWaiters.set(waveId, waiter);
+    if (onSettlement) this.waveSettlementListeners.set(waveId, onSettlement);
     for (let index = 0; index < records.length; index += 1) {
       const record = records[index];
       const definition = definitions[index];
@@ -304,6 +347,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     instructions: string,
     mode: "async",
     signal?: AbortSignal,
+    onSettlement?: SettlementListener,
   ): Promise<AcceptedWave>;
   send(
     context: OrchestrationContext,
@@ -311,6 +355,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     instructions: string,
     mode: "inline",
     signal?: AbortSignal,
+    onSettlement?: SettlementListener,
   ): Promise<CompletedWave>;
   send(
     context: OrchestrationContext,
@@ -318,6 +363,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     instructions: string,
     mode: WaveMode,
     signal?: AbortSignal,
+    onSettlement?: SettlementListener,
   ): Promise<AcceptedWave | CompletedWave>;
   async send(
     context: OrchestrationContext,
@@ -325,6 +371,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     instructions: string,
     mode: WaveMode,
     signal?: AbortSignal,
+    onSettlement?: SettlementListener,
   ): Promise<AcceptedWave | CompletedWave> {
     this.assertOpen();
     throwIfAborted(signal);
@@ -354,6 +401,8 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
       waveId,
       instructions,
       activity: undefined,
+      startedAt: this.clock(),
+      settledAt: undefined,
     };
     const waiter = makeWaveWaiter();
 
@@ -361,6 +410,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     const generation = entry.generation;
     this.waves.set(waveId, wave);
     this.waveWaiters.set(waveId, waiter);
+    if (onSettlement) this.waveSettlementListeners.set(waveId, onSettlement);
     this.workers.set(workerId, running);
     this.subscribeEntryObservability(workerId, entry, entry.session, generation);
     this.emitState(context.ownerSessionId);
@@ -414,6 +464,17 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     };
   }
 
+  subscribeSettlement(listener: SettlementListener): UnsubscribeSettlement {
+    if (typeof listener !== "function") throw new Error("Settlement listener must be a function");
+    this.settlementListeners.add(listener);
+    let subscribed = true;
+    return () => {
+      if (!subscribed) return;
+      subscribed = false;
+      this.settlementListeners.delete(listener);
+    };
+  }
+
   subscribeState(listener: StateListener): () => void {
     if (typeof listener !== "function") throw new Error("State listener must be a function");
     this.stateListeners.add(listener);
@@ -446,6 +507,10 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
         // Scheduler closure is best-effort during process shutdown.
       } finally {
         await this.awaitTrackedCleanupBestEffort();
+        this.waveSettlementListeners.clear();
+        this.completionListeners.clear();
+        this.settlementListeners.clear();
+        this.stateListeners.clear();
       }
     }
   }
@@ -490,11 +555,15 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
   }
 
   private launchBootstrap(workerId: WorkerId, generation: number): void {
-    this.scheduler.start(
-      workerId,
-      () => this.trackCleanup(this.bootstrapAndPrompt(workerId, generation)),
-      (error) => this.settleWorkflowDefect(workerId, generation, error),
-    );
+    try {
+      this.scheduler.start(
+        workerId,
+        () => this.trackCleanup(this.bootstrapAndPrompt(workerId, generation)),
+        (error) => this.settleWorkflowDefect(workerId, generation, error),
+      );
+    } catch (error) {
+      this.settleWorkflowDefect(workerId, generation, error);
+    }
   }
 
   private launchPrompt(
@@ -503,11 +572,15 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     session: WorkerSessionHandle,
     instructions: string,
   ): void {
-    this.scheduler.start(
-      workerId,
-      () => this.trackCleanup(this.executePrompt(workerId, generation, session, instructions)),
-      (error) => this.settleWorkflowDefect(workerId, generation, error),
-    );
+    try {
+      this.scheduler.start(
+        workerId,
+        () => this.trackCleanup(this.executePrompt(workerId, generation, session, instructions)),
+        (error) => this.settleWorkflowDefect(workerId, generation, error),
+      );
+    } catch (error) {
+      this.settleWorkflowDefect(workerId, generation, error);
+    }
   }
 
   private async bootstrapAndPrompt(workerId: WorkerId, generation: number): Promise<void> {
@@ -606,7 +679,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     this.settleTerminalWorker(current, "failed", {
       status: "failed",
       message: describeError(error, "Worker session creation failed"),
-    });
+    }, "startup");
   }
 
   private settleWorkflowDefect(
@@ -626,7 +699,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     this.settleTerminalWorker(current, "failed", {
       status: "failed",
       message: describeError(error, "Worker workflow failed"),
-    });
+    }, "workflow");
   }
 
   private settleOutcome(
@@ -663,17 +736,27 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
       };
     }
 
+    const settledAt = this.clock();
     this.workers.set(workerId, {
       ...transitionWorkerStatus(current, status),
       activity: undefined,
       outcome: copyOutcome(settledOutcome),
+      settledAt,
     });
     if (status !== "ready") this.disposeEntrySession(entry);
     const affectedOwners = this.maybeCompleteWave(current.waveId);
+    affectedOwners.add(current.ownerSessionId);
+    this.emitSettlement(
+      workerId,
+      generation,
+      settledAt,
+      status === "failed" ? "prompt" : undefined,
+    );
     if (isTerminalWorkerStatus(status)) {
       addAll(affectedOwners, this.rememberTerminalWorker(workerId));
+    } else {
+      addAll(affectedOwners, this.pruneHistory());
     }
-    affectedOwners.add(current.ownerSessionId);
     this.emitStateForOwners(affectedOwners);
   }
 
@@ -681,16 +764,89 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     current: WorkerRecord,
     status: "failed" | "aborted",
     outcome: WorkerOutcome,
+    failureStage?: SettlementFailureStage,
   ): void {
+    const settledAt = this.clock();
     this.workers.set(current.id, {
       ...transitionWorkerStatus(current, status),
       activity: undefined,
       outcome: copyOutcome(outcome),
+      settledAt,
     });
     const affectedOwners = this.maybeCompleteWave(current.waveId);
-    addAll(affectedOwners, this.rememberTerminalWorker(current.id));
     affectedOwners.add(current.ownerSessionId);
+    const generation = this.entries.get(current.id)?.generation;
+    if (generation !== undefined) {
+      this.emitSettlement(current.id, generation, settledAt, failureStage);
+    }
+    addAll(affectedOwners, this.rememberTerminalWorker(current.id));
     this.emitStateForOwners(affectedOwners);
+  }
+
+  private emitSettlement(
+    workerId: WorkerId,
+    generation: number,
+    settledAt: number,
+    failureStage?: SettlementFailureStage,
+  ): void {
+    const worker = this.workers.get(workerId);
+    const wave = worker ? this.waves.get(worker.waveId) : undefined;
+    if (!worker || !wave || !worker.outcome || !isWorkerCompleteForWave(worker.status)) return;
+    if (worker.status === "closed") return;
+
+    let remainingActive = 0;
+    let waveComplete = true;
+    for (const waveWorkerId of wave.workerIds) {
+      const waveWorker = this.workers.get(waveWorkerId);
+      if (!waveWorker || waveWorker.waveId !== wave.id || !isWorkerCompleteForWave(waveWorker.status)) {
+        waveComplete = false;
+        if (waveWorker && isActiveWorkerStatus(waveWorker.status)) remainingActive += 1;
+      }
+    }
+
+    const sequence = ++this.settlementSequence;
+    const settlement: WorkerSettlement = Object.freeze({
+      eventId: `${sequence}:${wave.id}:${workerId}:${generation}`,
+      sequence,
+      ownerSessionId: worker.ownerSessionId,
+      waveId: wave.id,
+      workerId,
+      generation,
+      mode: wave.mode,
+      worker: worker.worker,
+      title: worker.title,
+      lifecycle: worker.lifecycle,
+      status: worker.status,
+      outcome: Object.freeze(copyOutcome(worker.outcome)),
+      ...(failureStage ? { failureStage } : {}),
+      usage: Object.freeze(copyUsage(worker.usage)),
+      startedAt: worker.startedAt,
+      settledAt,
+      remainingActive,
+      waveSize: wave.workerIds.length,
+      waveComplete,
+      sessionFile: worker.sessionFile,
+    });
+
+    const localListener = this.waveSettlementListeners.get(wave.id);
+    if (waveComplete) this.waveSettlementListeners.delete(wave.id);
+    notifySettlementListener(localListener, settlement);
+    for (const listener of [...this.settlementListeners]) {
+      notifySettlementListener(listener, settlement);
+    }
+    if (waveComplete) this.emitCompletedWave(wave.id);
+  }
+
+  private emitCompletedWave(waveId: WaveId): void {
+    const completed = this.completedWaves.get(waveId);
+    if (!completed || completed.mode !== "async") return;
+    for (const listener of [...this.completionListeners]) {
+      try {
+        listener(completed);
+      } catch {
+        // One subscriber cannot prevent other subscribers from receiving completion.
+      }
+    }
   }
 
   private maybeCompleteWave(waveId: WaveId): Set<string> {
@@ -719,17 +875,6 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     this.waveWaiters.get(waveId)?.resolve(completed);
     this.waveWaiters.delete(waveId);
 
-    if (wave.mode === "async") {
-      for (const listener of [...this.completionListeners]) {
-        try {
-          listener(completed);
-        } catch {
-          // One subscriber cannot prevent other subscribers from receiving completion.
-        }
-      }
-    }
-
-    addAll(affectedOwners, this.pruneHistory());
     return affectedOwners;
   }
 
@@ -884,7 +1029,12 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
       if (entry) this.disposeEntrySession(entry);
       const current = this.workers.get(workerId);
       if (current?.status === "stopping") {
-        this.settleTerminalWorker(current, "aborted", { status: "aborted" });
+        this.settleTerminalWorker(
+          current,
+          "aborted",
+          { status: "aborted" },
+          "cancellation",
+        );
       }
     }
   }
@@ -897,7 +1047,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     this.settleTerminalWorker(current, "failed", {
       status: "failed",
       message: describeError(error, "Worker cancellation failed"),
-    });
+    }, "cancellation");
   }
 
   private async cancelExactWave(wave: WaveRecord): Promise<void> {
@@ -952,6 +1102,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
       ...transitionWorkerStatus(current, "closed"),
       activity: undefined,
       outcome: { status: "closed" },
+      settledAt: this.clock(),
     });
     const affectedOwners = this.maybeCompleteWave(current.waveId);
     addAll(affectedOwners, this.rememberTerminalWorker(current.id));
@@ -1112,6 +1263,18 @@ function abortSignalReason(signal: AbortSignal): unknown {
 
 function addAll(target: Set<string>, source: ReadonlySet<string>): void {
   for (const value of source) target.add(value);
+}
+
+function notifySettlementListener(
+  listener: SettlementListener | undefined,
+  settlement: WorkerSettlement,
+): void {
+  if (!listener) return;
+  try {
+    listener(settlement);
+  } catch {
+    // One observer cannot prevent settlement or other observers from being notified.
+  }
 }
 
 function makeWaveWaiter(): WaveWaiter {

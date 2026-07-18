@@ -7,6 +7,7 @@ import {
   createSequentialIdFactories,
   createWorkerCatalog,
   type OrchestrateTaskInput,
+  type WaveId,
   type WorkerDefinition,
   type WorkerId,
   type WorkerOutcome,
@@ -490,6 +491,32 @@ describe("completion, reusable workers, and wave ownership", () => {
     await orchestrator.shutdown();
   });
 
+  test("bounds completed wave history across repeated reusable responses", async () => {
+    const tracker = new PromptTracker();
+    const responseCount = MAX_COMPLETED_WAVE_HISTORY + 1;
+    const handle = new FakeHandle(
+      "reusable-history",
+      Array.from({ length: responseCount }, (_, index) =>
+        promptPlan({ status: "ready", assistantText: `response-${index}` }, true)),
+      tracker,
+    );
+    const orchestrator = runtime(new FakeFactory([{ handle }]));
+    const owner = context("owner", [definition("reusable", "reusable")]);
+
+    const initial = await orchestrator.orchestrate(owner, [task("reusable")], "inline");
+    const workerId = initial.results[0]!.workerId;
+    for (let index = 1; index < responseCount; index += 1) {
+      await orchestrator.send(owner, workerId, `Follow up ${index}`, "inline");
+    }
+
+    const snapshot = await orchestrator.snapshot("owner");
+    expect(snapshot.waves).toHaveLength(MAX_COMPLETED_WAVE_HISTORY);
+    expect(snapshot.workers).toHaveLength(1);
+    expect(snapshot.workers[0]).toMatchObject({ id: workerId, status: "ready" });
+    expect(handle.prompts).toHaveLength(responseCount);
+    await orchestrator.shutdown();
+  });
+
   test("retains ready workers and bounds terminal worker and completed wave history globally", async () => {
     const tracker = new PromptTracker();
     const reusableHandle = new FakeHandle(
@@ -527,6 +554,208 @@ describe("completion, reusable workers, and wave ownership", () => {
     expect(closed.workers).toHaveLength(MAX_TERMINAL_WORKER_HISTORY);
     expect(closed.workers.some((worker) => worker.id === reusableId && worker.status === "closed")).toBe(true);
     await orchestrator.shutdown();
+  });
+});
+
+describe("per-worker settlement observability", () => {
+  test("emits settlement and compatibility completion before pruning under terminal-history pressure", async () => {
+    const tracker = new PromptTracker();
+    const plans = Array.from({ length: MAX_TERMINAL_WORKER_HISTORY + 12 }, (_, index) => ({
+      handle: new FakeHandle(
+        `pressure-${index}`,
+        [promptPlan({ status: "completed", assistantText: `result-${index}` }, true)],
+        tracker,
+      ),
+    }));
+    const orchestrator = runtime(new FakeFactory(plans));
+    const owner = context("owner", [definition("worker")]);
+
+    for (let index = 0; index < MAX_TERMINAL_WORKER_HISTORY; index += 1) {
+      await orchestrator.orchestrate(owner, [task("worker", `Prefill ${index}`)], "inline");
+    }
+
+    const settlements: import("../extension/runtime.ts").WorkerSettlement[] = [];
+    const completions: CompletedWave[] = [];
+    orchestrator.subscribeSettlement((event) => settlements.push(event));
+    orchestrator.subscribeCompletion((wave) => completions.push(wave));
+    const tasks = Array.from({ length: 12 }, (_, index) => task("worker", `Pressure ${index}`));
+    await orchestrator.orchestrate(owner, tasks, "async");
+    while (settlements.length < 12) await Promise.resolve();
+
+    expect(settlements).toHaveLength(12);
+    expect(settlements.at(-1)?.waveComplete).toBe(true);
+    expect(completions).toHaveLength(1);
+    expect(completions[0]?.results).toHaveLength(12);
+    expect((await orchestrator.snapshot("owner")).workers).toHaveLength(
+      MAX_TERMINAL_WORKER_HISTORY,
+    );
+    await orchestrator.shutdown();
+  });
+
+  test("permits pruned worker and wave IDs to be reused with new settlement identities", async () => {
+    const tracker = new PromptTracker();
+    const count = MAX_TERMINAL_WORKER_HISTORY + 2;
+    const plans = Array.from({ length: count }, (_, index) => ({
+      handle: new FakeHandle(
+        `reuse-${index}`,
+        [promptPlan({ status: "completed", assistantText: `${index}` }, true)],
+        tracker,
+      ),
+    }));
+    let nextWave = 0;
+    let nextWorker = 0;
+    const orchestrator = runtime(new FakeFactory(plans), {
+      idFactories: {
+        waveId: () => `wave-${nextWave++ % (MAX_COMPLETED_WAVE_HISTORY + 1)}` as WaveId,
+        workerId: () => `worker-${nextWorker++ % (MAX_TERMINAL_WORKER_HISTORY + 1)}` as WorkerId,
+      },
+    });
+    const events: import("../extension/runtime.ts").WorkerSettlement[] = [];
+    orchestrator.subscribeSettlement((event) => events.push(event));
+    const owner = context("owner", [definition("worker")]);
+
+    for (let index = 0; index < count; index += 1) {
+      await orchestrator.orchestrate(owner, [task("worker", `Reuse ${index}`)], "inline");
+    }
+
+    expect(events[0]?.workerId).toBe(events.at(-1)?.workerId);
+    expect(events[0]?.waveId).toBe(events.at(-1)?.waveId);
+    expect(events[0]?.eventId).not.toBe(events.at(-1)?.eventId);
+    expect(events.at(-1)?.sequence).toBe(count);
+    await orchestrator.shutdown();
+  });
+
+  test("emits each settlement immediately in completion order and marks only the last wave result final", async () => {
+    const tracker = new PromptTracker();
+    const alpha = new FakeHandle(
+      "alpha-settlement",
+      [promptPlan({ status: "completed", assistantText: "alpha result" })],
+      tracker,
+    );
+    const beta = new FakeHandle(
+      "beta-settlement",
+      [promptPlan({ status: "completed", assistantText: "beta result" })],
+      tracker,
+    );
+    const orchestrator = runtime(new FakeFactory([{ handle: alpha }, { handle: beta }]));
+    const settlements: import("../extension/runtime.ts").WorkerSettlement[] = [];
+    orchestrator.subscribeSettlement((event) => settlements.push(event));
+
+    const accepted = await orchestrator.orchestrate(
+      context("owner", [definition("alpha"), definition("beta")]),
+      [task("alpha"), task("beta")],
+      "async",
+    );
+    await tracker.starts.waitFor(2);
+    alpha.promptPlans[0]!.gate.resolve(undefined);
+    await alpha.disposed.promise;
+
+    expect(settlements).toHaveLength(1);
+    expect(settlements[0]).toMatchObject({
+      ownerSessionId: "owner",
+      waveId: accepted.id,
+      workerId: accepted.workerIds[0],
+      generation: 1,
+      mode: "async",
+      status: "completed",
+      remainingActive: 1,
+      waveComplete: false,
+      startedAt: 1_700_000_000_000,
+      settledAt: 1_700_000_000_000,
+      sessionFile: "/sessions/alpha-settlement.jsonl",
+    });
+    expect(Object.isFrozen(settlements[0])).toBe(true);
+    expect(Object.isFrozen(settlements[0]?.outcome)).toBe(true);
+    expect(Object.isFrozen(settlements[0]?.usage)).toBe(true);
+
+    beta.promptPlans[0]!.gate.resolve(undefined);
+    await beta.disposed.promise;
+    expect(settlements.map((event) => event.worker)).toEqual(["alpha", "beta"]);
+    expect(settlements.map((event) => event.sequence)).toEqual([1, 2]);
+    expect(settlements.map((event) => event.waveComplete)).toEqual([false, true]);
+    expect(new Set(settlements.map((event) => event.eventId)).size).toBe(2);
+    await orchestrator.shutdown();
+  });
+
+  test("observes inline reusable generations locally with distinct event IDs and final usage", async () => {
+    const tracker = new PromptTracker();
+    const first = promptPlan({ status: "ready", assistantText: "first" });
+    const second = promptPlan({ status: "ready", assistantText: "second" });
+    const handle = new FakeHandle("local-reusable", [first, second], tracker);
+    const orchestrator = runtime(new FakeFactory([{ handle }]));
+    const owner = context("owner", [definition("reusable", "reusable")]);
+    const local: import("../extension/runtime.ts").WorkerSettlement[] = [];
+    const global: import("../extension/runtime.ts").WorkerSettlement[] = [];
+    orchestrator.subscribeSettlement((event) => global.push(event));
+
+    const initial = orchestrator.orchestrate(owner, [task("reusable")], "inline", undefined, (event) => local.push(event));
+    await tracker.starts.waitFor(1);
+    first.gate.resolve(undefined);
+    const workerId = (await initial).results[0]!.workerId;
+
+    const followUp = orchestrator.send(owner, workerId, "follow up", "inline", undefined, (event) => local.push(event));
+    await tracker.starts.waitFor(2);
+    const finalUsage: WorkerUsage = { ...EMPTY_USAGE, output: 9, turns: 2 };
+    handle.emitUsage(finalUsage);
+    second.gate.resolve(undefined);
+    await followUp;
+
+    expect(local.map((event) => event.generation)).toEqual([1, 2]);
+    expect(global.map((event) => event.mode)).toEqual(["inline", "inline"]);
+    expect(local[0]?.workerId).toBe(local[1]?.workerId);
+    expect(local[0]?.eventId).not.toBe(local[1]?.eventId);
+    expect(local[1]?.usage).toEqual(finalUsage);
+    await orchestrator.close("owner", workerId);
+    expect(local).toHaveLength(2);
+    await orchestrator.shutdown();
+  });
+
+  test("emits failed startup and aborted active workers exactly once", async () => {
+    const failedFactory: WorkerSessionFactory = {
+      create() {
+        return Promise.reject(new Error("startup failed"));
+      },
+    };
+    const failedRuntime = runtime(failedFactory);
+    const failed: import("../extension/runtime.ts").WorkerSettlement[] = [];
+    failedRuntime.subscribeSettlement((event) => failed.push(event));
+    await failedRuntime.orchestrate(
+      context("failed-owner", [definition("worker")]),
+      [task("worker")],
+      "async",
+    );
+    while (failed.length === 0) await Promise.resolve();
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({
+      status: "failed",
+      failureStage: "startup",
+      waveComplete: true,
+    });
+    expect(failed[0]?.outcome).toEqual({ status: "failed", message: "startup failed" });
+    await failedRuntime.shutdown();
+
+    const tracker = new PromptTracker();
+    const prompt = promptPlan({ status: "completed", assistantText: "late" });
+    const handle = new FakeHandle("aborted-settlement", [prompt], tracker);
+    const abortedRuntime = runtime(new FakeFactory([{ handle }]));
+    const aborted: import("../extension/runtime.ts").WorkerSettlement[] = [];
+    abortedRuntime.subscribeSettlement((event) => aborted.push(event));
+    const accepted = await abortedRuntime.orchestrate(
+      context("abort-owner", [definition("worker")]),
+      [task("worker")],
+      "async",
+    );
+    await tracker.starts.waitFor(1);
+    await abortedRuntime.abort("abort-owner", { workerIds: accepted.workerIds });
+    prompt.gate.resolve(undefined);
+    await Promise.resolve();
+    expect(aborted).toHaveLength(1);
+    expect(aborted[0]).toMatchObject({
+      status: "aborted",
+      failureStage: "cancellation",
+      waveComplete: true,
+    });
+    await abortedRuntime.shutdown();
   });
 });
 

@@ -54,6 +54,7 @@ const workerRecord = (
   lifecycle,
   status,
   usage: EMPTY_WORKER_USAGE,
+  startedAt: 1,
 });
 
 describe("supported tools and worker catalog", () => {

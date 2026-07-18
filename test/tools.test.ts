@@ -1,7 +1,8 @@
-import { describe, expect, test } from "bun:test";
+import { beforeAll, describe, expect, test } from "bun:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
   getAgentDir,
+  initTheme,
   type ExtensionAPI,
   type ExtensionContext,
   type ModelRegistry,
@@ -30,6 +31,8 @@ import {
   type OrchestrationToolDependencies,
 } from "../extension/tools.js";
 
+beforeAll(() => initTheme("dark", false));
+
 type RegisteredTool = ToolDefinition<TSchema, unknown>;
 type DispatchMode = "async" | "inline";
 
@@ -54,6 +57,7 @@ class FakeRuntime {
     mode: DispatchMode;
     signal?: AbortSignal;
   }> = [];
+  settlementToEmit: unknown | undefined;
   readonly sendCalls: Array<{
     context: OrchestrationContext;
     workerId: WorkerId;
@@ -80,9 +84,11 @@ class FakeRuntime {
     tasks: readonly { worker: string; title: string; instructions: string }[],
     mode: DispatchMode,
     signal?: AbortSignal,
+    onSettlement?: (settlement: unknown) => void,
   ): Promise<AcceptedWave | CompletedWave> {
     this.orchestrateCalls.push({ context, tasks, mode, signal });
     if (this.failures.orchestrate) throw this.failures.orchestrate;
+    if (mode === "inline" && this.settlementToEmit) onSettlement?.(this.settlementToEmit);
     return mode === "async" ? this.acceptedWave : this.completedWave;
   }
 
@@ -92,9 +98,11 @@ class FakeRuntime {
     instructions: string,
     mode: DispatchMode,
     signal?: AbortSignal,
+    onSettlement?: (settlement: unknown) => void,
   ): Promise<AcceptedWave | CompletedWave> {
     this.sendCalls.push({ context, workerId, instructions, mode, signal });
     if (this.failures.send) throw this.failures.send;
+    if (mode === "inline" && this.settlementToEmit) onSettlement?.(this.settlementToEmit);
     return mode === "async" ? this.acceptedWave : this.completedWave;
   }
 
@@ -163,12 +171,13 @@ async function invoke(
   params: unknown,
   ctx: ExtensionContext,
   signal?: AbortSignal,
+  onUpdate?: (result: unknown) => void,
 ) {
   return pi.tool(name).execute(
     toolCallId,
     params as never,
     signal,
-    undefined,
+    onUpdate as never,
     ctx,
   );
 }
@@ -191,6 +200,18 @@ function extensionContext(overrides: {
     model: parentModel,
     isProjectTrusted: () => overrides.trusted ?? true,
   } as unknown as ExtensionContext;
+}
+
+function themeForRendering() {
+  return {
+    fg: (_color: string, text: string) => text,
+    bg: (_color: string, text: string) => text,
+    bold: (text: string) => text,
+    italic: (text: string) => text,
+    underline: (text: string) => text,
+    inverse: (text: string) => text,
+    strikethrough: (text: string) => text,
+  } as never;
 }
 
 function model(provider: string, id: string): Model<Api> {
@@ -686,6 +707,92 @@ describe("registerOrchestrationTools", () => {
       invoke(pi, "worker_close", "close-blank", { worker_id: "\t" }, context),
     ).rejects.toThrow("worker_id must not be blank");
     expect(runtime.closeCalls).toHaveLength(1);
+  });
+
+  test("renders all 12 exact expandable outbound messages with safe bounded previews", async () => {
+    const { pi, runtime, context } = harness();
+    const instructions = `  First  exact\tline.\r\n\r\nUnicode 雪 \u001b[31mred\u0000\n${"UNBROKEN".repeat(12_500)}\nTAIL  `;
+    const tasks = Array.from({ length: 12 }, (_, index) => ({
+      worker: "scout",
+      title: `T${index}`,
+      instructions: index === 0 ? instructions : `  exact message ${index}  `,
+    }));
+    const renderContext = (expanded: boolean) => ({ expanded, argsComplete: true, cwd: "/workspace", state: {}, invalidate() {} }) as never;
+    const collapsed = pi.tool("orchestrate").renderCall!(tasks.length ? { tasks } as never : never, themeForRendering(), renderContext(false)).render(32);
+    expect(collapsed.every((line) => Bun.stringWidth(line) <= 32)).toBe(true);
+    const collapsedText = Bun.stripANSI(collapsed.join("\n"));
+    for (let index = 0; index < 12; index += 1) expect(collapsedText).toContain(`T${index}`);
+    expect(collapsed).toHaveLength(14);
+    expect(collapsedText).toContain("to inspect full instructions");
+    const expanded = Bun.stripANSI(pi.tool("orchestrate").renderCall!({ tasks } as never, themeForRendering(), renderContext(true)).render(120_000).join("\n"));
+    expect(expanded).toContain("  First  exact    line.");
+    expect(expanded).toContain("Unicode 雪 ␛[31mred␀");
+    expect(expanded).toContain("UNBROKEN".repeat(12_500));
+    expect(expanded).toContain("TAIL  ");
+    for (let index = 1; index < 12; index += 1) expect(expanded).toContain(`  exact message ${index}  `);
+
+    const sendExpanded = Bun.stripANSI(pi.tool("worker_send").renderCall!({ worker_id: "worker-1", instructions } as never, themeForRendering(), renderContext(true)).render(120_000).join("\n"));
+    expect(sendExpanded).toContain("UNBROKEN".repeat(12_500));
+    expect(sendExpanded).toContain("TAIL  ");
+
+    await invoke(pi, "orchestrate", "exact-storage", { tasks }, context);
+    expect(runtime.orchestrateCalls.at(-1)?.tasks).toEqual(tasks);
+    await invoke(pi, "worker_send", "exact-send", { worker_id: "worker-1", instructions }, context);
+    expect(runtime.sendCalls.at(-1)?.instructions).toBe(instructions);
+  });
+
+  test("bounds 12 collapsed inline responses, expands all content, and reuses the component", () => {
+    const { pi } = harness();
+    const settlements = Array.from({ length: 12 }, (_, index) => ({
+      workerId: `worker-${index}`, worker: "scout", title: `T${index}`, status: "completed",
+      outcome: { status: "completed", assistantText: `${"long response ".repeat(100)}TAIL-${index}` },
+    }));
+    const result = { content: [{ type: "text", text: "done" }], details: { mode: "inline", settlements } } as AgentToolResult<unknown>;
+    const collapsed = pi.tool("orchestrate").renderResult!(result, { isPartial: true, expanded: false }, themeForRendering(), { lastComponent: undefined } as never);
+    const collapsedLines = collapsed.render(32);
+    expect(collapsedLines.length).toBeLessThanOrEqual(12 * 4 + 1);
+    expect(collapsedLines.every((line) => Bun.stringWidth(line) <= 32)).toBe(true);
+    for (let index = 0; index < 12; index += 1) expect(Bun.stripANSI(collapsedLines.join("\n"))).toContain(`T${index}`);
+    const updated = pi.tool("orchestrate").renderResult!(result, { isPartial: false, expanded: true }, themeForRendering(), { lastComponent: collapsed } as never);
+    expect(updated).toBe(collapsed);
+    const expanded = Bun.stripANSI(updated.render(32).join("\n"));
+    for (let index = 0; index < 12; index += 1) expect(expanded).toContain(`TAIL-${index}`);
+  });
+
+  test("renders malformed inline details neutrally rather than as success", () => {
+    const { pi } = harness();
+    const result = { content: [{ type: "text", text: "completed" }], details: { settlements: [{ worker: "scout", title: "Bad", status: "completed", outcome: { status: "failed", message: "no" } }] } } as AgentToolResult<unknown>;
+    const rendered = pi.tool("orchestrate").renderResult!(result, { isPartial: false, expanded: false }, themeForRendering(), { lastComponent: undefined } as never);
+    const output = Bun.stripANSI(rendered.render(80).join("\n"));
+    expect(output).toContain("details unavailable");
+    expect(output).not.toContain("✓");
+  });
+
+  test("publishes and renders cumulative inline settlement updates", async () => {
+    const { pi, runtime, context, modes } = harness();
+    modes.set("inline-partial", "inline");
+    runtime.settlementToEmit = {
+      workerId: "worker-inline", waveId: "wave-inline", worker: "scout", title: "Inspect", status: "completed",
+      outcome: { status: "completed", assistantText: "Live complete response." },
+    };
+    const updates: unknown[] = [];
+    await invoke(pi, "orchestrate", "inline-partial", { tasks: [{ worker: "scout", title: "Inspect", instructions: "Inspect." }] }, context, undefined, (update) => updates.push(update));
+    expect(updates).toHaveLength(1);
+    const partial = updates[0] as AgentToolResult<unknown>;
+    const rendered = pi.tool("orchestrate").renderResult!(partial, { isPartial: true, expanded: false }, themeForRendering(), { lastComponent: undefined } as never);
+    const output = Bun.stripANSI(rendered.render(80).join("\n"));
+    expect(output).toContain("scout · Inspect · completed");
+    expect(output).toContain("Live complete response.");
+    expect(output).toContain("Waiting for remaining workers");
+  });
+
+  test("renders concrete neutral diagnostics", async () => {
+    const { pi, runtime, context } = harness();
+    runtime.snapshotResult = { waves: [], workers: [] };
+    const result = await invoke(pi, "orchestration_status", "status-render", {}, context);
+    const rendered = pi.tool("orchestration_status").renderResult!(result, { isPartial: false, expanded: false }, themeForRendering(), {} as never);
+    expect(Bun.stripANSI(rendered.render(80).join("\n"))).toContain("No active workers");
+    expect(Bun.stripANSI(rendered.render(80).join("\n"))).not.toContain("state ready");
   });
 
   test("throws execution failures instead of returning fake error results", async () => {
