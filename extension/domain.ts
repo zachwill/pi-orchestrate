@@ -161,7 +161,7 @@ export interface WorkerUsage {
 }
 
 /** Direction of the most recent message across the worker/model boundary. */
-export type WorkerTurnDirection = "up" | "down";
+export type WorkerMessageDirection = "to-model" | "from-model";
 
 export const EMPTY_WORKER_USAGE: WorkerUsage = Object.freeze({
   input: 0,
@@ -234,7 +234,7 @@ export interface WorkerRecord {
   readonly startedAt: number;
   readonly settledAt?: number;
   readonly activity?: string;
-  readonly turnDirection?: WorkerTurnDirection;
+  readonly messageDirection?: WorkerMessageDirection;
   readonly outcome?: WorkerOutcome;
   readonly sessionFile?: string;
 }

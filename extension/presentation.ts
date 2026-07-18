@@ -466,8 +466,8 @@ function workerStateLabel(worker: Pick<WorkerRecord, "status" | "activity">): st
   return TOOL_ACTIVITY[worker.activity] ?? worker.activity;
 }
 
-function formatTurnMarker(worker: Pick<WorkerRecord, "turnDirection" | "usage">): string {
-  const direction = worker.turnDirection === "down" ? "↓" : "↑";
+function formatTurnMarker(worker: Pick<WorkerRecord, "messageDirection" | "usage">): string {
+  const direction = worker.messageDirection === "from-model" ? "↓" : "↑";
   return `${numberOrZero(worker.usage?.turns)}${direction}`;
 }
 function elapsedBetween(start?: number, end?: number): string | undefined {

@@ -201,7 +201,7 @@ interface RuntimeEntry {
   session?: WorkerSessionHandle;
   unsubscribeUsage?: () => void;
   unsubscribeActivity?: () => void;
-  unsubscribeTurnDirection?: () => void;
+  unsubscribeMessageDirection?: () => void;
 }
 
 interface WaveWaiter {
@@ -317,7 +317,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
         lifecycle: definition.lifecycle,
         status: "starting",
         usage: copyUsage(EMPTY_WORKER_USAGE),
-        turnDirection: "up",
+        messageDirection: "to-model",
         startedAt: this.clock(),
       };
     });
@@ -403,7 +403,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
       waveId,
       instructions,
       activity: undefined,
-      turnDirection: "up",
+      messageDirection: "to-model",
       startedAt: this.clock(),
       settledAt: undefined,
     };
@@ -1140,12 +1140,12 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
       this.workers.set(workerId, { ...latest, activity });
       this.emitState(latest.ownerSessionId);
     });
-    entry.unsubscribeTurnDirection = session.subscribeTurnDirection((turnDirection) => {
+    entry.unsubscribeMessageDirection = session.subscribeMessageDirection((messageDirection) => {
       const latest = this.workers.get(workerId);
       if (!latest || entry.session !== session || entry.generation !== generation) return;
       if (latest.status !== "starting" && latest.status !== "running") return;
-      if (latest.turnDirection === turnDirection) return;
-      this.workers.set(workerId, { ...latest, turnDirection });
+      if (latest.messageDirection === messageDirection) return;
+      this.workers.set(workerId, { ...latest, messageDirection });
       this.emitState(latest.ownerSessionId);
     });
   }
@@ -1177,8 +1177,8 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     entry.unsubscribeUsage = undefined;
     safelyCall(entry.unsubscribeActivity);
     entry.unsubscribeActivity = undefined;
-    safelyCall(entry.unsubscribeTurnDirection);
-    entry.unsubscribeTurnDirection = undefined;
+    safelyCall(entry.unsubscribeMessageDirection);
+    entry.unsubscribeMessageDirection = undefined;
   }
 
   private disposeEntrySession(entry: RuntimeEntry): void {

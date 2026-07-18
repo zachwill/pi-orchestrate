@@ -905,12 +905,12 @@ describe("worker session handle", () => {
     const turns: number[] = [];
     const directions: string[] = [];
     handle.subscribeUsage((current) => turns.push(current.turns));
-    handle.subscribeTurnDirection((direction) => directions.push(direction));
+    handle.subscribeMessageDirection((direction) => directions.push(direction));
 
     await handle.prompt("task");
 
-    expect(turns).toEqual([1, 1, 2, 2]);
-    expect(directions).toEqual(["up", "down", "up", "down"]);
+    expect(turns).toEqual([1, 2]);
+    expect(directions).toEqual(["to-model", "from-model", "to-model", "from-model"]);
   });
 
   test("accumulates turn usage and removes usage subscriptions", async () => {
@@ -981,8 +981,8 @@ describe("worker session handle", () => {
       throw new Error("activity listener failed");
     });
     handle.subscribeActivity((activity) => activityUpdates.push(activity));
-    handle.subscribeTurnDirection(() => {
-      throw new Error("turn direction listener failed");
+    handle.subscribeMessageDirection(() => {
+      throw new Error("message direction listener failed");
     });
 
     h.session.finishTurn(assistant("one"));

@@ -19,7 +19,7 @@ const theme = { fg: (_: string, text: string) => text, bg: (_: string, text: str
 const usage = { input: 1200, output: 345, cacheRead: 12, cacheWrite: 3, cost: 0.0123, contextTokens: 12345, turns: 2 };
 
 function worker(id: string, status: WorkerStatus, overrides: Partial<WorkerRecord> = {}): WorkerRecord {
-  return { id, worker: "scout", ownerSessionId: "owner", waveId: "wave", title: `Task ${id}`, instructions: "Do it", lifecycle: status === "ready" ? "reusable" : "one-shot", status, usage, turnDirection: status === "starting" ? "up" : "down", startedAt: Date.now() - 78_000, ...overrides } as WorkerRecord;
+  return { id, worker: "scout", ownerSessionId: "owner", waveId: "wave", title: `Task ${id}`, instructions: "Do it", lifecycle: status === "ready" ? "reusable" : "one-shot", status, usage, messageDirection: status === "starting" ? "to-model" : "from-model", startedAt: Date.now() - 78_000, ...overrides } as WorkerRecord;
 }
 function snapshot(workers: readonly WorkerRecord[]): RuntimeSnapshot {
   return { workers, waves: [{ id: "wave", ownerSessionId: "owner", workerIds: workers.map((item) => item.id), mode: "async", state: "running", createdAt: Date.now() - 78_000 }] } as RuntimeSnapshot;
@@ -150,8 +150,8 @@ describe("active widget", () => {
 
   test("renders turn count with the latest message direction", () => {
     const component = new WorkerStatusComponent(snapshot([
-      worker("receiving", "running", { usage: { ...usage, turns: 2 }, turnDirection: "down" }),
-      worker("sending", "running", { usage: { ...usage, turns: 7 }, turnDirection: "up" }),
+      worker("receiving", "running", { usage: { ...usage, turns: 2 }, messageDirection: "from-model" }),
+      worker("sending", "running", { usage: { ...usage, turns: 7 }, messageDirection: "to-model" }),
     ]), theme);
     const output = Bun.stripANSI(component.render(80).join("\n"));
     expect(output).toContain("2↓");

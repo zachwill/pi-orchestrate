@@ -14,8 +14,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type {
   WorkerDefinition,
+  WorkerMessageDirection,
   WorkerOutcome,
-  WorkerTurnDirection,
   WorkerUsage,
 } from "./domain.js";
 
@@ -52,7 +52,7 @@ export interface WorkerSessionHandle {
   dispose(): void;
   subscribeUsage(listener: (usage: WorkerUsage) => void): () => void;
   subscribeActivity(listener: (activity: string | undefined) => void): () => void;
-  subscribeTurnDirection(listener: (direction: WorkerTurnDirection) => void): () => void;
+  subscribeMessageDirection(listener: (direction: WorkerMessageDirection) => void): () => void;
 }
 
 export interface WorkerSessionFactory {
@@ -202,14 +202,13 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
   private readonly activityListeners = new Set<
     (activity: string | undefined) => void
   >();
-  private readonly turnDirectionListeners = new Set<
-    (direction: WorkerTurnDirection) => void
+  private readonly messageDirectionListeners = new Set<
+    (direction: WorkerMessageDirection) => void
   >();
   private readonly unsubscribeSession: () => void;
   private disposed = false;
   private activity: string | undefined;
-  private turnDirection: WorkerTurnDirection | undefined;
-  private assistantMessageInFlight = false;
+  private messageDirection: WorkerMessageDirection | undefined;
   private readonly activeToolCalls = new Map<string, string>();
   private prompting = false;
   private abortRequested = false;
@@ -227,12 +226,9 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
   private onSessionEvent(event: AgentSessionEvent): void {
     if (event.type === "message_start") {
       if (event.message.role === "assistant") {
-        this.assistantMessageInFlight = true;
-        this.usage.turns += 1;
-        this.emitUsage();
-        this.setTurnDirection("down");
+        this.setMessageDirection("from-model");
       } else if (event.message.role === "user" || event.message.role === "toolResult") {
-        this.setTurnDirection("up");
+        this.setMessageDirection("to-model");
       }
       return;
     }
@@ -255,17 +251,13 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
 
     const message = event.message;
     this.promptAssistant = message;
-    if (!this.assistantMessageInFlight) {
-      this.usage.turns += 1;
-      this.setTurnDirection("down");
-    }
-    this.assistantMessageInFlight = false;
     this.usage.input += message.usage.input ?? 0;
     this.usage.output += message.usage.output ?? 0;
     this.usage.cacheRead += message.usage.cacheRead ?? 0;
     this.usage.cacheWrite += message.usage.cacheWrite ?? 0;
     this.usage.cost += message.usage.cost?.total ?? 0;
     this.usage.contextTokens = message.usage.totalTokens ?? 0;
+    this.usage.turns += 1;
     this.emitUsage();
   }
 
@@ -297,10 +289,10 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
     }
   }
 
-  private setTurnDirection(direction: WorkerTurnDirection): void {
-    if (this.turnDirection === direction) return;
-    this.turnDirection = direction;
-    for (const listener of [...this.turnDirectionListeners]) {
+  private setMessageDirection(direction: WorkerMessageDirection): void {
+    if (this.messageDirection === direction) return;
+    this.messageDirection = direction;
+    for (const listener of [...this.messageDirectionListeners]) {
       try {
         listener(direction);
       } catch {
@@ -316,8 +308,7 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
     this.prompting = true;
     this.abortRequested = false;
     this.promptAssistant = undefined;
-    this.assistantMessageInFlight = false;
-    this.setTurnDirection("up");
+    this.setMessageDirection("to-model");
     const previousAssistant = lastAssistant(this.session.messages);
 
     try {
@@ -385,7 +376,7 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
     this.activeToolCalls.clear();
     this.usageListeners.clear();
     this.activityListeners.clear();
-    this.turnDirectionListeners.clear();
+    this.messageDirectionListeners.clear();
     disposeSession(this.session);
     disposeResourceLoader(this.resourceLoader);
   }
@@ -412,15 +403,15 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
     };
   }
 
-  subscribeTurnDirection(
-    listener: (direction: WorkerTurnDirection) => void,
+  subscribeMessageDirection(
+    listener: (direction: WorkerMessageDirection) => void,
   ): () => void {
-    this.turnDirectionListeners.add(listener);
+    this.messageDirectionListeners.add(listener);
     let subscribed = true;
     return () => {
       if (!subscribed) return;
       subscribed = false;
-      this.turnDirectionListeners.delete(listener);
+      this.messageDirectionListeners.delete(listener);
     };
   }
 }

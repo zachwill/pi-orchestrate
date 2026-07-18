@@ -10,8 +10,8 @@ import {
   type WaveId,
   type WorkerDefinition,
   type WorkerId,
+  type WorkerMessageDirection,
   type WorkerOutcome,
-  type WorkerTurnDirection,
   type WorkerUsage,
 } from "../extension/domain.ts";
 import {
@@ -113,8 +113,8 @@ class FakeHandle implements WorkerSessionHandle {
   private readonly activityListenerHistory: Array<
     (activity: string | undefined) => void
   > = [];
-  private readonly turnDirectionListeners = new Set<
-    (direction: WorkerTurnDirection) => void
+  private readonly messageDirectionListeners = new Set<
+    (direction: WorkerMessageDirection) => void
   >();
 
   constructor(
@@ -175,15 +175,15 @@ class FakeHandle implements WorkerSessionHandle {
     for (const listener of this.activityListenerHistory) listener(activity);
   }
 
-  subscribeTurnDirection(
-    listener: (direction: WorkerTurnDirection) => void,
+  subscribeMessageDirection(
+    listener: (direction: WorkerMessageDirection) => void,
   ): () => void {
-    this.turnDirectionListeners.add(listener);
-    return () => this.turnDirectionListeners.delete(listener);
+    this.messageDirectionListeners.add(listener);
+    return () => this.messageDirectionListeners.delete(listener);
   }
 
-  emitTurnDirection(direction: WorkerTurnDirection): void {
-    for (const listener of this.turnDirectionListeners) listener(direction);
+  emitMessageDirection(direction: WorkerMessageDirection): void {
+    for (const listener of this.messageDirectionListeners) listener(direction);
   }
 }
 
@@ -473,6 +473,7 @@ describe("completion, reusable workers, and wave ownership", () => {
 
     const initial = orchestrator.orchestrate(owner, [task("reusable")], "inline");
     await tracker.starts.waitFor(1);
+    handle.emitMessageDirection("from-model");
     first.gate.resolve(undefined);
     const firstWave = await initial;
     const workerId = firstWave.results[0]!.workerId;
@@ -483,6 +484,7 @@ describe("completion, reusable workers, and wave ownership", () => {
     await tracker.starts.waitFor(2);
     const running = await orchestrator.snapshot("owner");
     expect(running.workers[0]?.status).toBe("running");
+    expect(running.workers[0]?.messageDirection).toBe("to-model");
     expect(running.workers[0]?.outcome).toBeUndefined();
     second.gate.resolve(undefined);
 
@@ -820,13 +822,13 @@ describe("runtime state observability", () => {
     };
     first.emitUsage(usage);
     first.emitActivity("read");
-    first.emitTurnDirection("down");
+    first.emitMessageDirection("from-model");
 
     expect(notifications).toEqual(["owner-a", "owner-a", "owner-a"]);
     const ownerA = await orchestrator.snapshot("owner-a");
     expect(ownerA.workers[0]?.usage).toEqual(usage);
     expect(ownerA.workers[0]?.activity).toBe("read");
-    expect(ownerA.workers[0]?.turnDirection).toBe("down");
+    expect(ownerA.workers[0]?.messageDirection).toBe("from-model");
     expect(Object.isFrozen(ownerA)).toBe(true);
     expect(Object.isFrozen(ownerA.workers)).toBe(true);
     expect(Object.isFrozen(ownerA.workers[0])).toBe(true);
@@ -834,7 +836,7 @@ describe("runtime state observability", () => {
     const ownerBWorker = (await orchestrator.snapshot("owner-b")).workers[0];
     expect(ownerBWorker?.usage).toEqual(EMPTY_USAGE);
     expect(ownerBWorker?.activity).toBeUndefined();
-    expect(ownerBWorker?.turnDirection).toBe("up");
+    expect(ownerBWorker?.messageDirection).toBe("to-model");
 
     unsubscribe();
     unsubscribe();
