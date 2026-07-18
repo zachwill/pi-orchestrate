@@ -27,7 +27,7 @@ import type {
 } from "./domain.js";
 
 const DIRECT_CHILD_BOUNDARY =
-  "You are a direct child worker session. Do not spawn, delegate to, or orchestrate other workers or child sessions. Complete the assigned task yourself and return the result directly to the parent orchestrator.";
+  "You are a direct child worker session. Do not spawn, delegate to, or orchestrate descendant Pi worker sessions. Complete the assigned task yourself and return the result directly to the parent orchestrator.";
 const ORCHESTRATE_PACKAGE_ROOT = canonicalPath(fileURLToPath(new URL("..", import.meta.url)));
 
 interface WorkerAgentSession {

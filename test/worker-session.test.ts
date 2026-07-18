@@ -415,6 +415,7 @@ describe("worker session factory", () => {
     expect(loader.appendSystemPrompt![0]).toBe("Worker system prompt.");
     expect(loader.appendSystemPrompt![1]).toContain("direct child worker session");
     expect(loader.appendSystemPrompt![1]).toContain("Do not spawn");
+    expect(loader.appendSystemPrompt![1]).toContain("descendant Pi worker sessions");
 
     const filtered = loader.skillsOverride!({
       skills: [skill("alpha"), skill("other"), skill("beta")],

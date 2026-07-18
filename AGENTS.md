@@ -39,7 +39,7 @@ Preserve these contracts:
 - State, worker operations, and delivery are owner-scoped. Never leak results or controls across sessions.
 - An ungrouped async worker result starts a parent synthesis turn. Results from sibling calls share one final synthesis turn.
 - One-shot workers terminate. Reusable workers retain identity while ready, accept follow-ups as new generations, and require `worker_close` when finished.
-- Child sessions are direct children: no recursive extension loading or descendant orchestration.
+- Child sessions are direct Pi Orchestrate children: no recursive Pi Orchestrate loading or descendant Pi worker sessions.
 - Project workers and project context are read only when Pi reports the project trusted.
 - Cleanup is idempotent and best-effort without leaving lifecycle state unsettled.
 - Model-facing output and collapsed UI stay bounded; structured details retain the complete state needed for reconstruction.

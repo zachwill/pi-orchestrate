@@ -173,31 +173,44 @@ describe("published documentation", () => {
   test("README covers the current package and orchestration contract", async () => {
     const [manifest, readme] = await Promise.all([readManifest(), readText(readmePath)]);
     const install = markdownSection(readme, "Install");
-    const publicTools = markdownSection(readme, "Public tools");
-    const trustedCatalog = markdownSection(readme, "Trusted worker catalog");
-    const lifecycle = markdownSection(readme, "Lifecycle and process limits");
+    const tools = markdownSection(readme, "Tools");
+    const dispatch = markdownSection(readme, "Dispatch");
+    const results = markdownSection(readme, "Results and ownership");
+    const lifecycle = markdownSection(readme, "Lifecycle");
+    const catalog = markdownSection(readme, "Worker catalog");
+    const trust = markdownSection(readme, "Trust and isolation");
 
     expect(install).toContain(`pi install npm:${manifest.name}`);
 
-    const documentedTools = [...publicTools.matchAll(/^- `([^`]+)`/gm)].map((match) => match[1]);
+    const documentedTools = [...tools.matchAll(/^\| `([^`]+)` \|/gm)].map(
+      (match) => match[1],
+    );
     expect(documentedTools).toEqual([...canonicalTools]);
-    expect(publicTools).toContain("orchestrate({ worker, title, instructions })");
+    expect(tools).toContain("orchestrate({ worker, title, instructions })");
 
-    expectBlockWith(publicTools, [/\borchestrate\b/i, /\bsibling\b/i, /\basynchronously\b/i]);
-    expectBlockWith(publicTools, [/\borchestrate\b/i, /\binline\b/i, /\bblocking\b/i]);
-    expectBlockWith(publicTools, [/\bpoll\b/i, /\borchestration_status\b/i]);
-    expectBlockWith(publicTools, [/\bfinal\b/i, /\bsynthesis\b/i]);
-    expectBlockWith(publicTools, [/\bone-shot\b/i, /\bcompleted\b/i, /\breusable\b/i, /\bready\b/i]);
-    expectBlockWith(publicTools, [/\bworker_send\b/i, /\bworker_close\b/i, /\breusable\b/i]);
+    expectBlockWith(dispatch, [/\bpreflight|validates\b/i, /\bsibling\b/i, /\bindependently\b/i]);
+    expectBlockWith(dispatch, [/\bpure group\b/i, /\basynchronous\b/i, /\bconcurrent\b/i]);
+    expectBlockWith(dispatch, [/\bmixing\b/i, /\binline\b/i, /\bblocking\b/i]);
+    expectBlockWith(dispatch, [/\bworker_send\b/i, /\bsole\b/i, /\basynchronous\b/i]);
+    expectBlockWith(dispatch, [/\binline\b/i, /\bcancellation\b/i, /\bdetaches\b/i]);
 
-    const precedence = trustedCatalog.match(/^\d+\. .*$/gm) ?? [];
-    expect(trustedCatalog).toMatch(/precedence/i);
+    expectBlockWith(results, [/\bsibling\b/i, /\bfinal\b/i, /\bsynthesis\b/i]);
+    expectBlockWith(results, [/\bowner-scoped\b/i, /\bqueue\b/i, /\bnever\b/i]);
+    expectBlockWith(results, [/\bpolling\b/i, /\borchestration_status\b/i]);
+
+    expectBlockWith(lifecycle, [/\bone-shot\b/i, /\bcompleted\b/i, /\breusable\b/i, /\bready\b/i]);
+    expectBlockWith(lifecycle, [/\bworker_send\b/i, /\bworker_close\b/i, /\bworker_abort\b/i]);
+    expectBlockWith(lifecycle, [/\bprocess\b/i, /\breloads?\b/i, /\bclose\b/i]);
+
+    const precedence = catalog.match(/^\d+\. .*$/gm) ?? [];
+    expect(catalog).toMatch(/precedence/i);
     expect(precedence).toHaveLength(3);
     expect(precedence[0]).toMatch(/package/i);
     expect(precedence[1]).toMatch(/user/i);
     expect(precedence[2]).toMatch(/project/i);
     expect(precedence[2]).toMatch(/trust/i);
 
-    expectBlockWith(lifecycle, [/\breusable\b/i, /\bprocess\b/i, /\bclose\b/i]);
+    expectBlockWith(trust, [/\bdirect Pi children\b/i, /\bdescendant Pi worker sessions\b/i]);
+    expectBlockWith(trust, [/\bbash\b/i, /\bexternal processes\b/i, /\bagent CLIs\b/i]);
   });
 });

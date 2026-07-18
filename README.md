@@ -1,6 +1,6 @@
 # Pi Orchestrate
 
-[`@zachwill/pi-orchestrate`](https://www.npmjs.com/package/@zachwill/pi-orchestrate) adds concurrent worker orchestration to [Pi](https://pi.dev). It helps a parent agent delegate bounded work, message independent workers concurrently, and synthesize each response as it arrives.
+[`@zachwill/pi-orchestrate`](https://www.npmjs.com/package/@zachwill/pi-orchestrate) adds concurrent worker orchestration to [Pi](https://pi.dev). A parent agent can delegate bounded work to isolated child sessions, run independent tasks concurrently, and synthesize the results.
 
 ## Install
 
@@ -8,60 +8,86 @@
 pi install npm:@zachwill/pi-orchestrate
 ```
 
-Pi packages execute with your system permissions. Review the package and worker definitions before trusting them.
+Pi packages run with your system permissions. Review this package and every worker definition you trust.
 
-## Public tools
+## Tools
 
 Pi Orchestrate adds exactly five tools:
 
-- `orchestrate` dispatches one task with `orchestrate({ worker, title, instructions })`. Send independent tasks as sibling `orchestrate` calls in the same assistant message.
-- `orchestration_status` inspects the trusted catalog, catalog diagnostics, runs, and worker states without exposing full task instructions.
-- `worker_send` sends follow-up instructions to an owned reusable worker in the `ready` state.
-- `worker_abort` stops owned active work that is no longer needed.
-- `worker_close` closes an owned reusable worker in the `ready` state.
+| Tool | Call | Purpose |
+| --- | --- | --- |
+| `orchestrate` | `orchestrate({ worker, title, instructions })` | Start one worker task |
+| `orchestration_status` | `orchestration_status({})` | Inspect the trusted catalog, diagnostics, runs, and worker states |
+| `worker_send` | `worker_send({ worker_id, instructions })` | Send a follow-up to a ready reusable worker |
+| `worker_abort` | `worker_abort({ worker_ids })` or `worker_abort({ all: true })` | Stop active owned work |
+| `worker_close` | `worker_close({ worker_id })` | Close a ready reusable worker |
 
-Each `orchestrate` call first performs atomic input, catalog, and model preflight before its worker starts. Sibling calls are admitted independently: one rejected call does not prevent valid siblings from starting. After acceptance, a resource startup failure becomes that worker's `failed` result and does not roll back or stop sibling calls.
+`title` is a label. `instructions` is the complete worker brief. Collapsed tool calls preview those instructions; expanded calls show them in full.
 
-Pi executes sibling tool calls concurrently, so independent `orchestrate` calls start concurrently without an extension-level group limit or hidden throttle. Exact unchanged worker instructions remain visible in each tool call: collapsed calls preview the message, and expanded calls show the full brief. Titles are labels, never replacements for instructions.
+## Dispatch
 
-A sole `orchestrate` call or a pure group of sibling `orchestrate` calls runs asynchronously. Pi accepts a pure group concurrently and yields the parent turn. Mixing `orchestrate` with another tool makes it inline and blocking. `worker_send` is asynchronous only as the sole tool call in its assistant message. Inline work receives the parent turn's cancellation signal. Accepted async work does not retain that signal and continues independently.
+Each `orchestrate` call validates its input, worker definition, and model before allocating IDs or starting a session. Calls are admitted independently: a rejected sibling does not block valid siblings. After admission, a startup or prompt failure settles only that worker as `failed`.
 
-Async worker responses enter the transcript individually as workers finish. An ungrouped response starts the parent's synthesis turn. Responses from sibling calls share one final synthesis turn. The bottom widget is ephemeral and shows active work only; completed, failed, aborted, and reusable ready workers disappear immediately. An inline call shows its single current response in the live tool output while it blocks.
+Pi executes sibling tool calls concurrently, with no extension-level group limit or hidden throttle. Send every known independent task as sibling `orchestrate` calls in one assistant message.
 
-`orchestration_status` is for diagnostics and recovery, never a normal completion mechanism. Do not poll it for completion. If the owning session becomes inactive, its workers continue and completed results remain queued. Those results become available only when that exact owning session resumes; they are never delivered to another session.
+Execution mode depends on the complete tool-call group:
 
-Each run owns exactly one worker generation. Worker IDs identify live worker sessions. A reusable worker keeps the same worker ID across `worker_send` follow-ups, with each follow-up result belonging to a new run. One-shot workers finish as `completed`. Reusable workers deliver as `ready`, remain available for follow-up, and wait for `worker_send` or `worker_close`. Use `worker_abort` only for active work by `worker_ids` or `all`, not to close a ready worker.
+- One `orchestrate` call is asynchronous.
+- A pure group of sibling `orchestrate` calls is asynchronous and concurrent.
+- Mixing `orchestrate` with any other tool makes the orchestration calls inline and blocking.
+- `worker_send` is asynchronous only when it is the sole tool call in the message.
 
-## Parent orchestration contract
+Inline work follows the parent turn's cancellation signal. Accepted asynchronous work detaches from that signal and continues independently.
 
-Pi Orchestrate automatically injects the authoritative orchestration contract and trusted worker catalog into the parent system prompt. In summary, the parent owns the task end to end:
+## Results and ownership
+
+Asynchronous worker results enter the transcript individually. An ungrouped result starts a parent synthesis turn. Results from a sibling orchestration group share one final synthesis turn after every admitted member settles.
+
+All state and delivery are owner-scoped. If an owning session is busy or inactive, completed results queue until that exact session is active and idle again. They are never delivered to another session.
+
+`orchestration_status` is for diagnostics and recovery, not completion polling. It exposes bounded owner-scoped state without full task instructions or worker prompts.
+
+The bottom widget shows active work only. Completed, failed, aborted, and reusable ready workers disappear immediately. Inline work shows its current response in the live tool output while it blocks.
+
+## Lifecycle
+
+A run represents one worker generation. A worker ID identifies the live worker session.
+
+- A **one-shot** worker succeeds as `completed` and terminates.
+- A **reusable** worker succeeds as `ready` and keeps the same worker ID.
+- `worker_send` starts a new run on that ready reusable worker.
+- `worker_close` closes a ready reusable worker.
+- `worker_abort` stops active work only; `{ all: true }` does not close ready workers.
+
+Workers, runs, and queued delivery survive extension reloads and session switches within the same Pi process. Reusable workers do not survive process exit, so close them when continuity is no longer needed.
+
+## Parent contract
+
+Pi Orchestrate injects the authoritative orchestration contract and trusted catalog into the parent system prompt. The parent remains responsible for the task end to end:
 
 1. Keep trivial or tightly coupled work in the parent session.
-2. Give every delegated task a full brief: objective, paths and scope, forbidden actions, context, constraints, observable success, checks, and expected output.
-3. Dispatch every known independent task with a sibling `orchestrate` call in the same assistant message.
-4. Keep an async `orchestrate` call or pure sibling group separate from other tools, then yield after acceptance. Make `worker_send` the sole tool call when it should run asynchronously.
-5. Review delivered evidence and changes, resolve conflicts, integrate deliberately, and run the relevant verification.
-6. Deliver the final answer from the parent session.
+2. Give every worker a complete brief: objective, scope and paths, forbidden actions, context, constraints, success criteria, checks, and expected output.
+3. Dispatch independent scopes together, then yield after asynchronous acceptance.
+4. Review evidence and changes, resolve conflicts, integrate deliberately, and verify the result.
+5. Produce the final answer from the parent session.
 
-Workers provide evidence or bounded changes. They do not replace parent judgment.
+Workers provide bounded evidence or changes. They do not replace parent judgment.
 
-## Trusted worker catalog
+## Worker catalog
 
-Definitions are loaded by name with this precedence:
+Definitions are loaded by name in this precedence order, from lowest to highest:
 
-1. Package workers in [`examples/workers/`](examples/workers/) are active fallbacks automatically.
-2. User definitions in `~/.pi/agent/pi-orchestrate/workers/*.md` override package fallbacks by name.
-3. Project definitions in `<project>/.pi/pi-orchestrate/workers/*.md` override user and package definitions by name, but only after Pi trusts the project.
+1. Package fallbacks in [`examples/workers/`](examples/workers/)
+2. User definitions in `~/.pi/agent/pi-orchestrate/workers/*.md`
+3. Project definitions in `<project>/.pi/pi-orchestrate/workers/*.md`, only after Pi trusts the project
 
-An untrusted project contributes no worker definitions. Review project definitions as part of Pi's normal project-trust flow before enabling them.
+A higher-precedence definition replaces a lower one with the same `name`. Pi performs no project-worker discovery for an untrusted project.
 
-All three package fallbacks intentionally omit `model`, so they portably inherit the parent model active at dispatch. User and trusted project overrides are the model-specialization points: add `model` to an override only when that worker needs a specific provider/model.
-
-To customize a fallback, create a Markdown definition manually at the user or project path with the same filename and `name`. The linked package fallbacks are templates. This instruction does not assume your shell is inside a source checkout or that an npm-installed package has a particular current working directory.
+The package includes `scout`, `investigator`, and `worker` fallbacks. They omit `model`, so they inherit the parent's active model at dispatch. To customize one, copy its definition to the user or project directory and keep the same filename and `name`. Add an explicit model only when that worker needs one.
 
 ## Worker definitions
 
-A worker is a strict Markdown system prompt. Its basename must equal its `name`:
+A worker is a regular Markdown file whose basename matches its `name`:
 
 ```md
 ---
@@ -71,29 +97,32 @@ tools: read, grep, find, ls, bash
 lifecycle: reusable
 ---
 
-You are a review worker. Inspect only the assigned scope and return concise findings with file paths.
+Inspect the assigned scope and return concise findings with file paths.
 ```
 
-Frontmatter supports these fields:
+| Field | Rule |
+| --- | --- |
+| `name` | Required; must match the filename |
+| `description` | Required; used by the parent to choose a worker |
+| `tools` | Required, nonempty list using `read`, `bash`, `edit`, `write`, `grep`, `find`, or `ls` |
+| `lifecycle` | Required; exactly `one-shot` or `reusable` |
+| `model` | Optional `provider/model`; omitted inherits the parent model |
+| `thinking` | Optional Pi thinking level |
+| `skills` | Optional; omitted uses normal discovery, a list is an exact allowlist, and `[]` disables skills |
+| `compaction` | Optional worker compaction settings |
 
-- `name` and `description` are required.
-- `tools` and `lifecycle` are required. Grant the smallest useful tool set.
-- `model` is optional. When omitted, the worker inherits the parent model active when dispatched.
-- `thinking`, `skills`, and `compaction` are optional.
-- Omitted `skills` uses Pi's normal discovered skills. A nonempty `skills` list is an exact name allowlist, and `skills: []` disables skills.
-- `lifecycle` must be exactly `one-shot` or `reusable`.
-- The Markdown body must be nonempty.
+The Markdown body is the worker system prompt and must be nonempty. Unknown fields, invalid values, symlinks, and filename/name mismatches invalidate a definition.
 
-Unknown fields, invalid values, filename/name mismatches, and empty bodies invalidate a definition. A read-only prompt is not enforcement when its tools can write.
+Grant the smallest useful tool set. A read-only prompt is not enforcement when the worker has tools that can write.
 
-## Lifecycle and process limits
+## Trust and isolation
 
-Use one-shot workers for bounded investigation, review, and implementation. Use reusable workers only when follow-up continuity matters. Reusable workers remain live in memory while the Pi process is running; they do not survive process exit. Close ready reusable workers when the conversation is complete.
+Workers receive fresh durable Pi session lineage without the parent's conversation. They still run in the parent process and are not security sandboxes: they share your filesystem and environment permissions.
 
-## Isolation, trust, and writes
+Workers use normal global Pi settings, authentication, packages, extensions, skills, and context. A trusted project may also contribute project-scoped definitions, settings, extensions, skills, and context. An untrusted project contributes none of those project-scoped resources; global resources remain available.
 
-Worker sessions are isolated from the parent's conversational context, but they run in-process and are not sandboxes. They share the parent process's filesystem and environment permissions. Treat worker prompts, optional skills, models, and tool grants as trusted code.
+Other configured extensions, including provider integrations such as `@benvargas/pi-claude-code-use`, load normally in worker sessions. Pi Orchestrate excludes itself, so workers remain direct Pi children. The injected boundary forbids recursive Pi Orchestrate delegation and descendant Pi worker sessions.
 
-Workers use regular persisted Pi global settings, authentication, packages, extensions, skills, and context. Trusted projects also contribute their project settings and resources; untrusted projects do not. Extensions are active in print mode for the complete worker lifecycle, including resource discovery and provider request hooks. Pi Orchestrate excludes its own package before child extension factories execute, so workers remain direct children while other configured extensions—including provider integrations such as `@benvargas/pi-claude-code-use`—load normally. Worker definitions still provide the exact bounded tool allowlist.
+The worker definition controls the Pi tool allowlist, not operating-system authority. A trusted worker with `bash` can launch explicitly required external processes, including agent CLIs.
 
-Pi Orchestrate performs no automatic filesystem writes. A worker writes only when its instructions and granted tools cause it to do so. Parallel workers must have non-overlapping write scopes, and the parent must inspect and verify their changes.
+Pi Orchestrate performs no automatic filesystem writes. Workers write only through their granted tools and instructions. Give concurrent workers non-overlapping write scopes, then inspect and verify their changes in the parent.
