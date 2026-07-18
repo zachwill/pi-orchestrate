@@ -1,109 +1,104 @@
 ---
 name: effect
-description: |
-  Opinionated guide for building production TypeScript applications with Effect v4. Use when implementing Effect workflows, services, layers, schemas, configuration, schedules, caches, streams, HTTP clients, or tests.
+description: "Design, implement, migrate, review, and test production TypeScript with Effect v4. Use for domain modeling, Effect workflows, services, layers, schemas, configuration, schedules, caches, streams, HTTP clients, concurrency, resources, Promise interop, or Effect code review."
 license: MIT
-compatibility: Requires Effect v4. Verify APIs against the version pinned in this repository.
 ---
 
 # Effect
 
-Use current Effect v4 APIs and the production defaults in this skill. Established project conventions still take precedence unless the task is explicitly changing them.
+Write Effect code whose domain, failures, dependencies, lifetime, interruption, tests, and telemetry are obvious from the local code.
 
-## Source Rule
+Good Effect code is mechanically consistent rather than combinator-dense. Keep pure logic pure. Use Effect where behavior has meaningful failure, dependencies, concurrency, cancellation, resource ownership, retries, scheduling, observability, or boundary validation.
+
+## Source Authority
 
 Check these before guessing:
 
-- the nearest `AGENTS.md` and any project-local Effect practices doc
-- the project-pinned `effect` package source and version
-- current upstream Effect source when the installed package does not answer the question
+1. the nearest `AGENTS.md` and project-local Effect practices
+2. the installed `effect` declarations and source at the repository-pinned version
+3. upstream source at that exact version when local source is incomplete
+4. current upstream only as non-authoritative research
 
-## Project Conventions
+This repository pins `effect@4.0.0-beta.99`. Verify beta-sensitive Layer, FiberMap, ManagedRuntime, Schema, testing, and unstable APIs before use.
 
-This repository currently pins an Effect v4 beta. Treat the installed declarations and source as authoritative because APIs can differ from later v4 documentation. In particular, verify Layer, FiberMap, ManagedRuntime, Schema, and testing APIs before using them.
+Established project conventions override generic examples. Preserve behavior before changing architecture unless the task explicitly requests both.
 
-- Keep Pi-facing tools and hooks as Promise/callback adapters where the SDK requires them.
-- Keep TypeBox for Pi tool parameter schemas; use Effect Schema for application boundaries such as worker frontmatter and persisted message details.
-- Keep the orchestration state machine, synchronous listeners, and delivery bookkeeping as direct TypeScript unless Effect adds concrete lifecycle, interruption, resource-safety, or validation value.
-- Preserve caller `AbortSignal.reason` explicitly at Promise boundaries; Effect interruption does not automatically retain that rejection identity.
-- Keep `bun:test`. Use Effect synchronization and `TestClock` inside Bun tests when Effect owns the behavior; do not add a second test runner solely to obtain `it.effect`.
+## Repository Non-Negotiables
+
+- Keep Pi-facing tools, hooks, and sessions as Promise/callback adapters where the SDK requires them.
+- Keep TypeBox for Pi tool parameter schemas. Use Effect Schema for application boundaries such as worker frontmatter and persisted message details.
+- Prefer `Schema.Struct(...)` plus a same-name `interface`; do not default to `Schema.Class`.
+- Use `Schema.TaggedErrorClass` for expected Effect errors when it fits.
+- Prefer `Context.Service` for application capabilities.
+- Keep `bun:test`; run Effect at the Bun test boundary and use Effect testing primitives internally.
+- Preserve caller `AbortSignal.reason` explicitly at Promise boundaries.
+- Keep the orchestration state machine, synchronous listeners, and delivery bookkeeping as direct TypeScript unless Effect adds concrete validation, interruption, concurrency, or resource-safety value.
+
+## Working Method
+
+Before writing `Effect.gen`:
+
+1. Model meaningful domain distinctions.
+2. Identify untrusted boundaries and decode once.
+3. Name expected failures at the abstraction level callers can use.
+4. Separate configured values from shared capabilities.
+5. Match resource and fiber lifetimes to product ownership.
+6. Decide how interruption reaches external work.
+7. Identify the narrow external capability tests will replace.
+8. Choose operation names and bounded telemetry attributes.
+
+Keep Effects as values until a real executable, Pi, or test boundary. Compose implementation Layers at that edge rather than deep in business workflows.
 
 ## Branch Chooser
 
-Read only the branch references that match the task.
+Read every reference matching the task before editing.
 
-- Data models, schemas, brands, variants, optional keys, or decoders: read `references/SCHEMA.md`.
-- Services, module surfaces, layers, runtime wiring, errors, `Effect.fn`, or test services: read `references/SERVICES_LAYERS.md`.
-- Runtime config, env variables, `ConfigProvider`, or `layerConfig`: read `references/CONFIG.md`.
-- Retry, repeat, polling, backoff, jitter, rate-limit-aware policies, or pass loops: read `references/SCHEDULING.md`.
-- Memoization, per-key TTL caches, deduplicating concurrent lookups, or request batching: read `references/CACHING.md`.
-- Streams, event sources, async iterables, queues/pubsubs, pagination, backpressure, or stream consumers: read `references/STREAMS.md`.
-- Outgoing HTTP calls, Effect HttpClient, status handling, or HTTP rate limiting: read `references/HTTP_CLIENTS.md`.
-- Effect tests, time, sleeps, concurrency synchronization, or fakes: read `references/TESTING.md`.
-- Pi SDK, extension, session, child-agent, or orchestration work: read `references/pi-tacit-knowledge.md`.
+- Domain modeling judgment, failures, dependency design, observability, primitives, or review: `references/DESIGN.md`
+- Schemas, brands, variants, optional keys, construction, or decoding: `references/SCHEMA.md`
+- Services, module surfaces, Layers, runtime wiring, or `Effect.fn`: `references/SERVICES_LAYERS.md`
+- Scope, acquisition, finalization, fibers, interruption, cancellation, or runtimes: `references/RESOURCES_CONCURRENCY.md`
+- Promise-to-Effect migration, behavioral parity, or temporary bridges: `references/MIGRATION.md`
+- Runtime config, environment variables, `ConfigProvider`, or `layerConfig`: `references/CONFIG.md`
+- Retry, repeat, polling, backoff, jitter, rate limits, or pass loops: `references/SCHEDULING.md`
+- Memoization, keyed TTL caches, lookup dedupe, or request batching: `references/CACHING.md`
+- Streams, event sources, async iterables, queues, PubSub, pagination, or backpressure: `references/STREAMS.md`
+- Outgoing HTTP, status handling, retries, or rate limiting: `references/HTTP_CLIENTS.md`
+- Tests, virtual time, synchronization, test Layers, or fakes: `references/TESTING.md`
+- Pi SDK, extension, session, child-agent, or orchestration boundaries: `references/PI_BOUNDARIES.md`
+- Research provenance behind Pi guidance, only when auditing the guidance itself: `references/PI_EVIDENCE.md`
 
-If a task spans several branches, read all matching files before editing.
+## Universal Rules
 
-## Core Defaults
-
-- Compose workflows with `Effect.gen(function* () { ... })`.
-- Define public service methods and non-trivial internal service methods with `Effect.fn("Domain.operation")`.
-- Use `Effect.fnUntraced` only for internal helpers where stack-frame/span metadata is intentionally unnecessary.
-- Prefer `Context.Service` for application services when the codebase has not standardized on another current service-tag style.
-- Build real service implementations with `Layer.effect(Service, Effect.gen(...))` and return `Service.of({ ... })`.
-- Model records with `Schema.Struct(...)` plus a same-name `interface`.
-- Model typed Effect errors with `Schema.TaggedErrorClass`.
-- Read runtime config through `Config`, not direct `process.env` access in application logic.
-- Use `Schedule` for retry, repeat, polling, pacing, and backoff policies.
-- Use `Stream` for effectful sources that emit many values over time and need pull, backpressure, interruption, or transformation.
-- Prefer Effect HTTP client modules for outgoing HTTP in Effect applications when their typed errors, layers, and client transforms are useful.
-- Prefer Effect-aware tests, explicit layers, and deterministic synchronization over sleeps.
-- Prefer decoders and `schema.makeEffect(...)` at untrusted boundaries; reserve throwing `schema.make(...)` for trusted construction, and never use casts to skip validation.
-
-## Quick Selection Guide
-
-- Ordinary object record: `Schema.Struct(...)` plus same-name `interface`.
-- Scalar ID/value object: constrained branded schema.
-- Internal workflow decision or state: `Data.TaggedEnum<...>` plus `Data.taggedEnum<...>()` constructors and exhaustive `$match`.
-- Reusable boundary-crossing tagged variant: `Schema.TaggedStruct(...)` plus same-name `interface`.
-- Boundary-crossing tagged union: `Schema.TaggedUnion(...)` with `.cases`, `.guards`, and `.match`.
-- External/custom discriminator such as `type`: `Schema.Struct({ type: Schema.tag("variant"), ... })` plus `Schema.toTaggedUnion("type")` when union helpers are needed.
-- Expected typed failure: `Schema.TaggedErrorClass`.
-- Unknown boundary payload: `Schema.decodeUnknownEffect(...)`.
-- Service boundary: `Context.Service<Service, Interface>()(...)` plus `Layer.effect(...)` plus `Service.of(...)`.
-- Public or non-trivial internal service method: `Effect.fn("Domain.operation")`.
-- Runtime configuration: `Config` recipes read in layers; override with `ConfigProvider` in tests.
-- Event source: `Stream` consumed with `Stream.runForEach(...)` and forked with `Effect.forkScoped` in the owning layer.
-- Queue-backed event source: `Queue` for the producer boundary, `Stream.fromQueue(...)` for consumers.
-- Broadcast event source: `PubSub` / `Stream.fromPubSub(...)` or `SubscriptionRef` for latest-value state.
-- Polling worker: `runPass().pipe(Effect.repeat(Schedule.spaced(...)))`, with typed pass failures handled before repeat.
-- Retry transient operation: `Effect.retry(...)` / `Effect.retryOrElse(...)` with a bounded `Schedule`.
-- Keyed lookup cache with TTL and concurrent-lookup dedupe: prefer `Cache.make(...)` / exit-aware `Cache.makeWith(...)` when their lifecycle and eviction model fit.
-- Memoize a single effect result: `Effect.cached(...)` / `Effect.cachedWithTTL(...)`.
-- Batch N keys into one backend call (only when a real batch endpoint exists): `Effect.request(...)` + `RequestResolver`.
-- HTTP request in an Effect application: prefer Effect `HttpClient` plus request/response schema decoding.
-- HTTP transient retry: `HttpClient.retryTransient(...)`.
-- Time-sensitive test: `TestClock`, not real sleeping.
-- Concurrent/background test synchronization: `Deferred`, `Queue`, `Latch`, `Ref`, or explicit test hooks.
-
-## Boundary Rules
-
-- Keep HTTP handlers thin: decode input, read context, call services, map typed errors to transport responses.
-- Keep business rules in services or domain functions, not transport handlers.
-- Wrap HTTP clients, SDKs, CLIs, and external integrations in named effects at adapter boundaries.
-- Decode persisted rows with Schema or SQL-specific helpers when values are not trivially trusted.
-- Keep provider/network calls outside authoritative database transactions.
-- Catch or retry only when the current boundary has a truthful response.
-- Retry only when the operation has proven idempotency.
-- Let exhausted failures remain visible unless the boundary has a real fallback.
+- Decode and normalize unknown values at ingress; do not revalidate established domain values.
+- Keep service interfaces small, semantic, and free of adapter mechanics.
+- Request stable capabilities where used; pass selected workers, models, snapshots, IDs, and request policies as values.
+- Use `Effect.fn("Domain.operation")` at meaningful service, workflow, tool, provider, and persistence boundaries.
+- Use `Effect.gen` for sequential workflows and pipelines for local transformations.
+- Translate infrastructure failures at service boundaries. Recover only where the current boundary has a truthful response.
+- Use Effect's coordination and lifecycle primitives instead of manual mutable approximations.
+- Build realistic fakes for narrow external capabilities and test the real application workflow.
+- Keep Promise interop at framework and SDK edges; avoid Promise–Effect ping-pong.
+- Prefer readable domain helpers over clever combinator chains.
 
 ## Do Nots
 
-- Do not use `as any`, non-null assertions, or unchecked casts to silence Effect typing problems.
-- Do not introduce `Schema.Class` or `Schema.TaggedClass` as default app data-modeling patterns.
-- Do not hand-roll `_tag` error classes when `Schema.TaggedErrorClass` fits.
-- Do not use cause-level recovery when typed-error recovery is enough.
-- Do not use `Layer.mergeAll(...)` or `provideMerge(...)` as blind make-it-compile tools.
-- Do not hide required application authority, credentials, persistence, transports, or external services behind `Context.Reference` defaults.
-- Do not add arbitrary `Effect.sleep(...)` to tests when a deterministic synchronization primitive is available.
-- Do not hand-roll Map/TTL/prune caches or in-flight dedupe when `effect/Cache` fits.
+- Do not use `as any`, non-null assertions, or unchecked casts to bypass Effect typing.
+- Do not wrap pure functions or static constants in Effect or services without a concrete benefit.
+- Do not hide required authority or infrastructure behind `Context.Reference` defaults, deep `Effect.provide`, or transitive default Layers.
+- Do not use `Layer.mergeAll` or `provideMerge` as blind make-it-compile tools.
+- Do not swallow causes, exhausted retries, finalizer failures, or interruption without an explicit policy.
+- Do not add arbitrary sleeps to tests or hand-roll caches, queues, in-flight dedupe, or resource ownership when Effect already models the protocol.
+
+## Review Standard
+
+A reader should be able to answer locally:
+
+- What does this operation need and return?
+- How can it fail, and at what abstraction level?
+- Which values have already been validated?
+- What does it own, and who closes it?
+- Can interruption reach the underlying work?
+- Which capability is replaced in tests?
+- Where does the operation appear in traces and logs?
+
+If those answers are obscured, simplify the design before adding more Effect machinery.

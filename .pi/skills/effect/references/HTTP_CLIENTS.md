@@ -2,14 +2,18 @@
 
 Use this when writing outgoing HTTP calls, Effect HttpClient adapters, status classification, HTTP retries, or rate limiting.
 
-Use Effect HTTP client modules for outgoing HTTP in app/provider code:
+The Effect HTTP modules used here are unstable and beta-sensitive:
 
 - `effect/unstable/http/HttpClient`
 - `effect/unstable/http/HttpClientRequest`
 - `effect/unstable/http/HttpClientResponse`
 - `effect/unstable/http/HttpClientError`
 
-Prefer Effect HttpClient in Effect application and provider code when its typed errors, layers, and transforms are useful. Raw `fetch` remains reasonable for browser or edge constraints, small adapters, platform transports, and libraries that intentionally avoid unstable Effect HTTP APIs.
+Verify every API against the repository-pinned Effect source before use.
+
+Choose Effect HttpClient when its typed errors, Layers, schema helpers, request transforms, retries, or rate limiter materially simplify an Effect provider. Raw `fetch` inside a disciplined adapter remains reasonable for small boundaries, browser or edge constraints, platform transports, and code that should not depend on unstable Effect HTTP APIs.
+
+Do not migrate an existing fetch adapter solely for stylistic consistency. Migrate when the Effect client removes real boundary, retry, rate-limit, or Layer machinery.
 
 ## Boundary Shape
 

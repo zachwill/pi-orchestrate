@@ -2,6 +2,18 @@
 
 Use this when touching data models, DTOs, row schemas, wire contracts, brands, variants, optional fields, or decoders.
 
+## Model Before Computing
+
+Define meaningful domain values before writing the workflow that consumes them. Spend types on distinctions that can realistically be confused, persisted incorrectly, or passed through the wrong boundary. Do not brand arbitrary strings without an operational reason.
+
+Treat Schema as the executable source of truth for boundary data. Derive static types, decoding, encoding, and downstream representations from it rather than maintaining a separate interface and validator that can drift.
+
+Decode and normalize untrusted data once at ingress. Internal functions should accept validated domain values and should not repeat boundary checks.
+
+```text
+unknown input -> Schema decode -> validated domain value -> application logic
+```
+
 ## Records
 
 Default to `Schema.Struct(...)` plus a same-name `interface`.
@@ -61,8 +73,10 @@ Guidance:
 
 ## Nominal Values
 
-- Use constrained branded schemas for scalar IDs and value objects.
-- Use normal schema constraints before `Schema.brand(...)` for most code.
+- Use constrained branded schemas for scalar IDs and value objects when confusion would be operationally meaningful.
+- Apply normalization and ordinary constraints before `Schema.brand(...)`; the brand should certify the completed boundary contract.
+- Good candidates include owner/session/message IDs, validated URLs, positive capacities, normalized addresses, units, and timestamps with distinct meanings.
+- Do not brand values merely to make the type system look more domain-oriented.
 - Reach for `Schema.fromBrand(...)` only when the project already models brands with `Brand` constructors or wants the check packaged with the brand constructor.
 
 ## Variants

@@ -1,97 +1,136 @@
-# Services, Layers, And Modules
+# Services, Layers, And Operations
 
-Use this when defining service tags, module surfaces, layer implementations, runtime wiring, typed errors, or `Effect.fn` operation boundaries.
+Use this when defining service tags, capability interfaces, Layer implementations, runtime wiring, test services, or `Effect.fn` boundaries.
 
-## Module Surface
+## Services Are Domain Capabilities
 
-One opinionated application-module style uses file-local role names and one canonical ES module namespace projection. Follow the existing codebase's module style when it has one; this convention is not required by Effect.
+A service represents a coherent thing the application can do. Its name should belong in the product glossary: `WorkerStore`, `Catalog`, `Delivery`, `ChildSession`, or `ModelProvider`.
+
+Avoid generic `Utils`, `Manager`, and `Helpers` services containing unrelated operations.
+
+Keep interfaces small and semantic. Expose `findById`, `runGeneration`, or `publishSettlement`, not database connections, SQL strings, raw SDK clients, or transport mechanics. The implementation owns those details.
+
+Use a service when a capability performs effects, owns resources, varies by environment, has multiple implementations, or needs narrow substitution in tests. Keep static constants and configured per-operation data as ordinary values.
+
+## Standard Service Shape
 
 ```ts
 export interface Interface {
-  readonly get: (id: UserId) => Effect.Effect<User, NotFound | PersistenceError>
+  readonly get: (id: WorkerId) => Effect.Effect<Worker, NotFound | ReadError>
+  readonly save: (worker: Worker) => Effect.Effect<void, WriteError>
 }
 
 export class Service extends Context.Service<Service, Interface>()(
-  "@app/UserRepo",
+  "@app/WorkerStore",
 ) {}
+```
 
+Use descriptive service class names instead when the module does not provide a domain namespace:
+
+```ts
+export class WorkerStore extends Context.Service<WorkerStore, Interface>()(
+  "@app/WorkerStore",
+) {}
+```
+
+Follow the surrounding module export style. Do not introduce TypeScript `namespace` declarations or self-referential namespace projections merely for organization.
+
+## Live Implementations
+
+Default effectful implementations to `Layer.effect` and return the tag's validated constructor:
+
+```ts
 export const layer = Layer.effect(
   Service,
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient
 
-    const get = Effect.fn("UserRepo.get")(function* (id: UserId) {
-      // ...
+    const get = Effect.fn("WorkerStore.get")(function* (id: WorkerId) {
+      const row = yield* sql.findWorker(id).pipe(
+        readError("WorkerStore.get", { workerId: id }),
+      )
+
+      if (row === undefined) {
+        return yield* Effect.fail(new NotFound({ workerId: id }))
+      }
+
+      return yield* Schema.decodeUnknownEffect(Worker)(row).pipe(
+        readError("WorkerStore.decode", { workerId: id }),
+      )
     })
 
-    return Service.of({ get })
+    const save = Effect.fn("WorkerStore.save")(function* (worker: Worker) {
+      yield* sql.saveWorker(worker).pipe(
+        writeError("WorkerStore.save", { workerId: worker.id }),
+      )
+    })
+
+    return Service.of({ get, save })
   }),
 )
-
-export class NotFound extends Schema.TaggedErrorClass<NotFound>()(
-  "UserRepo.NotFound",
-  { id: UserId },
-) {}
-
-export * as UserRepo from "./user-repo.js"
 ```
 
-Consumers use the module namespace.
+Choose the constructor that matches acquisition:
 
 ```ts
-import { UserRepo } from "./user-repo.js"
+Layer.succeed(Service, impl)       // already-built value
+Layer.sync(Service, () => impl)    // lazy synchronous acquisition
+Layer.effect(Service, makeEffect)  // effectful acquisition
+```
 
-const program = Effect.gen(function* () {
-  const repo = yield* UserRepo.Service
-  return yield* repo.get(id)
+Use `Layer.effectContext` when one acquisition intentionally provides several tags, especially one stateful fake backing production and test-control interfaces. Use `Layer.unwrap` when configuration or runtime discovery selects a Layer.
+
+## Dependencies Emerge From Use
+
+Request shared capabilities where the workflow uses them:
+
+```ts
+const runGeneration = Effect.fn("Worker.runGeneration")(function* (input: GenerationInput) {
+  const sessions = yield* ChildSession.Service
+  const delivery = yield* Delivery.Service
+
+  const result = yield* sessions.run(input)
+  yield* delivery.publish(result)
+  return result
 })
 ```
 
-The self-export is deliberate. It lets the file remain the module while giving every consumer the same domain-first name, without a TypeScript `namespace`, wrapper object, or repeated consumer-side aliases.
+Pass selected workers, models, catalog snapshots, IDs, and per-request policy as arguments. These are configured values, not stable shared capabilities.
+
+Do not repeatedly pass stores and adapters positionally through the application. Do not mint a tag for every configured instance.
+
+## Runtime Wiring
+
+Business workflows request capabilities; executable-boundary wiring chooses implementations.
 
 ```ts
-// Sibling module: import the owning leaf directly.
-import { UserRepo } from "./user-repo.js"
+const InfrastructureLive = Layer.mergeAll(DatabaseLive, TelemetryLive)
 
-// Folder or package barrel: relay the identity established by the leaf.
-export { UserRepo } from "./user-repo.js"
+const DomainLive = Layer.mergeAll(WorkerStoreLive, DeliveryLive).pipe(
+  Layer.provide(InfrastructureLive),
+)
+
+const AppLive = SchedulerLive.pipe(Layer.provide(DomainLive))
 ```
 
-Guidance:
+The root graph should reveal the broad production architecture.
 
-- Do not name the tag class `UserRepo` inside `user-repo.ts`; the module namespace is the domain name.
-- In this module style, single-file modules self-export their canonical namespace at the bottom: `export * as UserRepo from "./user-repo.js"`.
-- Sibling modules import that namespace from the owning leaf; they do not import through their own aggregate barrel.
-- Folder and package barrels relay established leaf identities with `export { UserRepo } from "./user-repo.js"`.
-- The resulting `UserRepo.UserRepo === UserRepo` self-reference is unusual. Use this pattern only where the runtime and toolchain support it; otherwise use named exports or a separate barrel.
-- Export only intentional surface; keep local schemas, row codecs, helpers, and implementation details unexported.
-- Do not introduce TypeScript `namespace` declarations for organization.
-- Use a named service class such as `class UserRepo extends Context.Service...` when an external library or existing codebase does not use module namespace style.
+- Use `Layer.provide` when an implementation dependency should be hidden.
+- Use `Layer.provideMerge` only when that dependency intentionally remains available downstream.
+- Use `Layer.mergeAll` for independent services that should all remain exposed.
+- Prefer flat, named, topologically understandable subgraphs.
+- Keep authority-bearing infrastructure and environment-specific choices explicit at the root.
+- Use `Layer.fresh` or local provision only when a test or operation needs isolated acquisition.
+- Build and memoize shared clients, caches, and Layers at their owning lifetime, not per operation.
 
-## Layer Constructors
-
-Choose the layer constructor that matches the thing produced.
-
-```ts
-Layer.succeed(Service, impl)       // already-built service
-Layer.sync(Service, () => impl)    // lazy synchronous service
-Layer.effect(Service, makeEffect)  // effectful service acquisition
-```
-
-Guidance:
-
-- Default real implementations to `Layer.effect(Service, Effect.gen(...))`.
-- Use `Layer.effectContext(...)` when one acquisition intentionally supplies multiple services, especially first-class test stubs or one client backing several service tags.
-- Use `Layer.unwrap(...)` when config or runtime discovery chooses/builds the layer.
-- Use `Layer.fresh(...)` or `Effect.provide(layer, { local: true })` only when a test or operation needs isolated acquisition.
-- Use `Context.Reference` rarely, only for ambient/defaultable runtime references where a safe default is real.
+Do not use `provideMerge` or repeated deep `Effect.provide` calls to make types compile. They conceal dependencies and can duplicate resource acquisition.
 
 ## Long-Lived Work
 
-A layer that starts a stream, listener, worker, subscription, or forever loop must fork that work into the layer scope. Layer acquisition must complete.
+A Layer that starts a stream, listener, worker, subscription, or repeat loop must fork that work into the Layer scope. Acquisition itself must finish.
 
 ```ts
-export const layer = Layer.effectDiscard(
+export const consumerLayer = Layer.effectDiscard(
   Effect.gen(function* () {
     const events = yield* Events.Service
 
@@ -103,66 +142,51 @@ export const layer = Layer.effectDiscard(
 )
 ```
 
-Guidance:
+Use `Effect.forkScoped` for the ordinary case. If service methods must add work to the Layer lifetime, capture `Scope.Scope` during acquisition and use `Effect.forkIn(scope)` internally. Do not expose Scope in the public service interface.
 
-- Use `Effect.forkScoped`, `FiberSet`, or `FiberMap` for scoped background work.
-- Do not run forever work inline during layer acquisition.
-- Do not expose public `start` methods unless the domain explicitly needs manual lifecycle control.
-
-## Runtime Wiring
-
-- Use `Layer.provide(...)` to hide an implementation dependency.
-- Use `Layer.provideMerge(...)` only when the dependency should remain exposed for downstream consumers.
-- Use `Layer.mergeAll(...)` for independent exposed layers.
-- Prefer flat, topologically sorted runtime layer values with named subgraphs.
-- Avoid using `provideMerge` as a blind make-it-compile tool.
-- Avoid hiding important authority or lifecycle dependencies behind broad invisible provisioning.
+Read `RESOURCES_CONCURRENCY.md` before introducing FiberSet, FiberMap, ManagedRuntime, or detached work.
 
 ## Effect.fn
 
-Use extra `Effect.fn(...)` arguments for wrappers that apply to the whole function call. Each transform receives `(effect, ...originalArgs)`.
+Use `Effect.fn("Domain.operation")` for public service methods and meaningful provider, persistence, job, workflow, or tool boundaries.
+
+Extra transforms receive `(effect, ...originalArgs)` and are useful when a whole-function wrapper needs the original arguments:
 
 ```ts
 const readAttachment = Effect.fn("Attachment.read")(
   function* (ref: AttachmentRef) {
     return yield* api.read(ref)
   },
-  (effect, ref) =>
-    effect.pipe(
-      attachmentError("Attachment.read", { attachmentId: ref.id }),
-    ),
+  (effect, ref) => effect.pipe(
+    attachmentError("Attachment.read", { attachmentId: ref.id }),
+  ),
 )
 ```
 
-Good whole-function transforms:
+Good transforms include error classification, localized recovery, spans, log annotations, retry, timeout, cleanup, and result mapping.
 
-- error classification
-- localized recovery
-- logging annotations
-- spans
-- retry
-- timeout
-- ensuring cleanup
-- small local provisioning
-- result mapping
+Keep the generator focused on the workflow. One or two transforms are usually enough. Handle local branches inside the generator rather than building a clever wrapper chain.
 
-Guidance:
+Name operations so traces read as a domain narrative. Add bounded identifiers, provider/model, item counts, retry counts, or cache outcomes when useful; never attach secrets or unbounded private payloads.
 
-- Keep the generator body focused on the core workflow.
-- Use transforms when the wrapper needs original arguments.
-- Do not build long clever pipelines; one or two transforms is usually enough.
-- Do not use this for local branch-level handling inside the workflow.
+## Error Translation
 
-## Operation Error Helpers
+Map infrastructure failures into errors at the service abstraction level. Callers should not need to distinguish socket, JSON, pool, and driver errors when their only truthful response is `WorkerStore.ReadError`.
 
-For boundary errors with operation labels, prefer a shared curried `mapError` helper over hand-writing wrappers in every module.
+For repeated operation-labeled mappings, prefer a shared curried helper:
 
 ```ts
-const persistenceError = operationError(PersistenceError.make)
+const readError = operationError(ReadError.make)
 
 const row = yield* query.pipe(
-  persistenceError("UserRepository.findById"),
+  readError("WorkerStore.get", { workerId }),
 )
 ```
 
-Name the local helper after the error it produces, such as `persistenceError`, `projectionError`, or `processingError`. Use `Effect.fn(...)` and spans for observability in addition to payload labels, not instead of them.
+Use Effect operation names and spans in addition to error operation labels, not instead of them. Preserve only safe diagnostic evidence.
+
+## Test Services
+
+Build a real fake for the narrow capability. Use `Layer.succeed` for complete static fakes and `Layer.effectContext` for stateful fakes with a separate test-control tag. The same implementation object should satisfy both the production tag and test tag.
+
+Production code depends only on the production service. Tests use the control tag to inspect outputs, enqueue responses, or fail the next operation. Read `TESTING.md` for the full pattern.

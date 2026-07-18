@@ -1,6 +1,6 @@
-# Effect + Pi Tacit Knowledge
+# Research Evidence For Effect At Pi Boundaries
 
-Use this note for Pi SDK, extension, session, and orchestration work. It records architectural evidence from public repositories, not a catalogue of APIs or a mandate to rewrite working direct TypeScript.
+This is non-normative provenance for `PI_BOUNDARIES.md`. Read it when auditing or revising the Pi guidance, not for ordinary implementation. It records architectural evidence from public repositories rather than a catalogue of APIs or a mandate to rewrite working direct TypeScript.
 
 ## Evidence discipline and version caveat
 
