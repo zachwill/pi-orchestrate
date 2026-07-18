@@ -48,7 +48,7 @@ const MODEL_ID = "deterministic-agent";
 const API_ID = "pi-orchestrate-memory";
 const BASE_SYSTEM_PROMPT = "PARENT_BASE_PROMPT";
 
-type Scenario = "async" | "parallel" | "mixed" | "failure";
+type Scenario = "async" | "parallel" | "mixed" | "failure" | "shutdown";
 type ProviderConfig = Parameters<ModelRuntime["registerProvider"]>[1];
 
 interface ProviderRequest {
@@ -100,6 +100,10 @@ interface SmokeHarness {
   readonly events: string[];
   readonly customMessagesStarted: Counter;
   readonly childRequestsStarted: Counter;
+  readonly childProviderSignals: AbortSignal[];
+  readonly childProviderAborted: Counter;
+  readonly childSessionShutdowns: Counter;
+  readonly childExtensionStateKey: string;
   readonly childGates: Readonly<Record<"child-alpha" | "child-beta" | "child-inline" | "child-failure", Deferred>>;
   readonly previousAgentDir: string | undefined;
   readonly previousOffline: string | undefined;
@@ -252,11 +256,13 @@ function createProviderExtension(
   events: string[],
   childGates: SmokeHarness["childGates"],
   childRequestsStarted: Counter,
+  childProviderSignals: AbortSignal[],
+  childProviderAborted: Counter,
 ): InlineExtension {
   const streamSimple = (
     requestedModel: Model<Api>,
     context: Context,
-    _options?: SimpleStreamOptions,
+    options?: SimpleStreamOptions,
   ): AssistantMessageEventStream => {
     const systemPrompt = context.systemPrompt ?? "";
     const transcript = transcriptText(context);
@@ -271,7 +277,7 @@ function createProviderExtension(
     events.push(`provider:${kind}:start`);
 
     if (kind === "parent-initial") {
-      if (scenario === "async") {
+      if (scenario === "async" || scenario === "shutdown") {
         return streamToolCalls([
           {
             type: "toolCall",
@@ -368,6 +374,18 @@ function createProviderExtension(
         ? "RESULT_BETA"
         : "RESULT_INLINE";
     const stream = createAssistantMessageEventStream();
+    if (options?.signal) {
+      childProviderSignals.push(options.signal);
+      options.signal.addEventListener("abort", () => {
+        childProviderAborted.increment();
+        if (scenario !== "shutdown") return;
+        const output = assistantMessage([], "aborted");
+        output.errorMessage = "Provider request aborted";
+        stream.push({ type: "start", partial: output });
+        stream.push({ type: "error", reason: "aborted", error: output });
+        stream.end(output);
+      }, { once: true });
+    }
     void childGates[kind].promise.then(() => {
       events.push(`provider:${kind}:done`);
       const output = assistantMessage([], "stop");
@@ -457,6 +475,23 @@ async function createHarness(scenario: Scenario): Promise<SmokeHarness & { effec
   await mkdir(agentDir, { recursive: true });
   await Bun.write(join(cwd, "fixture.txt"), "fixture-content\n");
 
+  const childSessionShutdowns = new Counter();
+  const childExtensionStateKey = `__pi_orchestrate_sdk_${crypto.randomUUID().replaceAll("-", "_")}`;
+  Object.assign(globalThis, { [childExtensionStateKey]: childSessionShutdowns });
+  if (scenario === "shutdown") {
+    const childExtensionPath = join(root, "child-observer.js");
+    await Bun.write(
+      childExtensionPath,
+      `export default function childObserver(pi) {
+  pi.on("session_shutdown", () => globalThis[${JSON.stringify(childExtensionStateKey)}].increment());
+}\n`,
+    );
+    await Bun.write(
+      join(agentDir, "settings.json"),
+      JSON.stringify({ extensions: [childExtensionPath] }),
+    );
+  }
+
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
   const previousOffline = process.env.PI_OFFLINE;
   process.env.PI_CODING_AGENT_DIR = agentDir;
@@ -467,6 +502,8 @@ async function createHarness(scenario: Scenario): Promise<SmokeHarness & { effec
   const effectivePrompts: string[] = [];
   const customMessagesStarted = new Counter();
   const childRequestsStarted = new Counter();
+  const childProviderSignals: AbortSignal[] = [];
+  const childProviderAborted = new Counter();
   const childGates = {
     "child-alpha": new Deferred(),
     "child-beta": new Deferred(),
@@ -503,6 +540,8 @@ async function createHarness(scenario: Scenario): Promise<SmokeHarness & { effec
           events,
           childGates,
           childRequestsStarted,
+          childProviderSignals,
+          childProviderAborted,
         ),
         { name: "pi-orchestrate", factory: createOrchestrationExtension() },
         {
@@ -553,6 +592,10 @@ async function createHarness(scenario: Scenario): Promise<SmokeHarness & { effec
       effectivePrompts,
       customMessagesStarted,
       childRequestsStarted,
+      childProviderSignals,
+      childProviderAborted,
+      childSessionShutdowns,
+      childExtensionStateKey,
       childGates,
       previousAgentDir,
       previousOffline,
@@ -563,6 +606,7 @@ async function createHarness(scenario: Scenario): Promise<SmokeHarness & { effec
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
     if (previousOffline === undefined) delete process.env.PI_OFFLINE;
     else process.env.PI_OFFLINE = previousOffline;
+    Reflect.deleteProperty(globalThis, childExtensionStateKey);
     await rm(root, { recursive: true, force: true });
     throw error;
   }
@@ -580,6 +624,7 @@ async function disposeHarness(harness: SmokeHarness): Promise<void> {
   else process.env.PI_CODING_AGENT_DIR = harness.previousAgentDir;
   if (harness.previousOffline === undefined) delete process.env.PI_OFFLINE;
   else process.env.PI_OFFLINE = harness.previousOffline;
+  Reflect.deleteProperty(globalThis, harness.childExtensionStateKey);
   await rm(harness.root, { recursive: true, force: true });
 }
 
@@ -678,6 +723,47 @@ describe("Pi 0.80.10 SDK integration", () => {
       await harness.runtime.dispose();
       harness.disposed = true;
       expect(harness.events.at(-1)).toBe("parent:session_shutdown:quit");
+      expect(getProcessHost()).toBeUndefined();
+    } finally {
+      await disposeHarness(harness);
+    }
+  }, 4_000);
+
+  test.serial("aborts an active child provider request when the final process-host attachment quits", async () => {
+    const harness = await createHarness("shutdown");
+    try {
+      const session = harness.runtime.session;
+      await session.prompt("Dispatch the worker that remains active until process shutdown.");
+      await harness.childRequestsStarted.waitFor(1);
+
+      const host = getProcessHost()!;
+      const ownerSessionId = session.sessionManager.getSessionId();
+      expect(harness.childProviderSignals).toHaveLength(1);
+      expect(harness.childProviderSignals[0]?.aborted).toBe(false);
+
+      await harness.runtime.dispose();
+      harness.disposed = true;
+      await harness.childProviderAborted.waitFor(1);
+
+      expect(harness.childProviderSignals[0]?.aborted).toBe(true);
+      expect(harness.childProviderAborted.value).toBe(1);
+      expect(harness.childSessionShutdowns.value).toBe(1);
+      expect(getProcessHost()).toBeUndefined();
+
+      const snapshot = await host.runtime.snapshot(ownerSessionId);
+      expect(snapshot.runs).toHaveLength(1);
+      expect(snapshot.runs[0]?.state).toBe("complete");
+      expect(snapshot.workers).toHaveLength(1);
+      expect(snapshot.workers[0]).toMatchObject({
+        title: "Alpha task",
+        status: "aborted",
+        outcome: { status: "aborted" },
+      });
+
+      await quitProcessHost();
+      await quitProcessHost();
+      expect(harness.childProviderAborted.value).toBe(1);
+      expect(harness.childSessionShutdowns.value).toBe(1);
       expect(getProcessHost()).toBeUndefined();
     } finally {
       await disposeHarness(harness);

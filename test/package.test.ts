@@ -7,7 +7,7 @@ const manifestPath = join(root, "package.json");
 const readmePath = join(root, "README.md");
 const skillsPath = join(root, "skills");
 const workerDirectory = join(root, "examples", "workers");
-const workerNames = ["investigator", "scout", "worker"] as const;
+const workerNames = ["investigator", "scout", "web", "worker"] as const;
 const workerPaths = workerNames.map((name) => join(workerDirectory, `${name}.md`));
 
 const canonicalTools = [
@@ -126,7 +126,7 @@ describe("published package resources", () => {
     expect(manifest.peerDependencies.typebox).toBe("*");
   });
 
-  test("includes exactly three fallback worker definitions", async () => {
+  test("includes exactly four fallback worker definitions", async () => {
     for (const workerPath of workerPaths) await expectPath(workerPath);
 
     const markdownFiles = (await readdir(workerDirectory))
@@ -137,9 +137,10 @@ describe("published package resources", () => {
 });
 
 describe("fallback worker definitions", () => {
-  test.each(workerPaths)("%s has strict canonical frontmatter, no model, and a body", async (workerPath) => {
+  test.each(workerPaths)("%s has strict canonical frontmatter and a body", async (workerPath) => {
     const definition = parseWorker(await readText(workerPath));
     const fields = definition.fields;
+    const workerName = basename(workerPath, ".md");
     const allowedFields = new Set([
       "name",
       "description",
@@ -152,9 +153,8 @@ describe("fallback worker definitions", () => {
     ]);
 
     expect([...fields.keys()].every((field) => allowedFields.has(field))).toBe(true);
-    expect(fields.get("name")).toBe(basename(workerPath, ".md"));
+    expect(fields.get("name")).toBe(workerName);
     expect(fields.get("description")?.trim().length).toBeGreaterThan(0);
-    expect(fields.has("model")).toBe(false);
     expect(fields.get("thinking")?.trim().length).toBeGreaterThan(0);
     expect(fields.get("lifecycle")).toMatch(/^(one-shot|reusable)$/);
     expect(definition.body.trim().length).toBeGreaterThan(0);
@@ -166,6 +166,14 @@ describe("fallback worker definitions", () => {
       .filter(Boolean);
     expect(tools.length).toBeGreaterThan(0);
     expect(tools.every((tool) => supportedWorkerTools.has(tool))).toBe(true);
+
+    if (workerName === "web") {
+      expect(fields.get("model")).toBe("openai-codex/gpt-5.6-sol");
+      expect(fields.get("tools")).toBe("bash");
+      expect(fields.get("skills")).toBe("[]");
+    } else {
+      expect(fields.has("model")).toBe(false);
+    }
   });
 });
 

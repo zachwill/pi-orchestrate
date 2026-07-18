@@ -15,6 +15,7 @@ import {
   ModelRuntime,
   SessionManager,
   type AgentSessionEvent,
+  type PromptOptions,
   type ResourceLoader,
   SettingsManager,
   type Skill,
@@ -111,7 +112,8 @@ function assistant(
 
 class FakeSession {
   readonly messages: AgentMessage[] = [];
-  readonly prompt = mock(async (_task: string) => {});
+  readonly prompt = mock(async (_task: string, _options?: PromptOptions) => {});
+  readonly abortCompaction = mock(() => {});
   readonly abort = mock(async () => {});
   readonly dispose = mock(() => {});
   readonly bindExtensions = mock(async (_bindings: { mode: "print" }) => {});
@@ -488,7 +490,14 @@ describe("worker session factory", () => {
     const cwd = join(root, "project");
     const extensionPath = join(root, "request-hook.js");
     const stateKey = `__pi_orchestrate_extension_${crypto.randomUUID().replaceAll("-", "_")}`;
-    const state = { factories: 0, starts: 0, requests: 0, shutdowns: 0 };
+    const state = {
+      factories: 0,
+      starts: 0,
+      requests: 0,
+      commands: 0,
+      shutdowns: 0,
+      inputs: [] as Array<{ text: string; source: string }>,
+    };
     const observedPayloads: unknown[] = [];
     Object.assign(globalThis, { [stateKey]: state });
 
@@ -501,6 +510,14 @@ describe("worker session factory", () => {
   const state = globalThis[${JSON.stringify(stateKey)}];
   state.factories += 1;
   pi.on("session_start", () => { state.starts += 1; });
+  pi.registerCommand("intercept-worker-brief", {
+    description: "Must not intercept an orchestrated worker brief",
+    handler: async () => { state.commands += 1; },
+  });
+  pi.on("input", (event) => {
+    state.inputs.push({ text: event.text, source: event.source });
+    return { action: "continue" };
+  });
   pi.on("before_provider_request", (event) => {
     state.requests += 1;
     return { ...event.payload, transformedByExtension: true };
@@ -581,8 +598,16 @@ describe("worker session factory", () => {
         definition: definition({ skills: undefined }),
       }));
 
-      expect(state).toEqual({ factories: 1, starts: 1, requests: 0, shutdowns: 0 });
-      expect(await handle.prompt("exercise the configured extension")).toEqual({
+      expect(state).toEqual({
+        factories: 1,
+        starts: 1,
+        requests: 0,
+        commands: 0,
+        shutdowns: 0,
+        inputs: [],
+      });
+      const instructions = "/intercept-worker-brief exercise the configured extension";
+      expect(await handle.prompt(instructions)).toEqual({
         status: "completed",
         assistantText: "extension response",
       });
@@ -591,6 +616,8 @@ describe("worker session factory", () => {
         transformedByExtension: true,
       }]);
       expect(state.requests).toBe(1);
+      expect(state.commands).toBe(0);
+      expect(state.inputs).toEqual([{ text: instructions, source: "extension" }]);
 
       await Promise.all([handle.dispose(), handle.dispose()]);
       expect(state.shutdowns).toBe(1);
@@ -1209,6 +1236,18 @@ describe("worker session handle", () => {
     });
   });
 
+  test("submits instructions literally as extension-originated input", async () => {
+    const h = harness();
+    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+
+    await handle.prompt("/skill:review literal worker brief");
+
+    expect(h.session.prompt).toHaveBeenCalledWith(
+      "/skill:review literal worker brief",
+      { expandPromptTemplates: false, source: "extension" },
+    );
+  });
+
   test("classifies assistant errors, assistant aborts, thrown errors, and requested aborts", async () => {
     for (const [stopReason, expectedStatus] of [
       ["error", "failed"],
@@ -1526,15 +1565,21 @@ describe("worker session handle", () => {
     expect(h.loaderDispose).toHaveBeenCalledTimes(1);
   });
 
-  test("awaits abort and disposes the session and subscription exactly once", async () => {
+  test("aborts compaction before awaiting the active prompt and disposes exactly once", async () => {
     const h = harness();
+    const order: string[] = [];
     let releaseAbort!: () => void;
-    h.session.abort.mockImplementation(() => new Promise<void>((resolve) => (releaseAbort = resolve)));
+    h.session.abortCompaction.mockImplementation(() => { order.push("abort-compaction"); });
+    h.session.abort.mockImplementation(() => {
+      order.push("abort-prompt");
+      return new Promise<void>((resolve) => (releaseAbort = resolve));
+    });
     const handle = await createWorkerSessionFactory(h.dependencies).create(options());
 
     let abortSettled = false;
     const abort = handle.abort().then(() => (abortSettled = true));
     await Promise.resolve();
+    expect(order).toEqual(["abort-compaction", "abort-prompt"]);
     expect(abortSettled).toBe(false);
     releaseAbort();
     await abort;
@@ -1544,5 +1589,17 @@ describe("worker session handle", () => {
     expect(h.session.unsubscribe).toHaveBeenCalledTimes(1);
     expect(h.session.dispose).toHaveBeenCalledTimes(1);
     expect(h.loaderDispose).toHaveBeenCalledTimes(1);
+  });
+
+  test("still aborts the active prompt when compaction cancellation fails", async () => {
+    const h = harness();
+    const compactionFailure = new Error("compaction cancellation failed");
+    h.session.abortCompaction.mockImplementation(() => { throw compactionFailure; });
+    h.session.abort.mockRejectedValue(new Error("prompt cancellation failed"));
+    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+
+    await expect(handle.abort()).rejects.toBe(compactionFailure);
+    expect(h.session.abortCompaction).toHaveBeenCalledTimes(1);
+    expect(h.session.abort).toHaveBeenCalledTimes(1);
   });
 });

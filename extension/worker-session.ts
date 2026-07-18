@@ -10,6 +10,7 @@ import {
   DefaultPackageManager,
   ModelRuntime,
   type ModelRegistry,
+  type PromptOptions,
   type ResourceLoader,
   SessionManager,
   SettingsManager,
@@ -33,7 +34,8 @@ const ORCHESTRATE_PACKAGE_ROOT = canonicalPath(fileURLToPath(new URL("..", impor
 interface WorkerAgentSession {
   readonly sessionFile: string | undefined;
   readonly messages: AgentMessage[];
-  prompt(instructions: string): Promise<void>;
+  prompt(instructions: string, options?: PromptOptions): Promise<void>;
+  abortCompaction(): void;
   abort(): Promise<void>;
   dispose(): void;
   bindExtensions(bindings: { mode: "print" }): Promise<void>;
@@ -406,7 +408,10 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
     const previousAssistant = lastAssistant(this.runtime.session.messages);
     let failureMessage: string | undefined;
     try {
-      await this.runtime.session.prompt(instructions);
+      await this.runtime.session.prompt(instructions, {
+        expandPromptTemplates: false,
+        source: "extension",
+      });
     } catch (error) {
       failureMessage = describeError(error, "Worker prompt failed");
     } finally {
@@ -429,7 +434,21 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
 
   async abort(): Promise<void> {
     if (this.prompting) this.abortRequested = true;
-    await this.runtime.session.abort();
+
+    let firstFailure: unknown;
+    try {
+      this.runtime.session.abortCompaction();
+    } catch (error) {
+      firstFailure = error;
+    }
+
+    try {
+      await this.runtime.session.abort();
+    } catch (error) {
+      if (firstFailure === undefined) firstFailure = error;
+    }
+
+    if (firstFailure !== undefined) throw firstFailure;
   }
 
   dispose(): Promise<void> {

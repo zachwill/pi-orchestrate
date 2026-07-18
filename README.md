@@ -83,7 +83,7 @@ Definitions are loaded by name in this precedence order, from lowest to highest:
 
 A higher-precedence definition replaces a lower one with the same `name`. Pi performs no project-worker discovery for an untrusted project.
 
-The package includes `scout`, `investigator`, and `worker` fallbacks. They omit `model`, so they inherit the parent's active model at dispatch. To customize one, copy its definition to the user or project directory and keep the same filename and `name`. Add an explicit model only when that worker needs one.
+The package includes `scout`, `investigator`, `web`, and `worker` fallbacks. `scout`, `investigator`, and `worker` omit `model`, so they inherit the parent's active model at dispatch. `web` uses an installed, authenticated Codex CLI for public-web research and pins its Pi session and searches to `gpt-5.6-sol`. To customize one, copy its definition to the user or project directory and keep the same filename and `name`. Add an explicit model only when that worker needs one.
 
 ## Worker definitions
 
