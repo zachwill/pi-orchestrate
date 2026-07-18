@@ -24,6 +24,8 @@ import {
   createWorkerSessionFactory,
   isOrchestrationExtensionPath,
   WorkerAgentSessionAcquisitionError,
+  WorkerModelAcquisitionError,
+  WorkerResourceAcquisitionError,
   type WorkerSessionDependencies,
   type WorkerSessionFactoryOptions,
 } from "../extension/worker-session.js";
@@ -869,20 +871,44 @@ describe("worker session factory", () => {
     }
   });
 
-  test("fails clearly when child model refresh reports provider errors", async () => {
-    const h = harness();
-    h.runtime.refresh.mockResolvedValueOnce({
+  test("keeps initial and second refresh failures in the model acquisition taxonomy", async () => {
+    const initialRefresh = harness();
+    initialRefresh.runtime.refresh.mockResolvedValueOnce({
       aborted: false,
       errors: new Map([["broken-provider", new Error("catalog unavailable")]]),
     });
 
-    await expect(
-      createWorkerSessionFactory(h.dependencies).create(options()),
-    ).rejects.toThrow(
-      'Worker "scout" failed to refresh child model providers: broken-provider: catalog unavailable',
-    );
-    expect(h.loaderOptions).toHaveLength(0);
-    expect(h.agentInputs).toHaveLength(0);
+    let initialFailure: unknown;
+    try {
+      await createWorkerSessionFactory(initialRefresh.dependencies).create(options());
+    } catch (error) {
+      initialFailure = error;
+    }
+    expect(initialFailure).toBeInstanceOf(WorkerModelAcquisitionError);
+    expect(initialFailure).toMatchObject({
+      _tag: "WorkerSession.ModelAcquisitionError",
+      message: 'Worker "scout" failed to refresh child model providers: broken-provider: catalog unavailable',
+    });
+    expect(initialRefresh.loaderOptions).toHaveLength(0);
+    expect(initialRefresh.agentInputs).toHaveLength(0);
+
+    const secondRefresh = harness();
+    secondRefresh.runtime.refresh
+      .mockResolvedValueOnce({ aborted: false, errors: new Map() })
+      .mockResolvedValueOnce({ aborted: true, errors: new Map() });
+    let secondFailure: unknown;
+    try {
+      await createWorkerSessionFactory(secondRefresh.dependencies).create(options());
+    } catch (error) {
+      secondFailure = error;
+    }
+    expect(secondFailure).toBeInstanceOf(WorkerModelAcquisitionError);
+    expect(secondFailure).toMatchObject({
+      _tag: "WorkerSession.ModelAcquisitionError",
+      message: 'Worker "scout" child model refresh was aborted',
+    });
+    expect(secondRefresh.agentInputs).toHaveLength(0);
+    expect(secondRefresh.loaderDispose).toHaveBeenCalledTimes(1);
   });
 
   test("fails before resource creation when neither worker nor parent supplies a model", async () => {
@@ -899,13 +925,21 @@ describe("worker session factory", () => {
     expect(h.agentInputs).toHaveLength(0);
   });
 
-  test("fails and disposes resources when an explicitly selected skill was not loaded", async () => {
+  test("classifies selected-skill validation as resource acquisition and disposes resources", async () => {
     const h = harness(new FakeSession(), ["alpha"]);
+    let failure: unknown;
 
-    await expect(
-      createWorkerSessionFactory(h.dependencies).create(options()),
-    ).rejects.toThrow('Worker "scout" selected skills were not loaded: beta');
+    try {
+      await createWorkerSessionFactory(h.dependencies).create(options());
+    } catch (error) {
+      failure = error;
+    }
 
+    expect(failure).toBeInstanceOf(WorkerResourceAcquisitionError);
+    expect(failure).toMatchObject({
+      _tag: "WorkerSession.ResourceAcquisitionError",
+      message: 'Worker "scout" selected skills were not loaded: beta',
+    });
     expect(h.reload).toHaveBeenCalledTimes(1);
     expect(h.loaderDispose).toHaveBeenCalledTimes(1);
     expect(h.sessionManagerInputs).toHaveLength(1);
@@ -1308,24 +1342,72 @@ describe("worker session handle", () => {
     expect(h.loaderDispose).toHaveBeenCalledTimes(1);
   });
 
-  test("dispose cleanup continues when unsubscribe and session disposal throw", async () => {
+  test("runs finalizers in subscription, runtime, loader order", async () => {
+    const order: string[] = [];
     const h = harness();
+    h.session.unsubscribe.mockImplementation(() => order.push("subscription"));
+    h.loaderDispose.mockImplementation(() => order.push("loader"));
+    h.dependencies.createRuntime = (input) => ({
+      session: input.session,
+      async dispose() {
+        order.push("runtime");
+      },
+    });
     const handle = await createWorkerSessionFactory(h.dependencies).create(options());
-    const activityUpdates: Array<string | undefined> = [];
-    handle.subscribeActivity((activity) => activityUpdates.push(activity));
+
+    await handle.dispose();
+
+    expect(order).toEqual(["subscription", "runtime", "loader"]);
+  });
+
+  test("falls back to the raw session when runtime disposal rejects and continues cleanup", async () => {
+    const order: string[] = [];
+    const h = harness();
     h.session.unsubscribe.mockImplementation(() => {
+      order.push("subscription");
       throw new Error("unsubscribe failed");
     });
     h.session.dispose.mockImplementation(() => {
-      throw new Error("session dispose failed");
+      order.push("raw-session");
+      throw new Error("raw session dispose failed");
     });
+    h.loaderDispose.mockImplementation(() => order.push("loader"));
+    h.dependencies.createRuntime = (input) => ({
+      session: input.session,
+      async dispose() {
+        order.push("runtime");
+        throw new Error("session_shutdown failed");
+      },
+    });
+    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
 
     await expect(handle.dispose()).resolves.toBeUndefined();
     h.session.startTool("after-dispose", "read");
 
-    expect(activityUpdates).toEqual([]);
+    expect(order).toEqual(["subscription", "runtime", "raw-session", "loader"]);
     expect(h.session.unsubscribe).toHaveBeenCalledTimes(1);
     expect(h.session.dispose).toHaveBeenCalledTimes(1);
+    expect(h.loaderDispose).toHaveBeenCalledTimes(1);
+  });
+
+  test("joins concurrent disposal on one asynchronous scope close", async () => {
+    const h = harness();
+    let releaseRuntime!: () => void;
+    const runtimeDisposal = new Promise<void>((resolve) => (releaseRuntime = resolve));
+    const disposeRuntime = mock(() => runtimeDisposal);
+    h.dependencies.createRuntime = (input) => ({ session: input.session, dispose: disposeRuntime });
+    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+
+    const first = handle.dispose();
+    const second = handle.dispose();
+    expect(first).toBe(second);
+    await Promise.resolve();
+    expect(disposeRuntime).toHaveBeenCalledTimes(1);
+    expect(h.loaderDispose).toHaveBeenCalledTimes(0);
+
+    releaseRuntime();
+    await Promise.all([first, second]);
+    expect(disposeRuntime).toHaveBeenCalledTimes(1);
     expect(h.loaderDispose).toHaveBeenCalledTimes(1);
   });
 

@@ -145,7 +145,7 @@ class FakeHandle implements WorkerSessionHandle {
     await this.abortGate?.promise;
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     this.disposeCalls += 1;
     this.disposed.resolve(undefined);
     if (this.disposeFailure) throw this.disposeFailure;

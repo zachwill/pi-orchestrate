@@ -18,7 +18,7 @@ import {
   type CreateAgentSessionResult,
   type DefaultResourceLoader,
 } from "@earendil-works/pi-coding-agent";
-import { Schema } from "effect";
+import { Effect, Exit, Schema, Scope } from "effect";
 import type {
   WorkerDefinition,
   WorkerMessageDirection,
@@ -204,13 +204,11 @@ export function isOrchestrationExtensionPath(path: string): boolean {
   return isWithin(canonicalPath(path), ORCHESTRATE_PACKAGE_ROOT);
 }
 
-function disposeResourceLoader(resourceLoader: ResourceLoader): void {
-  if (!("dispose" in resourceLoader) || typeof resourceLoader.dispose !== "function") return;
-  try {
+function resourceLoaderFinalizer(resourceLoader: ResourceLoader): Effect.Effect<void> {
+  return Effect.sync(() => {
+    if (!("dispose" in resourceLoader) || typeof resourceLoader.dispose !== "function") return;
     resourceLoader.dispose();
-  } catch {
-    // Cleanup is best-effort.
-  }
+  }).pipe(Effect.ignoreCause);
 }
 
 function describeError(error: unknown, fallback: string): string {
@@ -267,10 +265,10 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
   constructor(
     private readonly runtime: OwnedWorkerRuntime,
     private readonly reusable: boolean,
-    private readonly unsubscribe: () => void,
-    private readonly resourceLoader: ResourceLoader,
+    sessionFile: string,
+    private readonly scope: Scope.Closeable,
   ) {
-    this.sessionFile = runtime.session.sessionFile!;
+    this.sessionFile = sessionFile;
   }
 
   receiveSessionEvent(event: AgentSessionEvent): void {
@@ -359,11 +357,7 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
     this.usageListeners.clear();
     this.activityListeners.clear();
     this.messageDirectionListeners.clear();
-    safelyNotify(this.unsubscribe);
-
-    this.disposePromise = this.runtime.dispose()
-      .catch(() => {})
-      .finally(() => disposeResourceLoader(this.resourceLoader));
+    this.disposePromise = Effect.runPromise(disposeWorkerSession(this.scope));
     return this.disposePromise;
   }
 
@@ -401,52 +395,98 @@ function selectedModelCoordinates(
   throw new Error(`Worker "${definition.name}" has no configured model and no parent model is available`);
 }
 
-async function prepareChildModelRuntime(
-  options: WorkerSessionFactoryOptions,
-  dependencies: WorkerSessionDependencies,
-): Promise<{ selected: { provider: string; modelId: string }; modelRuntime: ModelRuntime }> {
-  let selected: { provider: string; modelId: string };
-  try {
-    selected = selectedModelCoordinates(options.definition, options.parentModel);
-  } catch (cause) {
-    throw new WorkerModelAcquisitionError({ message: describeError(cause, "Worker model selection failed"), cause });
-  }
-  let modelRuntime: ModelRuntime;
-  try {
-    modelRuntime = await dependencies.createModelRuntime({
-      authPath: join(options.agentDir, "auth.json"),
-      modelsPath: join(options.agentDir, "models.json"),
-    });
-    for (const providerId of options.modelRegistry.getRegisteredProviderIds()) {
-      const config = options.modelRegistry.getRegisteredProviderConfig(providerId);
-      if (config) modelRuntime.registerProvider(providerId, { ...config });
-    }
-    await refreshModelRuntime(modelRuntime, options.definition);
-    const model = modelRuntime.getModel(selected.provider, selected.modelId);
-    if (model) {
-      const auth = await options.modelRegistry.getApiKeyAndHeaders(model);
-      if (auth.ok) {
-        if (auth.headers) modelRuntime.registerProvider(selected.provider, { headers: { ...auth.headers } });
-        if (auth.apiKey && !options.modelRegistry.isUsingOAuth(model)) {
-          await modelRuntime.setRuntimeApiKey(selected.provider, auth.apiKey);
-        }
-      }
-    }
-  } catch (cause) {
-    if (cause instanceof WorkerModelAcquisitionError) throw cause;
-    throw new WorkerModelAcquisitionError({ message: describeError(cause, "Worker model runtime creation failed"), cause });
-  }
-  return { selected, modelRuntime };
+function modelAcquisitionError(cause: unknown, fallback: string): WorkerModelAcquisitionError {
+  return new WorkerModelAcquisitionError({ message: describeError(cause, fallback), cause });
 }
 
-async function refreshModelRuntime(modelRuntime: ModelRuntime, definition: WorkerDefinition): Promise<void> {
-  const result = await modelRuntime.refresh({ allowNetwork: false });
+function resourceAcquisitionError(cause: unknown): WorkerResourceAcquisitionError {
+  return new WorkerResourceAcquisitionError({
+    message: describeError(cause, "Worker resource acquisition failed"),
+    cause,
+  });
+}
+
+function agentSessionAcquisitionError(cause: unknown): WorkerAgentSessionAcquisitionError {
+  return new WorkerAgentSessionAcquisitionError({
+    message: describeError(cause, "Worker agent session acquisition failed"),
+    cause,
+  });
+}
+
+const refreshModelRuntime = Effect.fn("WorkerSession.refreshModelRuntime")(function* (
+  modelRuntime: ModelRuntime,
+  definition: WorkerDefinition,
+) {
+  const result = yield* Effect.tryPromise({
+    try: () => modelRuntime.refresh({ allowNetwork: false }),
+    catch: (cause) => modelAcquisitionError(cause, "Worker model refresh failed"),
+  });
   if (result.errors.size > 0) {
     const errors = [...result.errors].map(([id, error]) => `${id}: ${error.message}`).join("; ");
-    throw new Error(`Worker "${definition.name}" failed to refresh child model providers: ${errors}`);
+    const cause = new Error(
+      `Worker "${definition.name}" failed to refresh child model providers: ${errors}`,
+    );
+    return yield* Effect.fail(modelAcquisitionError(cause, "Worker model refresh failed"));
   }
-  if (result.aborted) throw new Error(`Worker "${definition.name}" child model refresh was aborted`);
-}
+  if (result.aborted) {
+    const cause = new Error(`Worker "${definition.name}" child model refresh was aborted`);
+    return yield* Effect.fail(modelAcquisitionError(cause, "Worker model refresh failed"));
+  }
+});
+
+const prepareChildModelRuntime = Effect.fn("WorkerSession.prepareChildModelRuntime")(function* (
+  options: WorkerSessionFactoryOptions,
+  dependencies: WorkerSessionDependencies,
+) {
+  const selected = yield* Effect.try({
+    try: () => selectedModelCoordinates(options.definition, options.parentModel),
+    catch: (cause) => modelAcquisitionError(cause, "Worker model selection failed"),
+  });
+  const modelRuntime = yield* Effect.tryPromise({
+    try: () => dependencies.createModelRuntime({
+      authPath: join(options.agentDir, "auth.json"),
+      modelsPath: join(options.agentDir, "models.json"),
+    }),
+    catch: (cause) => modelAcquisitionError(cause, "Worker model runtime creation failed"),
+  });
+
+  yield* Effect.try({
+    try: () => {
+      for (const providerId of options.modelRegistry.getRegisteredProviderIds()) {
+        const config = options.modelRegistry.getRegisteredProviderConfig(providerId);
+        if (config) modelRuntime.registerProvider(providerId, { ...config });
+      }
+    },
+    catch: (cause) => modelAcquisitionError(cause, "Worker model provider registration failed"),
+  });
+  yield* refreshModelRuntime(modelRuntime, options.definition);
+
+  const model = yield* Effect.try({
+    try: () => modelRuntime.getModel(selected.provider, selected.modelId),
+    catch: (cause) => modelAcquisitionError(cause, "Worker model resolution failed"),
+  });
+  if (model) {
+    const auth = yield* Effect.tryPromise({
+      try: () => options.modelRegistry.getApiKeyAndHeaders(model),
+      catch: (cause) => modelAcquisitionError(cause, "Worker model authentication failed"),
+    });
+    if (auth.ok) {
+      yield* Effect.tryPromise({
+        try: async () => {
+          if (auth.headers) {
+            modelRuntime.registerProvider(selected.provider, { headers: { ...auth.headers } });
+          }
+          if (auth.apiKey && !options.modelRegistry.isUsingOAuth(model)) {
+            await modelRuntime.setRuntimeApiKey(selected.provider, auth.apiKey);
+          }
+        },
+        catch: (cause) => modelAcquisitionError(cause, "Worker model runtime key setup failed"),
+      });
+    }
+  }
+
+  return { selected, modelRuntime };
+});
 
 function skillLoaderOptions(definition: WorkerDefinition): Pick<ResourceLoaderOptions, "noSkills" | "skillsOverride"> {
   if (definition.skills === undefined) return {};
@@ -473,101 +513,212 @@ function contextLoaderOptions(
   };
 }
 
-async function createWorkerSession(
+const disposeWorkerSession = Effect.fn("WorkerSession.dispose")(function* (
+  scope: Scope.Closeable,
+) {
+  yield* Scope.close(scope, Exit.void).pipe(Effect.ignoreCause);
+});
+
+const acquireWorkerServices = Effect.fn("WorkerSession.acquireServices")(function* (
   options: WorkerSessionFactoryOptions,
   dependencies: WorkerSessionDependencies,
-): Promise<WorkerSessionHandle> {
+  modelRuntime: ModelRuntime,
+) {
   const definition = options.definition;
-  const { selected, modelRuntime } = await prepareChildModelRuntime(options, dependencies);
-  let settingsManager: SettingsManager;
-  let services: AgentSessionServices | undefined;
-  let session: WorkerAgentSession | undefined;
-  let runtime: OwnedWorkerRuntime | undefined;
-  let unsubscribe: (() => void) | undefined;
-
-  try {
-    settingsManager = dependencies.createSettingsManager({
+  const settingsManager = yield* Effect.try({
+    try: () => dependencies.createSettingsManager({
       cwd: options.cwd,
       agentDir: options.agentDir,
       projectTrusted: options.projectTrusted,
       compaction: definition.compaction,
-    });
-    const extensionPaths = (await dependencies.resolveExtensionPaths({
+    }),
+    catch: resourceAcquisitionError,
+  });
+  const extensionPaths = yield* Effect.tryPromise({
+    try: () => dependencies.resolveExtensionPaths({
       cwd: options.cwd,
       agentDir: options.agentDir,
       settingsManager,
-    })).filter((path) => !isOrchestrationExtensionPath(path));
+    }),
+    catch: resourceAcquisitionError,
+  }).pipe(Effect.map((paths) => paths.filter((path) => !isOrchestrationExtensionPath(path))));
 
-    services = await dependencies.createServices({
-      cwd: options.cwd,
-      agentDir: options.agentDir,
-      settingsManager,
-      modelRuntime,
-      resourceLoaderOptions: {
-        noExtensions: true,
-        additionalExtensionPaths: extensionPaths,
-        noPromptTemplates: true,
-        noThemes: true,
-        ...skillLoaderOptions(definition),
-        ...contextLoaderOptions(options.agentDir, options.projectTrusted),
-        appendSystemPrompt: [definition.systemPrompt, DIRECT_CHILD_BOUNDARY],
+  return yield* Effect.acquireRelease(
+    Effect.tryPromise({
+      // Pi's supported helper constructs and reloads its loader internally. If reload rejects,
+      // it exposes no loader to dispose; callers cannot make that acquisition failure-atomic.
+      try: () => dependencies.createServices({
+        cwd: options.cwd,
+        agentDir: options.agentDir,
+        settingsManager,
+        modelRuntime,
+        resourceLoaderOptions: {
+          noExtensions: true,
+          additionalExtensionPaths: extensionPaths,
+          noPromptTemplates: true,
+          noThemes: true,
+          ...skillLoaderOptions(definition),
+          ...contextLoaderOptions(options.agentDir, options.projectTrusted),
+          appendSystemPrompt: [definition.systemPrompt, DIRECT_CHILD_BOUNDARY],
+        },
+      }),
+      catch: resourceAcquisitionError,
+    }),
+    (services) => resourceLoaderFinalizer(services.resourceLoader),
+  );
+});
+
+interface AgentSessionOwnership {
+  readonly session: WorkerAgentSession;
+  runtime: OwnedWorkerRuntime | undefined;
+}
+
+function rawSessionFinalizer(session: WorkerAgentSession): Effect.Effect<void> {
+  return Effect.sync(() => session.dispose()).pipe(Effect.ignoreCause);
+}
+
+function agentSessionFinalizer(ownership: AgentSessionOwnership): Effect.Effect<void> {
+  const runtime = ownership.runtime;
+  if (!runtime) return rawSessionFinalizer(ownership.session);
+  return Effect.tryPromise(() => runtime.dispose()).pipe(
+    Effect.catch(() => rawSessionFinalizer(ownership.session)),
+    Effect.ignoreCause,
+  );
+}
+
+const acquireAgentSession = Effect.fn("WorkerSession.acquireAgentSession")(function* (
+  dependencies: WorkerSessionDependencies,
+  input: AgentSessionInput,
+) {
+  return yield* Effect.acquireRelease(
+    Effect.tryPromise({
+      try: () => dependencies.createAgentSession(input),
+      catch: agentSessionAcquisitionError,
+    }).pipe(Effect.map(({ session }) => {
+      const ownership: AgentSessionOwnership = { session, runtime: undefined };
+      return ownership;
+    })),
+    agentSessionFinalizer,
+  );
+});
+
+const acquireAgentSessionRuntime = Effect.fn("WorkerSession.acquireAgentSessionRuntime")(function* (
+  dependencies: WorkerSessionDependencies,
+  ownership: AgentSessionOwnership,
+  services: AgentSessionServices,
+) {
+  const runtime = yield* Effect.try({
+    try: () => dependencies.createRuntime({ session: ownership.session, services }),
+    catch: agentSessionAcquisitionError,
+  });
+  ownership.runtime = runtime;
+  return runtime;
+});
+
+const acquireSessionSubscription = Effect.fn("WorkerSession.acquireSubscription")(function* (
+  runtime: OwnedWorkerRuntime,
+  handle: DefaultWorkerSessionHandle,
+) {
+  return yield* Effect.acquireRelease(
+    Effect.try({
+      try: () => runtime.session.subscribe((event) => handle.receiveSessionEvent(event)),
+      catch: agentSessionAcquisitionError,
+    }),
+    (unsubscribe) => Effect.sync(unsubscribe).pipe(Effect.ignoreCause),
+  );
+});
+
+const createWorkerSession = Effect.fn("WorkerSession.create")(function* (
+  options: WorkerSessionFactoryOptions,
+  dependencies: WorkerSessionDependencies,
+) {
+  const scope = yield* Scope.make("sequential");
+  const acquisition = Effect.gen(function* () {
+    const definition = options.definition;
+    const { selected, modelRuntime } = yield* prepareChildModelRuntime(options, dependencies);
+    const services = yield* acquireWorkerServices(options, dependencies, modelRuntime);
+
+    yield* refreshModelRuntime(modelRuntime, definition);
+    const model = yield* Effect.try({
+      try: () => {
+        const resolvedModel = modelRuntime.getModel(selected.provider, selected.modelId);
+        if (!resolvedModel) {
+          throw new Error(
+            `Worker "${definition.name}" configured model "${selected.provider}/${selected.modelId}" was not found`,
+          );
+        }
+        return resolvedModel;
       },
+      catch: (cause) => modelAcquisitionError(cause, "Worker model resolution failed"),
     });
-  } catch (cause) {
-    if (services) disposeResourceLoader(services.resourceLoader);
-    throw new WorkerResourceAcquisitionError({ message: describeError(cause, "Worker resource acquisition failed"), cause });
-  }
-
-  try {
-    await refreshModelRuntime(modelRuntime, definition);
-    const model = modelRuntime.getModel(selected.provider, selected.modelId);
-    if (!model) throw new Error(`Worker "${definition.name}" configured model "${selected.provider}/${selected.modelId}" was not found`);
-    const sessionManager = dependencies.createSessionManager({
-      cwd: options.cwd,
-      parentSessionFile: options.parentSessionFile,
+    const sessionManager = yield* Effect.try({
+      try: () => dependencies.createSessionManager({
+        cwd: options.cwd,
+        parentSessionFile: options.parentSessionFile,
+      }),
+      catch: agentSessionAcquisitionError,
     });
-    const created = await dependencies.createAgentSession({
+    const ownership = yield* acquireAgentSession(dependencies, {
       services,
       sessionManager,
       model,
       thinkingLevel: definition.thinking,
       tools: [...definition.tools],
     });
-    session = created.session;
-    runtime = dependencies.createRuntime({ session, services });
-    await runtime.session.bindExtensions({ mode: "print" });
+    const runtime = yield* acquireAgentSessionRuntime(dependencies, ownership, services);
+    yield* Effect.tryPromise({
+      try: () => runtime.session.bindExtensions({ mode: "print" }),
+      catch: agentSessionAcquisitionError,
+    });
 
-    if (definition.skills !== undefined) {
-      const loadedNames = new Set(services.resourceLoader.getSkills().skills.map((skill) => skill.name));
-      const missing = definition.skills.filter((name) => !loadedNames.has(name));
-      if (missing.length > 0) throw new Error(`Worker "${definition.name}" selected skills were not loaded: ${missing.join(", ")}`);
-    }
-    if (!runtime.session.sessionFile) throw new Error("Worker session was not created with durable storage");
+    yield* Effect.try({
+      try: () => {
+        if (definition.skills === undefined) return;
+        const loadedNames = new Set(
+          services.resourceLoader.getSkills().skills.map((skill) => skill.name),
+        );
+        const missing = definition.skills.filter((name) => !loadedNames.has(name));
+        if (missing.length > 0) {
+          throw new Error(
+            `Worker "${definition.name}" selected skills were not loaded: ${missing.join(", ")}`,
+          );
+        }
+      },
+      catch: resourceAcquisitionError,
+    });
+    const sessionFile = yield* Effect.try({
+      try: () => {
+        if (!runtime.session.sessionFile) {
+          throw new Error("Worker session was not created with durable storage");
+        }
+        return runtime.session.sessionFile;
+      },
+      catch: agentSessionAcquisitionError,
+    });
 
-    let handle!: DefaultWorkerSessionHandle;
-    unsubscribe = runtime.session.subscribe((event) => handle.receiveSessionEvent(event));
-    handle = new DefaultWorkerSessionHandle(
+    const handle = new DefaultWorkerSessionHandle(
       runtime,
       definition.lifecycle === "reusable",
-      unsubscribe,
-      services.resourceLoader,
+      sessionFile,
+      scope,
     );
+    yield* acquireSessionSubscription(runtime, handle);
     return handle;
-  } catch (cause) {
-    safelyNotify(() => unsubscribe?.());
-    if (runtime) {
-      try { await runtime.dispose(); } catch { /* best effort */ }
-    } else if (session) {
-      try { session.dispose(); } catch { /* best effort */ }
-    }
-    disposeResourceLoader(services.resourceLoader);
-    throw new WorkerAgentSessionAcquisitionError({ message: describeError(cause, "Worker agent session acquisition failed"), cause });
-  }
-}
+  }).pipe(Scope.provide(scope));
+
+  return yield* acquisition.pipe(
+    Effect.catchCause((cause) =>
+      Effect.gen(function* () {
+        yield* Scope.close(scope, Exit.failCause(cause)).pipe(Effect.ignoreCause);
+        return yield* Effect.failCause(cause);
+      })
+    ),
+  );
+});
 
 export function createWorkerSessionFactory(
   overrides: Partial<WorkerSessionDependencies> = {},
 ): WorkerSessionFactory {
   const dependencies: WorkerSessionDependencies = { ...defaultDependencies, ...overrides };
-  return { create: (options) => createWorkerSession(options, dependencies) };
+  return { create: (options) => Effect.runPromise(createWorkerSession(options, dependencies)) };
 }
