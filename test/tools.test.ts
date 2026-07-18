@@ -722,7 +722,10 @@ describe("registerOrchestrationTools", () => {
     expect(collapsed.every((line) => Bun.stringWidth(line) <= 32)).toBe(true);
     const collapsedText = Bun.stripANSI(collapsed.join("\n"));
     for (let index = 0; index < 12; index += 1) expect(collapsedText).toContain(`T${index}`);
-    expect(collapsed).toHaveLength(14);
+    expect(collapsed.length).toBeGreaterThanOrEqual(12 * 2 + 2);
+    expect(collapsed.length).toBeLessThanOrEqual(12 * 3 + 2);
+    expect(Bun.stripANSI(collapsed[2]!)).toContain("First exact line.");
+    expect(Bun.stripANSI(collapsed[3]!)).toEndWith("…");
     expect(collapsedText).toContain("to inspect full instructions");
     const expanded = Bun.stripANSI(pi.tool("orchestrate").renderCall!({ tasks } as never, themeForRendering(), renderContext(true)).render(120_000).join("\n"));
     expect(expanded).toContain("  First  exact    line.");

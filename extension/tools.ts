@@ -4,7 +4,15 @@ import type {
   ExtensionContext,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Markdown, Spacer, Text, truncateToWidth, type Component } from "@earendil-works/pi-tui";
+import {
+  Container,
+  Markdown,
+  Spacer,
+  Text,
+  truncateToWidth,
+  wrapTextWithAnsi,
+  type Component,
+} from "@earendil-works/pi-tui";
 import {
   formatSize,
   getAgentDir,
@@ -37,6 +45,7 @@ import type {
 
 const STRICT_OBJECT = { additionalProperties: false } as const;
 const MAX_TASKS_PER_WAVE = 12;
+const MAX_INSTRUCTION_PREVIEW_LINES = 2;
 
 const taskSchema = Type.Object(
   {
@@ -634,11 +643,24 @@ class InstructionPreview implements Component {
   ) {}
   render(width: number): string[] {
     const bounded = Math.max(1, width);
-    return this.tasks.map((task) => {
-      const preview = firstInstructionLine(task.instructions) ?? "";
-      const row = `${this.theme.fg("accent", "→")} ${safeTerminalText(task.worker)} · ${safeTerminalText(task.title)}${preview ? ` — ${safeTerminalText(preview)}` : ""}`;
-      return truncateToWidth(row, bounded, "…");
-    });
+    const lines: string[] = [];
+    for (const task of this.tasks) {
+      const heading = `${this.theme.fg("accent", "→")} ${this.theme.fg("muted", safeTerminalText(task.worker))} · ${this.theme.fg("text", this.theme.bold(safeTerminalText(task.title)))}`;
+      lines.push(truncateToWidth(heading, bounded, "…"));
+
+      const contentWidth = Math.max(1, bounded - 2);
+      const characterLimit = Math.max(256, Math.min(4096, contentWidth * 3));
+      const preview = compactInstructionPreview(task.instructions, characterLimit);
+      if (!preview.text) continue;
+      const wrapped = wrapTextWithAnsi(preview.text, contentWidth);
+      const previewLines = wrapped.slice(0, MAX_INSTRUCTION_PREVIEW_LINES);
+      if (preview.truncated || wrapped.length > MAX_INSTRUCTION_PREVIEW_LINES) {
+        const lastIndex = previewLines.length - 1;
+        previewLines[lastIndex] = truncateToWidth(`${previewLines[lastIndex] ?? ""}…`, contentWidth, "…");
+      }
+      for (const line of previewLines) lines.push(this.theme.fg("dim", `  ${line}`));
+    }
+    return lines.map((line) => truncateToWidth(line, bounded, "…"));
   }
   invalidate(): void {}
 }
@@ -677,6 +699,14 @@ function safeTerminalText(value: string): string {
     const code = character.charCodeAt(0);
     return code === 0x7f ? "␡" : String.fromCodePoint(0x2400 + code);
   });
+}
+
+function compactInstructionPreview(instructions: string, characterLimit: number): { text: string; truncated: boolean } {
+  const source = instructions.slice(0, characterLimit);
+  return {
+    text: safeTerminalText(source).replace(/\s+/g, " ").trim(),
+    truncated: source.length < instructions.length,
+  };
 }
 
 function firstInstructionLine(instructions: string): string | undefined {
