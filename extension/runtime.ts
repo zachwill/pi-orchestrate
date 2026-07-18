@@ -1,5 +1,6 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { Effect, Option } from "effect";
 import {
   CANCELLATION_GRACE_MS,
   EMPTY_WORKER_USAGE,
@@ -213,17 +214,16 @@ interface WaveWaiter {
 
 const defaultBestEffortDeadline: BestEffortDeadline = {
   wait(promise, timeoutMs) {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const settled = promise.then(
+    const settled = Effect.promise(() => promise.then(
       () => "settled" as const,
       () => "settled" as const,
+    ));
+    return Effect.runPromise(
+      settled.pipe(
+        Effect.timeoutOption(timeoutMs),
+        Effect.map((result) => Option.getOrElse(result, () => "timed-out" as const)),
+      ),
     );
-    const timedOut = new Promise<DeadlineResult>((resolve) => {
-      timer = setTimeout(() => resolve("timed-out"), timeoutMs);
-    });
-    return Promise.race([settled, timedOut]).finally(() => {
-      if (timer !== undefined) clearTimeout(timer);
-    });
   },
 };
 
@@ -561,7 +561,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     try {
       this.scheduler.start(
         workerId,
-        () => this.trackCleanup(this.bootstrapAndPrompt(workerId, generation)),
+        this.bootstrapAndPrompt(workerId, generation),
         (error) => this.settleWorkflowDefect(workerId, generation, error),
       );
     } catch (error) {
@@ -578,7 +578,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     try {
       this.scheduler.start(
         workerId,
-        () => this.trackCleanup(this.executePrompt(workerId, generation, session, instructions)),
+        this.executePrompt(workerId, generation, session, instructions),
         (error) => this.settleWorkflowDefect(workerId, generation, error),
       );
     } catch (error) {
@@ -586,44 +586,90 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     }
   }
 
-  private async bootstrapAndPrompt(workerId: WorkerId, generation: number): Promise<void> {
-    const session = await this.bootstrap(workerId, generation);
-    if (!session) return;
-    const current = this.workers.get(workerId);
-    if (!current) return;
-    await this.executePrompt(workerId, generation, session, current.instructions);
-  }
-
-  private async bootstrap(
+  private bootstrapAndPrompt(
     workerId: WorkerId,
     generation: number,
-  ): Promise<WorkerSessionHandle | undefined> {
-    const entry = this.entries.get(workerId);
-    if (!entry) return undefined;
+  ): Effect.Effect<void, never> {
+    const runtime = this;
+    return Effect.gen(function* () {
+      const session = yield* runtime.bootstrap(workerId, generation);
+      if (!session) return;
+      const current = runtime.workers.get(workerId);
+      if (!current) return;
+      yield* runtime.executePrompt(workerId, generation, session, current.instructions);
+    });
+  }
 
-    let session: WorkerSessionHandle;
-    try {
-      session = await this.workerSessionFactory.create({
-        cwd: entry.context.cwd,
-        agentDir: entry.context.agentDir,
-        parentSessionFile: entry.context.parentSessionFile,
-        projectTrusted: entry.context.projectTrusted,
-        definition: entry.definition,
-        parentModel: entry.context.parentModel,
-        modelRegistry: entry.context.modelRegistry,
-      });
-    } catch (error) {
-      this.settleCreationFailure(workerId, generation, error);
-      return undefined;
-    }
+  private bootstrap(
+    workerId: WorkerId,
+    generation: number,
+  ): Effect.Effect<WorkerSessionHandle | undefined, never> {
+    return Effect.suspend(() => {
+      const entry = this.entries.get(workerId);
+      if (!entry) return Effect.succeed(undefined);
 
+      let creation: Promise<WorkerSessionHandle>;
+      try {
+        creation = this.workerSessionFactory.create({
+          cwd: entry.context.cwd,
+          agentDir: entry.context.agentDir,
+          parentSessionFile: entry.context.parentSessionFile,
+          projectTrusted: entry.context.projectTrusted,
+          definition: entry.definition,
+          parentModel: entry.context.parentModel,
+          modelRegistry: entry.context.modelRegistry,
+        });
+      } catch (error) {
+        this.settleCreationFailure(workerId, generation, error);
+        return Effect.succeed(undefined);
+      }
+
+      this.trackCleanup(creation.then(() => undefined, () => undefined));
+      void creation.then((session) => {
+        if (!this.canAdoptCreatedSession(workerId, generation, entry)) {
+          this.disposeSession(session);
+        }
+      }, () => undefined);
+
+      return Effect.tryPromise({
+        try: () => creation,
+        catch: (error) => error,
+      }).pipe(
+        Effect.match({
+          onFailure: (error) => {
+            this.settleCreationFailure(workerId, generation, error);
+            return undefined;
+          },
+          onSuccess: (session) => this.adoptCreatedSession(
+            workerId,
+            generation,
+            entry,
+            session,
+          ),
+        }),
+      );
+    });
+  }
+
+  private canAdoptCreatedSession(
+    workerId: WorkerId,
+    generation: number,
+    entry: RuntimeEntry,
+  ): boolean {
     const current = this.workers.get(workerId);
-    if (
-      this.shuttingDown ||
-      !current ||
-      current.status !== "starting" ||
-      entry.generation !== generation
-    ) {
+    return !this.shuttingDown &&
+      current?.status === "starting" &&
+      entry.generation === generation;
+  }
+
+  private adoptCreatedSession(
+    workerId: WorkerId,
+    generation: number,
+    entry: RuntimeEntry,
+    session: WorkerSessionHandle,
+  ): WorkerSessionHandle | undefined {
+    const current = this.workers.get(workerId);
+    if (!this.canAdoptCreatedSession(workerId, generation, entry) || !current) {
       this.disposeSession(session);
       return undefined;
     }
@@ -644,31 +690,54 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     }
   }
 
-  private async executePrompt(
+  private executePrompt(
     workerId: WorkerId,
     generation: number,
     session: WorkerSessionHandle,
     instructions: string,
-  ): Promise<void> {
-    const before = this.workers.get(workerId);
-    const entry = this.entries.get(workerId);
-    if (
-      !before ||
-      before.status !== "running" ||
-      !entry ||
-      entry.generation !== generation ||
-      entry.session !== session
-    ) {
-      return;
-    }
+  ): Effect.Effect<void, never> {
+    return Effect.suspend(() => {
+      const before = this.workers.get(workerId);
+      const entry = this.entries.get(workerId);
+      if (
+        !before ||
+        before.status !== "running" ||
+        !entry ||
+        entry.generation !== generation ||
+        entry.session !== session
+      ) {
+        return Effect.void;
+      }
 
-    let outcome: WorkerOutcome;
-    try {
-      outcome = await session.prompt(instructions);
-    } catch (error) {
-      outcome = { status: "failed", message: describeError(error, "Worker prompt failed") };
-    }
-    this.settleOutcome(workerId, generation, session, outcome);
+      let prompt: Promise<WorkerOutcome>;
+      try {
+        prompt = session.prompt(instructions);
+      } catch (error) {
+        this.settleOutcome(workerId, generation, session, {
+          status: "failed",
+          message: describeError(error, "Worker prompt failed"),
+        });
+        return Effect.void;
+      }
+      this.trackCleanup(prompt.then(() => undefined, () => undefined));
+
+      return Effect.tryPromise({
+        try: () => prompt,
+        catch: (error) => error,
+      }).pipe(
+        Effect.match({
+          onFailure: (error): WorkerOutcome => ({
+            status: "failed",
+            message: describeError(error, "Worker prompt failed"),
+          }),
+          onSuccess: (outcome) => outcome,
+        }),
+        Effect.tap((outcome) => Effect.sync(() => {
+          this.settleOutcome(workerId, generation, session, outcome);
+        })),
+        Effect.asVoid,
+      );
+    });
   }
 
   private settleCreationFailure(

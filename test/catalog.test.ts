@@ -175,6 +175,88 @@ valid prompt`,
     expect(fs.calls.some((call) => call.includes("ignored.json"))).toBe(false);
   });
 
+  test("decodes comma lists and compaction through the frontmatter schema", () => {
+    const fs = new FakeFileSystem();
+    fs.addDirectory(packageDirectory, {
+      "schema.md": `---
+name: schema
+description: schema description
+model: provider/nested/model
+tools: read, grep, bash
+skills: bun, effect
+thinking: high
+compaction:
+  enabled: true
+  reserveTokens: 1200
+  keepRecentTokens: 400
+lifecycle: reusable
+---
+prompt`,
+    });
+    fs.addDirectory(userDirectory, {});
+
+    const catalog = createWorkerCatalogDiscovery(fs)(options(false));
+
+    expect(catalog.diagnostics).toEqual([]);
+    expect(workers(catalog)[0]).toMatchObject({
+      model: { provider: "provider", modelId: "nested/model" },
+      tools: ["read", "grep", "bash"],
+      skills: ["bun", "effect"],
+      thinking: "high",
+      compaction: { enabled: true, reserveTokens: 1200, keepRecentTokens: 400 },
+      lifecycle: "reusable",
+    });
+  });
+
+  test("reports stable schema paths and rejects excess properties at every struct boundary", () => {
+    const fs = new FakeFileSystem();
+    fs.addDirectory(packageDirectory, {
+      "nested-extra.md": definition(
+        "nested-extra",
+        "prompt",
+        "compaction:\n  future: true\n  alsoFuture: false\n",
+      ),
+      "top-extra.md": definition("top-extra", "prompt", "zeta: true\nalpha: true\n"),
+      "bad-enabled.md": definition(
+        "bad-enabled",
+        "prompt",
+        "compaction:\n  enabled: yes\n",
+      ),
+      "bad-reserve.md": definition(
+        "bad-reserve",
+        "prompt",
+        "compaction:\n  reserveTokens: -1\n",
+      ),
+      "bad-second-tool.md": definition("bad-second-tool", "prompt").replace(
+        "tools: read",
+        "tools: [read, Read]",
+      ),
+      "empty-comma.md": definition("empty-comma", "prompt").replace("tools: read", "tools: ''"),
+    });
+    fs.addDirectory(userDirectory, {});
+
+    const catalog = createWorkerCatalogDiscovery(fs)(options(false));
+    const messages = new Map(
+      catalog.diagnostics.map((item) => [item.filePath?.split("/").at(-1), item.message]),
+    );
+
+    expect(workers(catalog)).toEqual([]);
+    expect(messages.get("top-extra.md")).toBe("unknown frontmatter fields: alpha, zeta");
+    expect(messages.get("nested-extra.md")).toBe(
+      "unknown compaction fields: alsoFuture, future",
+    );
+    expect(messages.get("bad-enabled.md")).toBe(
+      "frontmatter field 'compaction.enabled' must be a boolean",
+    );
+    expect(messages.get("bad-reserve.md")).toBe(
+      "frontmatter field 'compaction.reserveTokens' must be a non-negative integer",
+    );
+    expect(messages.get("bad-second-tool.md")).toBe("unsupported tool 'Read'");
+    expect(messages.get("empty-comma.md")).toBe(
+      "frontmatter field 'tools' must be a non-empty comma string or string array",
+    );
+  });
+
   test("allows a worker to inherit the parent model", () => {
     const fs = new FakeFileSystem();
     fs.addDirectory(packageDirectory, {

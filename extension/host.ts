@@ -22,7 +22,7 @@ interface AttachmentAwareProcessHost extends ProcessHost {
 }
 
 interface OwnedProcessHost extends AttachmentAwareProcessHost {
-  readonly unsubscribeSettlement: () => void;
+  readonly unsubscribeSettlement?: () => void;
   destroyPromise?: Promise<void>;
 }
 
@@ -99,7 +99,7 @@ export async function destroyProcessHost(host: ProcessHost): Promise<void> {
       await ownedHost.runtime.shutdown();
     } finally {
       ownedHost.delivery.clear();
-      ownedHost.unsubscribeSettlement();
+      ownedHost.unsubscribeSettlement?.();
       const global = processGlobal();
       if (global[PROCESS_HOST_KEY] === ownedHost) {
         delete global[PROCESS_HOST_KEY];

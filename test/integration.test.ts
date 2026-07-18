@@ -15,6 +15,7 @@ import {
 import {
   attachProcessHost,
   createProcessHost,
+  destroyProcessHost,
   detachProcessHost,
   getProcessHost,
   quitProcessHost,
@@ -582,6 +583,27 @@ describe("Pi Orchestrate extension integration", () => {
     expect(newPi.sent).toHaveLength(1);
     expect(shared.runtime.shutdownCalls).toBe(0);
     expect(shared.runtime.unsubscribeStateCalls).toBe(1);
+  });
+
+  test("concurrent host destruction closes its runtime lifetime exactly once", async () => {
+    const shared = fakeHost();
+    let releaseShutdown: (() => void) | undefined;
+    const shutdownGate = new Promise<void>((resolve) => {
+      releaseShutdown = resolve;
+    });
+    shared.runtime.shutdown = async () => {
+      shared.runtime.shutdownCalls += 1;
+      await shutdownGate;
+    };
+
+    const first = destroyProcessHost(shared.host);
+    const second = destroyProcessHost(shared.host);
+    await Promise.resolve();
+    expect(shared.runtime.shutdownCalls).toBe(1);
+
+    releaseShutdown?.();
+    await Promise.all([first, second]);
+    expect(shared.runtime.shutdownCalls).toBe(1);
   });
 
   test("quit awaits extension cleanup and host destruction", async () => {

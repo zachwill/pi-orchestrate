@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
+import { Effect } from "effect";
 import {
   MAX_WORKER_INSTRUCTIONS_LENGTH,
   MAX_WORKER_TITLE_LENGTH,
@@ -966,40 +967,37 @@ describe("ownership, cancellation, and shutdown", () => {
 });
 
 describe("keyed scheduling and reentrant reusable sends", () => {
-  test("reports workflow defects and replaces a still-settling keyed workflow", async () => {
+  test("replacement interrupts the Effect workflow and runs its finalizer", async () => {
     const scheduler = createWorkflowScheduler<string>();
     const firstStarted = new Deferred();
-    const firstGate = new Deferred();
+    const firstFinalized = new Deferred();
     const secondStarted = new Deferred();
-    const secondGate = new Deferred();
     const defect = new Deferred<unknown>();
 
     scheduler.start(
       "worker",
-      async () => {
-        firstStarted.resolve(undefined);
-        await firstGate.promise;
-      },
+      Effect.sync(() => firstStarted.resolve(undefined)).pipe(
+        Effect.andThen(Effect.never),
+        Effect.ensuring(Effect.sync(() => firstFinalized.resolve(undefined))),
+      ),
       (error) => defect.resolve(error),
     );
     await firstStarted.promise;
 
     scheduler.start(
       "worker",
-      async () => {
-        secondStarted.resolve(undefined);
-        await secondGate.promise;
-        throw new Error("scheduler boom");
-      },
+      Effect.sync(() => secondStarted.resolve(undefined)).pipe(
+        Effect.andThen(Effect.die(new Error("scheduler boom"))),
+      ),
       (error) => defect.resolve(error),
     );
     await secondStarted.promise;
-    secondGate.resolve(undefined);
+    await firstFinalized.promise;
 
     const reported = await defect.promise;
     expect(reported).toBeInstanceOf(Error);
-    expect((reported as Error).message).toContain("scheduler boom");
-    firstGate.resolve(undefined);
+    if (!(reported instanceof Error)) throw new Error("Expected scheduler defect");
+    expect(reported.message).toContain("scheduler boom");
     await scheduler.close();
   });
 

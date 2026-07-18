@@ -1,4 +1,4 @@
-import { Cause, Effect, Exit, FiberMap, Scope } from "effect";
+import { Cause, Context, Effect, FiberMap, Layer, ManagedRuntime } from "effect";
 
 export type WorkflowDefectHandler = (error: unknown) => void;
 
@@ -6,7 +6,7 @@ export interface WorkflowScheduler<Key> {
   /** Starts a workflow immediately, interrupting and replacing the previous workflow at the key. */
   start(
     key: Key,
-    workflow: () => Promise<void>,
+    workflow: Effect.Effect<void, never>,
     onDefect: WorkflowDefectHandler,
   ): void;
   /** Interrupts the current workflow at the key and waits for its fiber to settle. */
@@ -15,48 +15,67 @@ export interface WorkflowScheduler<Key> {
   close(): Promise<void>;
 }
 
-class EffectWorkflowScheduler<Key> implements WorkflowScheduler<Key> {
-  private readonly scope = Scope.makeUnsafe("parallel");
-  private readonly fibers: FiberMap.FiberMap<Key, void, never>;
-  private closePromise: Promise<void> | undefined;
+interface WorkflowSupervisorService {
+  readonly start: (
+    key: unknown,
+    workflow: Effect.Effect<void, never>,
+  ) => void;
+  readonly remove: (key: unknown) => Effect.Effect<void>;
+}
 
-  constructor() {
-    this.fibers = Effect.runSync(
-      Scope.provide(this.scope)(FiberMap.make<Key, void, never>()),
-    );
-  }
+class WorkflowSupervisor extends Context.Service<
+  WorkflowSupervisor,
+  WorkflowSupervisorService
+>()("@zachwill/pi-orchestrate/WorkflowSupervisor") {}
+
+const workflowSupervisorLayer = Layer.effect(
+  WorkflowSupervisor,
+  Effect.gen(function* () {
+    const fibers = yield* FiberMap.make<unknown, void, never>();
+    const run = yield* FiberMap.runtime(fibers)<never>();
+    return WorkflowSupervisor.of({
+      start(key, workflow) {
+        run(key, workflow);
+      },
+      remove: (key) => FiberMap.remove(fibers, key),
+    });
+  }),
+);
+
+class EffectWorkflowScheduler<Key> implements WorkflowScheduler<Key> {
+  private readonly managedRuntime = ManagedRuntime.make(workflowSupervisorLayer);
+  private readonly supervisor = this.managedRuntime.runSync(WorkflowSupervisor);
+  private closePromise: Promise<void> | undefined;
 
   start(
     key: Key,
-    workflow: () => Promise<void>,
+    workflow: Effect.Effect<void, never>,
     onDefect: WorkflowDefectHandler,
   ): void {
-    const supervised = Effect.promise(workflow).pipe(
+    const supervised = workflow.pipe(
       Effect.catchCause((cause) => {
         if (!Cause.hasInterruptsOnly(cause)) {
-          try {
-            onDefect(Cause.squash(cause));
-          } catch {
-            // Defect reporting must not become another unsupervised defect.
-          }
+          return Effect.sync(() => {
+            try {
+              onDefect(Cause.squash(cause));
+            } catch {
+              // Defect reporting must not become another unsupervised defect.
+            }
+          });
         }
         return Effect.void;
       }),
     );
 
-    Effect.runSync(
-      FiberMap.run(this.fibers, key, supervised, { startImmediately: true }),
-    );
+    this.supervisor.start(key, supervised);
   }
 
-  async remove(key: Key): Promise<void> {
-    await Effect.runPromise(FiberMap.remove(this.fibers, key));
+  remove(key: Key): Promise<void> {
+    return this.managedRuntime.runPromise(this.supervisor.remove(key));
   }
 
   close(): Promise<void> {
-    if (!this.closePromise) {
-      this.closePromise = Effect.runPromise(Scope.close(this.scope, Exit.void));
-    }
+    this.closePromise ??= this.managedRuntime.dispose();
     return this.closePromise;
   }
 }

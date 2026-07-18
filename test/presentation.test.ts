@@ -86,11 +86,31 @@ describe("per-worker result messages", () => {
       { ...settlement(), generation: 1.5 },
       { ...settlement(), usage: { ...usage, turns: Number.NaN } },
       { ...settlement(), status: "completed", outcome: { status: "failed", message: "no" } },
+      { ...settlement(), startedAt: 6201 },
+      { ...settlement(), failureStage: "workflow" },
+      { ...settlement(), usage: { ...usage, cost: Number.POSITIVE_INFINITY } },
+      { ...settlement(), usage: { ...usage, cacheRead: -1 } },
     ]) {
       const output = Bun.stripANSI(renderResult(details, false, 80).join("\n"));
       expect(output).toContain("details unavailable");
       expect(output).not.toContain("✓ scout · Inspect code");
     }
+  });
+
+  test("accepts legacy optional omissions, excess fields, and the settlement envelope", () => {
+    const legacy = settlement();
+    Reflect.deleteProperty(legacy, "eventId");
+    Reflect.deleteProperty(legacy, "sequence");
+    Reflect.deleteProperty(legacy, "remainingActive");
+    Reflect.deleteProperty(legacy, "waveComplete");
+    Reflect.deleteProperty(legacy, "sessionFile");
+
+    const output = Bun.stripANSI(renderResult({
+      settlement: { ...legacy, legacyExtra: "ignored" },
+      envelopeExtra: true,
+    }, true, 80).join("\n"));
+    expect(output).toContain("✓ scout · Inspect code · 5s");
+    expect(output).toContain("session unavailable");
   });
 
   test("uses explicit startup failure stage and keeps ordinary zero-turn failures truthful", () => {
@@ -129,7 +149,7 @@ describe("active widget", () => {
       const row = Bun.stripANSI(component.render(width)[1]!);
       expect(visibleWidth(row)).toBeLessThanOrEqual(width);
       expect(row).toContain("2↓");
-      expect(row).toContain("12.3k ctx");
+      expect(row).toContain("12k ctx");
       expect(row).toContain("A very");
       if (width >= 72) expect(row).toContain("scout →");
       else expect(row).not.toContain("scout →");
@@ -144,7 +164,21 @@ describe("active widget", () => {
     expect(row).not.toContain("working");
     expect(row).not.toContain("running command");
     expect(row).toContain("2↓");
-    expect(row).toContain("12.3k ctx");
+    expect(row).toContain("12k ctx");
+    component.dispose();
+  });
+
+  test.each([
+    [49_499, "49k ctx"],
+    [49_501, "50k ctx"],
+    [192_300, "192k ctx"],
+  ])("rounds %i context tokens to a whole-thousand label", (contextTokens, expected) => {
+    const component = new WorkerStatusComponent(snapshot([
+      worker("context", "running", { usage: { ...usage, contextTokens } }),
+    ]), theme);
+    const row = Bun.stripANSI(component.render(80)[1]!);
+    expect(row).toContain(expected);
+    expect(row).not.toMatch(/\d+\.\d+k ctx/);
     component.dispose();
   });
 

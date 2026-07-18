@@ -21,6 +21,7 @@ import {
 import type { WorkerDefinition } from "../extension/domain.js";
 import {
   createWorkerSessionFactory,
+  WorkerAgentSessionAcquisitionError,
   type WorkerSessionDependencies,
   type WorkerSessionFactoryOptions,
 } from "../extension/worker-session.js";
@@ -161,6 +162,12 @@ class FakeSession {
 
   private emit(event: AgentSessionEvent): void {
     for (const listener of this.listeners) listener(event);
+  }
+}
+
+class SubscriptionFailureSession extends FakeSession {
+  override subscribe(_listener: (event: AgentSessionEvent) => void): () => void {
+    throw new Error("subscription failed");
   }
 }
 
@@ -812,6 +819,26 @@ describe("worker session factory", () => {
     ).rejects.toThrow("durable storage");
     expect(noDurability.session.dispose).toHaveBeenCalledTimes(1);
     expect(noDurability.loaderDispose).toHaveBeenCalledTimes(1);
+  });
+
+  test("classifies subscription acquisition and finalizes all acquired resources", async () => {
+    const session = new SubscriptionFailureSession();
+    const h = harness(session);
+    let failure: unknown;
+
+    try {
+      await createWorkerSessionFactory(h.dependencies).create(options());
+    } catch (error) {
+      failure = error;
+    }
+
+    expect(failure).toBeInstanceOf(WorkerAgentSessionAcquisitionError);
+    expect(failure).toMatchObject({
+      _tag: "WorkerSession.AgentSessionAcquisitionError",
+      message: "subscription failed",
+    });
+    expect(session.dispose).toHaveBeenCalledTimes(1);
+    expect(h.loaderDispose).toHaveBeenCalledTimes(1);
   });
 
   test("creates fresh session lineage without importing a parent transcript", async () => {

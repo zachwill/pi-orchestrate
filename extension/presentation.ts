@@ -14,6 +14,7 @@ import {
   visibleWidth,
   type Component,
 } from "@earendil-works/pi-tui";
+import { Result, Schema } from "effect";
 import type { WorkerDeliveryDetails } from "./delivery.js";
 import type { WorkerOutcome, WorkerRecord, WorkerStatus, WorkerUsage } from "./domain.js";
 import type { OrchestratorRuntime, RuntimeSnapshot } from "./runtime.js";
@@ -42,27 +43,77 @@ const ACTIVE_STATUSES: ReadonlySet<WorkerStatus> = new Set(["starting", "running
 
 export type PresentationRuntime = Pick<OrchestratorRuntime, "snapshot" | "subscribeState">;
 
-interface SafeSettlement {
-  eventId?: string;
-  sequence?: number;
-  ownerSessionId: string;
-  waveId: string;
-  workerId: string;
-  generation: number;
-  mode: "async" | "inline";
-  worker: string;
-  title: string;
-  lifecycle: "one-shot" | "reusable";
-  status: "completed" | "ready" | "failed" | "aborted";
-  outcome: Exclude<WorkerOutcome, { status: "closed" }>;
-  usage: Partial<WorkerUsage>;
-  startedAt?: number;
-  settledAt?: number;
-  remainingActive?: number;
-  waveComplete?: boolean;
-  sessionFile?: string;
-  failureStage?: "startup" | "prompt" | "workflow" | "cancellation";
-}
+const NonnegativeFinite = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0));
+const NonnegativeInteger = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+const legacyOptionalKey = <S extends Schema.Constraint>(schema: S) =>
+  Schema.optionalKey(Schema.UndefinedOr(schema));
+
+const WorkerUsageSchema = Schema.Struct({
+  input: NonnegativeFinite,
+  output: NonnegativeFinite,
+  cacheRead: NonnegativeFinite,
+  cacheWrite: NonnegativeFinite,
+  cost: NonnegativeFinite,
+  contextTokens: NonnegativeFinite,
+  turns: NonnegativeInteger,
+});
+
+const WorkerCompletedOutcomeSchema = Schema.Struct({
+  status: Schema.Literal("completed"),
+  assistantText: Schema.String,
+});
+const WorkerReadyOutcomeSchema = Schema.Struct({
+  status: Schema.Literal("ready"),
+  assistantText: Schema.String,
+});
+const WorkerFailedOutcomeSchema = Schema.Struct({
+  status: Schema.Literal("failed"),
+  message: Schema.String,
+  assistantText: legacyOptionalKey(Schema.String),
+});
+const WorkerAbortedOutcomeSchema = Schema.Struct({
+  status: Schema.Literal("aborted"),
+  message: legacyOptionalKey(Schema.String),
+  assistantText: legacyOptionalKey(Schema.String),
+});
+const WorkerOutcomeSchema = Schema.Union([
+  WorkerCompletedOutcomeSchema,
+  WorkerReadyOutcomeSchema,
+  WorkerFailedOutcomeSchema,
+  WorkerAbortedOutcomeSchema,
+]);
+
+const SettlementPayloadSchema = Schema.Struct({
+  eventId: legacyOptionalKey(Schema.String),
+  sequence: legacyOptionalKey(NonnegativeInteger),
+  ownerSessionId: Schema.String,
+  waveId: Schema.String,
+  workerId: Schema.String,
+  generation: NonnegativeInteger,
+  mode: Schema.Literals(["async", "inline"]),
+  worker: Schema.String,
+  title: Schema.String,
+  lifecycle: Schema.Literals(["one-shot", "reusable"]),
+  status: Schema.Literals(["completed", "ready", "failed", "aborted"]),
+  outcome: WorkerOutcomeSchema,
+  usage: WorkerUsageSchema,
+  startedAt: NonnegativeInteger,
+  settledAt: NonnegativeInteger,
+  remainingActive: legacyOptionalKey(NonnegativeInteger),
+  waveComplete: legacyOptionalKey(Schema.Boolean),
+  sessionFile: legacyOptionalKey(Schema.String),
+  failureStage: legacyOptionalKey(Schema.Literals(["startup", "prompt", "workflow", "cancellation"])),
+}).check(Schema.makeFilter((settlement) => {
+  if (settlement.outcome.status !== settlement.status) return "outcome status must match settlement status";
+  if (settlement.settledAt < settlement.startedAt) return "settlement timestamp must not precede start timestamp";
+  if (settlement.failureStage !== undefined && settlement.status !== "failed" && settlement.status !== "aborted") {
+    return "failure stage requires a failed or aborted settlement";
+  }
+}));
+
+const SettlementEnvelopeSchema = Schema.Struct({ settlement: SettlementPayloadSchema });
+const decodeSettlementEnvelope = Schema.decodeUnknownResult(SettlementEnvelopeSchema);
+type SafeSettlement = Schema.Schema.Type<typeof SettlementPayloadSchema>;
 
 interface StatusBinding {
   readonly ownerSessionId: string;
@@ -267,7 +318,7 @@ export class WorkerStatusComponent implements Component {
       animation.frames[this.frameIndex % animation.frames.length] ?? animation.frames[0],
     );
     const turns = formatTurnMarker(worker);
-    const context = `${formatCompactNumber(numberOrZero(worker.usage?.contextTokens))} ctx`;
+    const context = `${formatContextTokens(numberOrZero(worker.usage?.contextTokens))} ctx`;
     const suffixFields = width >= 28 ? [turns, context] : width >= 12 ? [turns] : [];
     const requiredWidth = (fields: readonly string[]) => visibleWidth(`⠋  · ${fields.join(" · ")}`) + 10;
     const showWorker = width >= 72 && requiredWidth([worker.worker, ...suffixFields]) <= width;
@@ -344,79 +395,10 @@ export class WorkerResultComponent implements Component {
 }
 
 function readSettlement(value: unknown): SafeSettlement | undefined {
-  const candidate = isRecord(value) && isRecord(value.settlement) ? value.settlement : value;
-  if (!isRecord(candidate)) return undefined;
-  const mode = enumField(candidate.mode, ["async", "inline"]);
-  const lifecycle = enumField(candidate.lifecycle, ["one-shot", "reusable"]);
-  const status = enumField(candidate.status, ["completed", "ready", "failed", "aborted"]);
-  const outcome = readOutcome(candidate.outcome);
-  const usage = readUsage(candidate.usage);
-  const generation = nonnegativeInteger(candidate.generation);
-  if (!mode || !lifecycle || !status || !outcome || outcome.status !== status || !usage || generation === undefined) return undefined;
-  const ownerSessionId = requiredString(candidate.ownerSessionId);
-  const waveId = requiredString(candidate.waveId);
-  const workerId = requiredString(candidate.workerId);
-  const worker = requiredString(candidate.worker);
-  const title = requiredString(candidate.title);
-  if (ownerSessionId === undefined || waveId === undefined || workerId === undefined || worker === undefined || title === undefined) return undefined;
-  const eventId = optionalString(candidate.eventId);
-  const sessionFile = optionalString(candidate.sessionFile);
-  const sequence = optionalInteger(candidate.sequence);
-  const startedAt = optionalInteger(candidate.startedAt);
-  const settledAt = optionalInteger(candidate.settledAt);
-  const remainingActive = optionalInteger(candidate.remainingActive);
-  const waveComplete = optionalBoolean(candidate.waveComplete);
-  const failureStage = optionalEnum(candidate.failureStage, ["startup", "prompt", "workflow", "cancellation"]);
-  if (eventId === INVALID || sessionFile === INVALID || sequence === INVALID || startedAt === INVALID || settledAt === INVALID ||
-      remainingActive === INVALID || waveComplete === INVALID || failureStage === INVALID) return undefined;
-  if (startedAt === undefined || settledAt === undefined || settledAt < startedAt) return undefined;
-  if (failureStage !== undefined && status !== "failed" && status !== "aborted") return undefined;
-  return {
-    ownerSessionId, waveId, workerId, generation, mode, worker, title, lifecycle, status, outcome, usage,
-    ...(eventId === undefined ? {} : { eventId }),
-    ...(sequence === undefined ? {} : { sequence }),
-    ...(startedAt === undefined ? {} : { startedAt }),
-    ...(settledAt === undefined ? {} : { settledAt }),
-    ...(remainingActive === undefined ? {} : { remainingActive }),
-    ...(waveComplete === undefined ? {} : { waveComplete }),
-    ...(sessionFile === undefined ? {} : { sessionFile }),
-    ...(failureStage === undefined ? {} : { failureStage }),
-  };
+  const envelope = isRecord(value) && isRecord(value.settlement) ? value : { settlement: value };
+  const decoded = decodeSettlementEnvelope(envelope);
+  return Result.isSuccess(decoded) ? decoded.success.settlement : undefined;
 }
-
-function readOutcome(value: unknown): WorkerOutcome | undefined {
-  if (!isRecord(value) || typeof value.status !== "string") return undefined;
-  if ((value.status === "completed" || value.status === "ready") && typeof value.assistantText === "string") return { status: value.status, assistantText: value.assistantText };
-  const message = optionalString(value.message);
-  const assistantText = optionalString(value.assistantText);
-  if (message === INVALID || assistantText === INVALID) return undefined;
-  if (value.status === "failed" && message !== undefined) return { status: "failed", message, ...(assistantText === undefined ? {} : { assistantText }) };
-  if (value.status === "aborted") return { status: "aborted", ...(message === undefined ? {} : { message }), ...(assistantText === undefined ? {} : { assistantText }) };
-  return undefined;
-}
-
-const INVALID = Symbol("invalid");
-type Invalid = typeof INVALID;
-function requiredString(value: unknown): string | undefined { return typeof value === "string" ? value : undefined; }
-function optionalString(value: unknown): string | undefined | Invalid { return value === undefined ? undefined : typeof value === "string" ? value : INVALID; }
-function nonnegativeInteger(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value) && value >= 0 ? value : undefined; }
-function optionalInteger(value: unknown): number | undefined | Invalid { return value === undefined ? undefined : nonnegativeInteger(value) ?? INVALID; }
-function optionalBoolean(value: unknown): boolean | undefined | Invalid { return value === undefined ? undefined : typeof value === "boolean" ? value : INVALID; }
-function enumField<const T extends string>(value: unknown, values: readonly T[]): T | undefined { return typeof value === "string" && values.includes(value as T) ? value as T : undefined; }
-function optionalEnum<const T extends string>(value: unknown, values: readonly T[]): T | undefined | Invalid { return value === undefined ? undefined : enumField(value, values) ?? INVALID; }
-function readUsage(value: unknown): WorkerUsage | undefined {
-  if (!isRecord(value)) return undefined;
-  const input = nonnegativeNumber(value.input);
-  const output = nonnegativeNumber(value.output);
-  const cacheRead = nonnegativeNumber(value.cacheRead);
-  const cacheWrite = nonnegativeNumber(value.cacheWrite);
-  const cost = nonnegativeNumber(value.cost);
-  const contextTokens = nonnegativeNumber(value.contextTokens);
-  const turns = nonnegativeInteger(value.turns);
-  if (input === undefined || output === undefined || cacheRead === undefined || cacheWrite === undefined || cost === undefined || contextTokens === undefined || turns === undefined) return undefined;
-  return { input, output, cacheRead, cacheWrite, cost, contextTokens, turns };
-}
-function nonnegativeNumber(value: unknown): number | undefined { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined; }
 
 function statusHeading(result: SafeSettlement): string {
   if (result.status === "failed") return result.failureStage === "startup" ? "could not start" : "failed";
@@ -483,6 +465,10 @@ function firstNonEmptyLines(text: string, limit: number): string[] {
   return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, limit);
 }
 function numberOrZero(value: unknown): number { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0; }
+function formatContextTokens(value: number): string {
+  if (value < 1_000) return String(Math.round(value));
+  return `${Math.round(value / 1_000)}k`;
+}
 function formatCompactNumber(value: number): string {
   if (value >= 1_000_000) return `${trimDecimal(value / 1_000_000)}m`;
   if (value >= 1_000) return `${trimDecimal(value / 1_000)}k`;

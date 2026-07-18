@@ -6,40 +6,72 @@ import {
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { Result, Schema, SchemaGetter, type SchemaIssue } from "effect";
 import type {
   CatalogDiagnostic,
-  SupportedToolName,
   WorkerCatalog,
   WorkerDefinition,
-  WorkerLifecycle,
   WorkerSourceKind,
 } from "./domain.js";
-import { isSupportedToolName } from "./domain.js";
+import { isSupportedToolName, SUPPORTED_TOOL_NAMES } from "./domain.js";
 
 const MAX_WORKER_BYTES = 64 * 1024;
-const KNOWN_FIELDS = new Set([
-  "name",
-  "description",
-  "model",
-  "thinking",
-  "tools",
-  "skills",
-  "compaction",
-  "lifecycle",
-]);
-const THINKING_LEVELS: ReadonlySet<string> = new Set([
-  "off",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-]);
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 
-function isThinkingLevel(value: string): value is NonNullable<WorkerDefinition["thinking"]> {
-  return THINKING_LEVELS.has(value);
+const RequiredText = Schema.Trim.check(Schema.isNonEmpty());
+const StringListInput = Schema.Union([Schema.String, Schema.Array(Schema.String)]);
+
+function commaList<Item extends Schema.Constraint & { readonly Encoded: string }>(item: Item) {
+  return StringListInput.pipe(
+    Schema.decodeTo(Schema.Array(item).check(Schema.isMinLength(1)), {
+      decode: SchemaGetter.transform((value) =>
+        typeof value === "string" ? value.split(",").map((entry) => entry.trim()) : value,
+      ),
+      encode: SchemaGetter.transform((value) => value),
+    }),
+  );
 }
+
+const ModelCoordinate = Schema.Trim.check(Schema.isPattern(/^[^/\s]+\/\S+$/)).pipe(
+  Schema.decodeTo(
+    Schema.Struct({ provider: Schema.NonEmptyString, modelId: Schema.NonEmptyString }),
+    {
+      decode: SchemaGetter.transform((coordinate) => {
+        const separator = coordinate.indexOf("/");
+        return {
+          provider: coordinate.slice(0, separator),
+          modelId: coordinate.slice(separator + 1),
+        };
+      }),
+      encode: SchemaGetter.transform(({ provider, modelId }) => `${provider}/${modelId}`),
+    },
+  ),
+);
+
+const NonNegativeInteger = Schema.Number.check(
+  Schema.isInt(),
+  Schema.isGreaterThanOrEqualTo(0),
+);
+const Compaction = Schema.Struct({
+  enabled: Schema.optionalKey(Schema.Boolean),
+  reserveTokens: Schema.optionalKey(NonNegativeInteger),
+  keepRecentTokens: Schema.optionalKey(NonNegativeInteger),
+});
+const ThinkingLevel = Schema.Trim.pipe(Schema.decodeTo(Schema.Literals(THINKING_LEVELS)));
+const WorkerFrontmatter = Schema.Struct({
+  name: RequiredText,
+  description: RequiredText,
+  model: Schema.optionalKey(ModelCoordinate),
+  thinking: Schema.optionalKey(ThinkingLevel),
+  tools: commaList(Schema.Literals(SUPPORTED_TOOL_NAMES)),
+  skills: Schema.optionalKey(commaList(Schema.NonEmptyString)),
+  compaction: Schema.optionalKey(Compaction),
+  lifecycle: Schema.Literals(["one-shot", "reusable"]),
+});
+const decodeWorkerFrontmatter = Schema.decodeUnknownResult(WorkerFrontmatter, {
+  errors: "all",
+  onExcessProperty: "error",
+});
 
 export interface CatalogFileStat {
   readonly size: number;
@@ -63,18 +95,6 @@ export interface DiscoverWorkerCatalogOptions {
 interface CatalogSource {
   readonly kind: WorkerSourceKind;
   readonly directory: string;
-}
-
-interface WorkerFrontmatter {
-  readonly name?: unknown;
-  readonly description?: unknown;
-  readonly model?: unknown;
-  readonly thinking?: unknown;
-  readonly tools?: unknown;
-  readonly skills?: unknown;
-  readonly compaction?: unknown;
-  readonly lifecycle?: unknown;
-  readonly [field: string]: unknown;
 }
 
 const productionFileSystem: CatalogFileSystem = {
@@ -101,98 +121,128 @@ function isMissingPath(error: unknown): boolean {
   return typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT";
 }
 
-function requiredString(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error(`frontmatter field '${field}' must be a non-empty string`);
-  }
-  return value.trim();
+interface UnexpectedPath {
+  readonly path: readonly PropertyKey[];
 }
 
-function optionalString(value: unknown, field: string): string | undefined {
-  if (value === undefined) return undefined;
-  return requiredString(value, field);
+function collectUnexpectedPaths(
+  issue: SchemaIssue.Issue,
+  parentPath: readonly PropertyKey[] = [],
+): UnexpectedPath[] {
+  switch (issue._tag) {
+    case "Pointer":
+      return collectUnexpectedPaths(issue.issue, [...parentPath, ...issue.path]);
+    case "Composite":
+    case "AnyOf":
+      return issue.issues.flatMap((child) => collectUnexpectedPaths(child, parentPath));
+    case "Encoding":
+    case "Filter":
+      return collectUnexpectedPaths(issue.issue, parentPath);
+    case "UnexpectedKey":
+      return [{ path: parentPath }];
+    default:
+      return [];
+  }
 }
 
-function stringList(value: unknown, field: string, required: boolean): string[] | undefined {
-  if (value === undefined) {
-    if (required) throw new Error(`frontmatter field '${field}' is required`);
-    return undefined;
+function isUnknownRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function fieldValue(frontmatter: unknown, field: string): unknown {
+  if (!isUnknownRecord(frontmatter)) return undefined;
+  return field in frontmatter ? frontmatter[field] : undefined;
+}
+
+function listItems(value: unknown): readonly unknown[] {
+  if (typeof value === "string") return value.split(",").map((item) => item.trim());
+  return Array.isArray(value) ? value : [];
+}
+
+function schemaDiagnostic(error: Schema.SchemaError, frontmatter: unknown): string {
+  const unexpected = collectUnexpectedPaths(error.issue);
+  const frontmatterFields = unexpected
+    .filter(({ path }) => path.length === 1 && typeof path[0] === "string")
+    .map(({ path }) => String(path[0]))
+    .sort(compareText);
+  if (frontmatterFields.length > 0) {
+    return `unknown frontmatter field${frontmatterFields.length === 1 ? "" : "s"}: ${frontmatterFields.join(", ")}`;
   }
 
-  const values = typeof value === "string" ? value.split(",").map((item) => item.trim()) : value;
-  if (!Array.isArray(values) || values.length === 0) {
-    throw new Error(`frontmatter field '${field}' must be a non-empty comma string or string array`);
+  const compactionFields = unexpected
+    .filter(
+      ({ path }) => path.length === 2 && path[0] === "compaction" && typeof path[1] === "string",
+    )
+    .map(({ path }) => String(path[1]))
+    .sort(compareText);
+
+  if (typeof frontmatter !== "object" || frontmatter === null || Array.isArray(frontmatter)) {
+    return "frontmatter must be a mapping";
   }
 
-  const strings: string[] = [];
-  for (const item of values) {
-    if (typeof item !== "string" || item === "") {
-      throw new Error(`frontmatter field '${field}' must be a non-empty comma string or string array`);
+  const orderedFields = [
+    "name",
+    "description",
+    "model",
+    "thinking",
+    "tools",
+    "skills",
+    "compaction",
+    "lifecycle",
+  ];
+  const message = error.message;
+  const field = orderedFields.find((candidate) => message.includes(`["${candidate}"]`));
+  const value = field === undefined ? undefined : fieldValue(frontmatter, field);
+
+  if (field === "name" || field === "description") {
+    return `frontmatter field '${field}' must be a non-empty string`;
+  }
+  if (field === "model") {
+    if (typeof value !== "string" || value.trim() === "") {
+      return "frontmatter field 'model' must be a non-empty string";
     }
-    strings.push(item);
+    return "frontmatter field 'model' must use provider/model format";
   }
-  return strings;
-}
-
-function parseTools(value: unknown): SupportedToolName[] {
-  const tools: SupportedToolName[] = [];
-  for (const tool of stringList(value, "tools", true) ?? []) {
-    if (!isSupportedToolName(tool)) throw new Error(`unsupported tool '${tool}'`);
-    tools.push(tool);
+  if (field === "thinking") {
+    if (typeof value !== "string" || value.trim() === "") {
+      return "frontmatter field 'thinking' must be a non-empty string";
+    }
+    return `unsupported thinking level '${value.trim()}'`;
   }
-  return tools;
-}
-
-function parseOptionalBoolean(value: unknown, field: string): boolean | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== "boolean") {
-    throw new Error(`frontmatter field '${field}' must be a boolean`);
-  }
-  return value;
-}
-
-function parseLifecycle(value: unknown): WorkerLifecycle {
-  if (value !== "one-shot" && value !== "reusable") {
-    throw new Error("frontmatter field 'lifecycle' must be 'one-shot' or 'reusable'");
-  }
-  return value;
-}
-
-function parseCompaction(value: unknown): WorkerDefinition["compaction"] {
-  if (value === undefined) return undefined;
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw new Error("frontmatter field 'compaction' must be a mapping");
-  }
-
-  const fields = Object.keys(value).sort(compareText);
-  const unknownFields = fields.filter(
-    (field) => field !== "enabled" && field !== "reserveTokens" && field !== "keepRecentTokens",
-  );
-  if (unknownFields.length > 0) {
-    throw new Error(
-      `unknown compaction field${unknownFields.length === 1 ? "" : "s"}: ${unknownFields.join(", ")}`,
+  if (field === "tools") {
+    const items = listItems(value);
+    const validList = items.length > 0 && items.every(
+      (item) => typeof item === "string" && item !== "",
     );
+    const unsupported = validList ? items.find(
+      (item) => typeof item === "string" && !isSupportedToolName(item),
+    ) : undefined;
+    if (typeof unsupported === "string") return `unsupported tool '${unsupported}'`;
+    if (value === undefined) return "frontmatter field 'tools' is required";
+    return "frontmatter field 'tools' must be a non-empty comma string or string array";
   }
-
-  const enabledValue = "enabled" in value ? value.enabled : undefined;
-  const reserveTokens = "reserveTokens" in value ? value.reserveTokens : undefined;
-  const keepRecentTokens = "keepRecentTokens" in value ? value.keepRecentTokens : undefined;
-  const enabled = parseOptionalBoolean(enabledValue, "compaction.enabled");
-
-  if (
-    reserveTokens !== undefined &&
-    (typeof reserveTokens !== "number" || !Number.isSafeInteger(reserveTokens) || reserveTokens < 0)
-  ) {
-    throw new Error("frontmatter field 'compaction.reserveTokens' must be a non-negative integer");
+  if (field === "skills") {
+    return "frontmatter field 'skills' must be a non-empty comma string or string array";
   }
-  if (
-    keepRecentTokens !== undefined &&
-    (typeof keepRecentTokens !== "number" || !Number.isSafeInteger(keepRecentTokens) || keepRecentTokens < 0)
-  ) {
-    throw new Error("frontmatter field 'compaction.keepRecentTokens' must be a non-negative integer");
+  if (field === "compaction") {
+    if (compactionFields.length > 0) {
+      return `unknown compaction field${compactionFields.length === 1 ? "" : "s"}: ${compactionFields.join(", ")}`;
+    }
+    if (message.includes('["enabled"]')) {
+      return "frontmatter field 'compaction.enabled' must be a boolean";
+    }
+    if (message.includes('["reserveTokens"]')) {
+      return "frontmatter field 'compaction.reserveTokens' must be a non-negative integer";
+    }
+    if (message.includes('["keepRecentTokens"]')) {
+      return "frontmatter field 'compaction.keepRecentTokens' must be a non-negative integer";
+    }
+    return "frontmatter field 'compaction' must be a mapping";
   }
-
-  return { enabled, reserveTokens, keepRecentTokens };
+  if (field === "lifecycle") {
+    return "frontmatter field 'lifecycle' must be 'one-shot' or 'reusable'";
+  }
+  return "invalid worker definition";
 }
 
 function parseWorker(
@@ -200,65 +250,29 @@ function parseWorker(
   source: WorkerSourceKind,
   content: string,
 ): WorkerDefinition {
-  let parsed: ReturnType<typeof parseFrontmatter<WorkerFrontmatter>>;
+  let parsed: ReturnType<typeof parseFrontmatter>;
   try {
-    parsed = parseFrontmatter<WorkerFrontmatter>(content);
+    parsed = parseFrontmatter(content);
   } catch {
     throw new Error("frontmatter is not valid YAML");
   }
 
   const { frontmatter, body } = parsed;
-  if (typeof frontmatter !== "object" || frontmatter === null || Array.isArray(frontmatter)) {
-    throw new Error("frontmatter must be a mapping");
+  const decoded = decodeWorkerFrontmatter(frontmatter);
+  if (Result.isFailure(decoded)) {
+    throw new Error(schemaDiagnostic(decoded.failure, frontmatter));
   }
 
-  const unknownFields = Object.keys(frontmatter)
-    .filter((field) => !KNOWN_FIELDS.has(field))
-    .sort(compareText);
-  if (unknownFields.length > 0) {
-    throw new Error(
-      `unknown frontmatter field${unknownFields.length === 1 ? "" : "s"}: ${unknownFields.join(", ")}`,
-    );
-  }
-
-  const name = requiredString(frontmatter.name, "name");
+  const worker = decoded.success;
   const expectedName = basename(filePath, extname(filePath));
-  if (name !== expectedName) {
-    throw new Error(`frontmatter name '${name}' must match basename '${expectedName}'`);
+  if (worker.name !== expectedName) {
+    throw new Error(`frontmatter name '${worker.name}' must match basename '${expectedName}'`);
   }
-
-  const description = requiredString(frontmatter.description, "description");
-  const model = optionalString(frontmatter.model, "model");
-  if (model !== undefined && !/^[^/\s]+\/\S+$/.test(model)) {
-    throw new Error("frontmatter field 'model' must use provider/model format");
-  }
-
-  const thinking = optionalString(frontmatter.thinking, "thinking");
-  if (thinking !== undefined && !isThinkingLevel(thinking)) {
-    throw new Error(`unsupported thinking level '${thinking}'`);
-  }
-
-  const tools = parseTools(frontmatter.tools);
-  const skills = stringList(frontmatter.skills, "skills", false);
-  const compaction = parseCompaction(frontmatter.compaction);
-  const lifecycle = parseLifecycle(frontmatter.lifecycle);
   if (body.trim() === "") throw new Error("worker prompt body must not be empty");
 
   return {
-    name,
-    description,
-    model:
-      model === undefined
-        ? undefined
-        : {
-            provider: model.slice(0, model.indexOf("/")),
-            modelId: model.slice(model.indexOf("/") + 1),
-          },
-    thinking,
-    tools,
-    skills: skills ?? [],
-    compaction,
-    lifecycle,
+    ...worker,
+    skills: worker.skills ?? [],
     systemPrompt: body,
     source: { kind: source, filePath },
   };
