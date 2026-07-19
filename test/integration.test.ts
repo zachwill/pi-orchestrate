@@ -335,8 +335,21 @@ describe("Pi Orchestrate extension integration", () => {
     await invoke(pi, "orchestrate", "dispatch", orchestrationParams, ctx);
 
     expect(discoveries).toEqual([{ cwd: "/trusted/project", projectTrusted: true }]);
-    expect((promptResult as { systemPrompt: string }).systemPrompt).toStartWith("Parent prompt");
-    expect((promptResult as { systemPrompt: string }).systemPrompt).toContain("trusted-scout");
+    const injectedPrompt = (promptResult as { systemPrompt: string }).systemPrompt;
+    expect(injectedPrompt).toStartWith("Parent prompt");
+    expect(injectedPrompt).toContain("trusted-scout");
+    expect(injectedPrompt).toMatch(
+      /proactively identify.*every useful bounded independent scope.*materially distinct.*validation perspective/i,
+    );
+    expect(injectedPrompt).toMatch(/spin up as many workers as needed.*small fixed default/i);
+    expect(injectedPrompt).toMatch(
+      /roles and counts named by the user.*minimum requirements, not ceilings.*exact cap/i,
+    );
+    expect(injectedPrompt).toMatch(/worker role is reusable.*same catalog worker.*many calls/i);
+    expect(injectedPrompt).toMatch(/full first parallel wave.*before yielding/i);
+    expect(injectedPrompt).toMatch(/deliberate overlap.*only.*distinct evidence sources.*competing hypotheses.*validation perspectives/i);
+    expect(injectedPrompt).toMatch(/accidental duplicate assignments are forbidden/i);
+    expect(injectedPrompt).toMatch(/another full parallel wave before yielding.*adaptive full waves/i);
     expect(runtime.orchestrateCalls[0]?.context.catalog).toBe(catalog);
     expect(runtime.orchestrateCalls[0]?.context.projectTrusted).toBe(true);
     expect(runtime.orchestrateCalls[0]?.task).toEqual(orchestrationParams);

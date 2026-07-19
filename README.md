@@ -28,7 +28,7 @@ Pi Orchestrate adds exactly five tools:
 
 Each `orchestrate` call validates its input, worker definition, and model before allocating IDs or starting a session. Calls are admitted independently: a rejected sibling does not block valid siblings. After admission, a startup or prompt failure settles only that worker as `failed`.
 
-Pi executes sibling tool calls concurrently, with no extension-level group limit or hidden throttle. Before yielding, send every known independent task as sibling `orchestrate` calls in one assistant message. Finish dispatching the whole wave without waiting for any sibling's acceptance or completion; if one call is emitted separately, continue dispatching the remaining known siblings.
+Pi executes sibling tool calls concurrently. There is no extension-level sibling-group cap or hidden throttle. Before yielding, spin up as many workers as needed for the full initial wave, covering every useful independent task and distinct validation perspective with sibling `orchestrate` calls in one assistant message. Finish dispatching that wave without waiting for any sibling's acceptance or completion; if one call is emitted separately, continue dispatching the rest of the wave.
 
 Execution mode depends on the complete tool-call group:
 
@@ -65,10 +65,10 @@ Workers, runs, and queued delivery survive extension reloads and session switche
 
 Pi Orchestrate injects the authoritative orchestration contract and trusted catalog into the parent system prompt. The parent remains responsible for the task end to end:
 
-1. Keep trivial or tightly coupled work in the parent. Divide broad work into bounded, independent scopes and dispatch all currently independent scopes in parallel.
-2. Give every worker a thorough, self-contained brief with the objective, paths and scope, context, success criteria, and expected output. State forbidden actions explicitly.
-3. Before yielding, dispatch every currently known independent scope. Never stop after one call while another known scope remains, and never wait for one sibling's acceptance or completion before dispatching the rest.
-4. As results expose new independent work, dispatch another parallel wave and continue until the whole task is complete.
+1. Keep trivial or tightly coupled work in the parent. For broad work, spin up as many workers as needed to cover every useful bounded independent scope and distinct validation perspective; never use a small default or the number of roles the user names. Named workers and counts are a floor unless the user explicitly states an exact cap; the same role can be instantiated for multiple scopes.
+2. Give every worker a thorough, self-contained brief with the objective, paths and scope, context, success criteria, and expected output. Distinct validation perspectives can intentionally overlap, but avoid accidental duplicate work. State forbidden actions explicitly.
+3. Before yielding, dispatch the full initial wave. Never stop after one call while another useful scope or perspective can run independently, and never wait for one sibling's acceptance or completion before dispatching the rest.
+4. As results expose new independent work, dispatch each full adaptive wave in parallel and continue until the whole task is complete.
 5. Review evidence and changes, resolve conflicts, integrate deliberately, and verify the result.
 6. Produce the final answer from the parent session.
 

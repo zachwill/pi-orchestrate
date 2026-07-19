@@ -53,25 +53,58 @@ describe("orchestrator contract", () => {
       catalog([worker("zeta", "project", "reusable"), worker("alpha", "package")]),
     );
 
-    expectContractRule(result, [/\bbroad\b/i, /\bbounded\b/i, /\bindependent\b/i, /\bparallel\b/i]);
+    expectContractRule(result, [
+      /\bproactively identify\b/i,
+      /\bevery useful bounded independent scope\b/i,
+      /\bmaterially distinct\b/i,
+      /\bevidence\b/i,
+      /\bhypothesis\b/i,
+      /\bvalidation\b/i,
+    ]);
+    expectContractRule(result, [
+      /\bspin up as many workers as needed\b/i,
+      /\bnever\b/i,
+      /\bsmall fixed default\b/i,
+    ]);
+    expectContractRule(result, [
+      /\bworker roles and counts named by the user\b/i,
+      /\bminimum requirements\b/i,
+      /\bnot ceilings\b/i,
+      /\bexact cap\b/i,
+    ]);
+    expectContractRule(result, [
+      /\bworker role is reusable\b/i,
+      /\bsame catalog worker\b/i,
+      /\bmany calls\b/i,
+      /\bseparate scopes or perspectives\b/i,
+    ]);
     expectContractRule(result, [
       /\bbefore dispatching\b/i,
-      /\bcurrent parallel wave\b/i,
-      /\bevery currently known independent scope\b/i,
-      /\bbefore yielding\b/i,
+      /\bfull first parallel wave\b/i,
+      /\bfrom the work itself\b/i,
+      /\bdispatch that entire wave before yielding\b/i,
     ]);
     expectContractRule(result, [
       /\bnever stop\b/i,
       /`orchestrate`/,
-      /\banother known independent scope\b/i,
+      /\banother useful scope or perspective can run independently\b/i,
       /\bacceptance or completion\b/i,
       /\bdispatching the rest\b/i,
     ]);
     expectContractRule(result, [
       /`orchestrate`/,
       /\{ worker, title, instructions \}/,
+      /\bfull wave\b/i,
       /\bsibling\b/i,
       /\bone assistant message\b/i,
+    ]);
+    expectContractRule(result, [
+      /\bdeliberate overlap\b/i,
+      /\bonly\b/i,
+      /\bdistinct evidence sources\b/i,
+      /\bcompeting hypotheses\b/i,
+      /\bvalidation perspectives\b/i,
+      /\baccidental duplicate assignments are forbidden\b/i,
     ]);
     expectContractRule(result, [
       /\bthorough\b/i,
@@ -83,12 +116,19 @@ describe("orchestrator contract", () => {
     ]);
     expectContractRule(result, [/`orchestrate`/, /\basynchronously\b/i, /\binline\b/i, /\bblocking\b/i]);
     expectContractRule(result, [
-      /\bevery currently known sibling\b/i,
+      /\bfull current wave\b/i,
       /\badmissions have resolved\b/i,
       /\brejected sibling does not block yielding\b/i,
     ]);
     expectContractRule(result, [/\bpoll\b/i, /`orchestration_status`/]);
-    expectContractRule(result, [/\bresults\b/i, /\bnew independent work\b/i, /\bparallel wave\b/i, /\bwhole task\b/i]);
+    expectContractRule(result, [
+      /\bresults\b/i,
+      /\bmore useful independent scopes\b/i,
+      /\bmaterially distinct perspectives\b/i,
+      /\banother full parallel wave\b/i,
+      /\bcontinue adaptive full waves\b/i,
+      /\bwhole task\b/i,
+    ]);
     expectContractRule(result, [/\bparent\b/i, /\bsynthesi[sz]/i, /\breview/i, /\bverification\b/i]);
     expect(result).not.toContain("active-work widget");
     expectContractRule(result, [/\breusable\b/i, /\bready\b/i, /`worker_send`/, /`worker_close`/]);

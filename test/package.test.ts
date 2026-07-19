@@ -197,6 +197,17 @@ describe("published documentation", () => {
     expect(documentedTools).toEqual([...canonicalTools]);
     expect(tools).toContain("orchestrate({ worker, title, instructions })");
 
+    expectBlockWith(dispatch, [
+      /\bno extension-level\b/i,
+      /\bsibling-group cap\b/i,
+      /\bhidden throttle\b/i,
+    ]);
+    expectBlockWith(dispatch, [
+      /\bspin up as many workers as needed\b/i,
+      /\bfull initial wave\b/i,
+      /\bevery useful independent task\b/i,
+      /\bbefore yielding\b/i,
+    ]);
     expectBlockWith(dispatch, [/\bpreflight|validates\b/i, /\bsibling\b/i, /\bindependently\b/i]);
     expectBlockWith(dispatch, [/\bpure group\b/i, /\basynchronous\b/i, /\bconcurrent\b/i]);
     expectBlockWith(dispatch, [/\bmixing\b/i, /\binline\b/i, /\bblocking\b/i]);
@@ -212,8 +223,22 @@ describe("published documentation", () => {
     expectBlockWith(lifecycle, [/\bprocess\b/i, /\breloads?\b/i, /\bclose\b/i]);
 
     expectBlockWith(parent, [/\bbounded\b/i, /\bindependent\b/i, /\bparallel\b/i]);
+    expectBlockWith(parent, [
+      /\bspin up as many workers as needed\b/i,
+      /\bevery useful bounded independent scope\b/i,
+      /\bsmall default\b/i,
+      /\bnumber of roles\b/i,
+    ]);
+    expectBlockWith(parent, [/\bnamed workers and counts\b/i, /\bfloor\b/i, /\bexact cap\b/i]);
+    expectBlockWith(parent, [/\bsame role\b/i, /\bmultiple scopes\b/i]);
+    expectBlockWith(parent, [
+      /\bdistinct validation perspectives\b/i,
+      /\bintentionally overlap\b/i,
+      /\baccidental duplicate work\b/i,
+    ]);
     expectBlockWith(parent, [/\bself-contained\b/i, /\bsuccess criteria\b/i, /\bexpected output\b/i]);
-    expectBlockWith(parent, [/\bresults expose\b/i, /\bparallel wave\b/i, /\bwhole task\b/i]);
+    expectBlockWith(parent, [/\bfull initial wave\b/i, /\bbefore yielding\b/i]);
+    expectBlockWith(parent, [/\bresults expose\b/i, /\bfull adaptive wave\b/i, /\bwhole task\b/i]);
     expectBlockWith(parent, [/\breview\b/i, /\bverify\b/i, /\bfinal answer\b/i]);
 
     const precedence = catalog.match(/^\d+\. .*$/gm) ?? [];

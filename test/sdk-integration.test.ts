@@ -662,6 +662,20 @@ describe("Pi 0.80.10 SDK integration", () => {
       expect(initialParent.systemPrompt).toStartWith(BASE_SYSTEM_PROMPT);
       expect(initialParent.systemPrompt).toContain("## Pi Orchestrate Contract");
       expect(initialParent.systemPrompt).toContain("sibling `orchestrate` calls");
+      expect(initialParent.systemPrompt).toMatch(
+        /proactively identify.*every useful bounded independent scope.*materially distinct.*validation perspective/i,
+      );
+      expect(initialParent.systemPrompt).toMatch(
+        /spin up as many workers as needed.*small fixed default/i,
+      );
+      expect(initialParent.systemPrompt).toMatch(
+        /roles and counts named by the user.*minimum requirements, not ceilings.*exact cap/i,
+      );
+      expect(initialParent.systemPrompt).toMatch(/worker role is reusable.*same catalog worker.*many calls/i);
+      expect(initialParent.systemPrompt).toMatch(/full first parallel wave.*before yielding/i);
+      expect(initialParent.systemPrompt).toMatch(/deliberate overlap.*only.*distinct evidence sources.*competing hypotheses.*validation perspectives/i);
+      expect(initialParent.systemPrompt).toMatch(/accidental duplicate assignments are forbidden/i);
+      expect(initialParent.systemPrompt).toMatch(/another full parallel wave before yielding.*adaptive full waves/i);
       expect(initialParent.systemPrompt).toContain("Trusted worker catalog");
       expect(initialParent.systemPrompt).toContain("`scout` [package]");
       expect(initialParent.systemPrompt).toContain("`investigator` [package]");

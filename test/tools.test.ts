@@ -384,15 +384,21 @@ describe("registerOrchestrationTools", () => {
     const bullets = pi.tools.flatMap((tool) => tool.promptGuidelines ?? []);
 
     expect(new Set(bullets).size).toBe(bullets.length);
-    expect(pi.tool("orchestrate").description).toContain("one fully briefed task");
-    expect(pi.tool("orchestrate").description).toContain("sibling orchestrate calls");
-    expect(pi.tool("orchestrate").description).toContain("asynchronously");
-    expect(pi.tool("orchestrate").promptSnippet).toContain("one fully briefed worker task");
-    expect(pi.tool("orchestrate").promptGuidelines?.[0]).toContain("one complete brief per call");
-    expect(pi.tool("orchestrate").promptGuidelines?.[1]).toContain(
-      "dispatch every currently known independent task",
+    const orchestrate = pi.tool("orchestrate");
+    const orchestrateGuidance = orchestrate.promptGuidelines?.join(" ") ?? "";
+    expect(orchestrate.description).toContain("worker scopes");
+    expect(orchestrate.description.toLowerCase()).toContain("sibling orchestrate calls");
+    expect(orchestrate.description).toContain("asynchronously");
+    expect(orchestrate.promptSnippet).toContain("parallel worker scopes");
+    expect(orchestrateGuidance).toContain("as many workers as needed");
+    expect(orchestrateGuidance).toContain(
+      "every useful parallel scope and distinct validation perspective",
     );
-    expect(pi.tool("orchestrate").promptGuidelines?.[1]).toContain(
+    expect(orchestrateGuidance).toContain("a floor unless explicitly capped");
+    expect(orchestrateGuidance).toContain("same worker role across multiple calls");
+    expect(orchestrateGuidance).toContain("each call one complete brief");
+    expect(orchestrateGuidance).toContain("all sibling orchestrate calls before yielding");
+    expect(orchestrateGuidance).toContain(
       "never wait for one sibling's acceptance or completion",
     );
     expect(pi.tool("orchestration_status").description).toContain("Never poll");

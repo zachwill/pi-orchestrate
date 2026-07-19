@@ -111,11 +111,11 @@ export function registerOrchestrationTools(
     name: "orchestrate",
     label: "Orchestrate",
     description:
-      "Dispatch one fully briefed task. One or more sibling orchestrate calls run concurrently and asynchronously. Mixing orchestrate with another tool makes it inline and blocking.",
-    promptSnippet: "Dispatch one fully briefed worker task",
+      "Dispatch fully briefed worker scopes. Sibling orchestrate calls run concurrently and asynchronously. Mixing orchestrate with another tool makes it inline and blocking.",
+    promptSnippet: "Dispatch fully briefed parallel worker scopes",
     promptGuidelines: [
-      "Use sibling orchestrate calls for independent tasks, with one complete brief per call.",
-      "Before yielding, dispatch every currently known independent task; never wait for one sibling's acceptance or completion before dispatching the rest.",
+      "Spin up as many workers as needed to cover every useful parallel scope and distinct validation perspective. Treat user-named workers or counts as a floor unless explicitly capped, and reuse the same worker role across multiple calls when useful.",
+      "Give each call one complete brief, and emit all sibling orchestrate calls before yielding; never wait for one sibling's acceptance or completion before dispatching the rest.",
     ],
     executionMode: "parallel",
     parameters: orchestrateSchema,

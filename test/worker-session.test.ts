@@ -584,6 +584,8 @@ describe("worker session factory", () => {
       await parentRuntime.refresh({ allowNetwork: false });
       const parentModel = parentRuntime.getModel(providerId, modelId)!;
       const factory = createWorkerSessionFactory({
+        createModelRuntime: (input) =>
+          ModelRuntime.create({ ...input, allowModelNetwork: false }),
         createSessionManager: ({ cwd: sessionCwd, parentSessionFile }) =>
           SessionManager.create(sessionCwd, join(root, "sessions"), {
             parentSession: parentSessionFile,
