@@ -406,13 +406,22 @@ describe("registerOrchestrationTools", () => {
       "To run it asynchronously, include no other tool calls; harmless response text does not affect runtime classification",
     );
     expect(orchestrateGuidance).toContain(
-      "Form all N native sibling calls before emitting or finalizing the response",
+      "When a parallel tool dispatcher is available, use it once with exactly N orchestrate entries and no other tools",
     );
     expect(orchestrateGuidance).toContain(
-      "A successfully admitted sole async orchestrate call returns terminate=true and ends the turn, so omitted siblings cannot be added afterward",
+      "N functions.orchestrate entries in multi_tool_use.parallel",
     );
     expect(orchestrateGuidance).toContain(
-      "never wait for one sibling's acceptance or completion",
+      "Otherwise emit N native sibling orchestrate calls in one assistant response",
+    );
+    expect(orchestrateGuidance).toContain(
+      "Form all N calls before emitting or finalizing the response",
+    );
+    expect(orchestrateGuidance).toContain(
+      "Never emit one call and wait for its result before forming the rest of the wave",
+    );
+    expect(orchestrateGuidance).toContain(
+      "a successfully admitted sole async orchestrate call returns terminate=true and ends the turn",
     );
     expect(pi.tool("orchestration_status").description).toContain("Never poll");
     expect(pi.tool("orchestration_status").promptGuidelines?.[0]).toContain("never poll");

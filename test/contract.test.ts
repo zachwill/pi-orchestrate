@@ -96,15 +96,27 @@ describe("orchestrator contract", () => {
       /\bomitted siblings cannot be added afterward\b/i,
     ]);
     expectContractRule(result, [
+      /\bparallel-dispatch mechanism\b/i,
+      /\bparallel tool dispatcher is available\b/i,
+      /`multi_tool_use\.parallel`/,
+      /\bexactly N\b/i,
+      /`functions\.orchestrate`/,
+      /\bno other tools\b/i,
+      /\bno parallel dispatcher is available\b/i,
+      /\bN native sibling\b/i,
+      /\bsame assistant response\b/i,
+      /\bnever represent an N-worker wave as N sequential assistant responses\b/i,
+    ]);
+    expectContractRule(result, [
       /\basynchronous response shape\b/i,
       /\bto run that wave asynchronously\b/i,
-      /\btool-call group\b/i,
+      /\bresulting expanded tool-call group\b/i,
       /\bexactly those N\b/i,
       /\bno other tool calls\b/i,
       /\bharmless response text does not affect runtime classification\b/i,
-      /\bPi executes native sibling tool calls concurrently\b/i,
+      /\bPi executes sibling tool calls concurrently\b/i,
       /\bFor N=3\b/i,
-      /\bemit three native sibling calls in one response\b/i,
+      /\bsubmit together three calls\b/i,
       /\{ worker, title, instructions \}/,
     ]);
     expectContractRule(result, [

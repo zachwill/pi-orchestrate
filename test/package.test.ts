@@ -211,10 +211,17 @@ describe("published documentation", () => {
       /`terminate: true`/,
       /\bends the parent turn\b/i,
       /\bomitted siblings cannot be added afterward\b/i,
+    ]);
+    expectBlockWith(dispatch, [
+      /\bparallel tool dispatcher\b/i,
+      /`multi_tool_use\.parallel`/,
+      /\bexactly N `functions\.orchestrate` entries\b/i,
+      /\bwithout a dispatcher\b/i,
+      /\bN native sibling\b/i,
       /\bno other tool calls\b/i,
       /\bharmless response text does not affect runtime classification\b/i,
       /\bthree-worker wave\b/i,
-      /\bthree native sibling\b/i,
+      /\bsubmits all three\b/i,
     ]);
     expectBlockWith(dispatch, [/\bpreflight|validates\b/i, /\bsibling\b/i, /\bindependently\b/i]);
     expectBlockWith(dispatch, [
@@ -254,13 +261,17 @@ describe("published documentation", () => {
     expectBlockWith(parent, [/\bself-contained\b/i, /\bsuccess criteria\b/i, /\bexpected output\b/i]);
     expectBlockWith(parent, [
       /\bintended asynchronous wave of N workers\b/i,
-      /\btool-call group exactly N fully briefed native sibling\b/i,
+      /\bsubmit exactly N fully briefed `orchestrate` calls together\b/i,
       /\bno other tool calls\b/i,
+      /\bprefer one parallel dispatcher call\b/i,
+      /`multi_tool_use\.parallel`/,
+      /\botherwise emit N native siblings\b/i,
       /\bharmless response text does not affect runtime classification\b/i,
       /\bsingle call is valid only for N=1\b/i,
       /\bsuccessfully admitted sole async call returns\b/i,
       /`terminate: true`/,
       /\bends the turn\b/i,
+      /\bnever emit one call and wait for its result\b/i,
     ]);
     expectBlockWith(parent, [/\bresults expose\b/i, /\bfull adaptive wave\b/i, /\bwhole task\b/i]);
     expectBlockWith(parent, [/\breview\b/i, /\bverify\b/i, /\bfinal answer\b/i]);

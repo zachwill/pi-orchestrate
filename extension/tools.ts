@@ -116,7 +116,8 @@ export function registerOrchestrationTools(
     promptGuidelines: [
       "Spin up as many workers as needed to cover every useful parallel scope and distinct validation perspective. Treat user-named workers or counts as a floor unless explicitly capped, and reuse the same worker role across multiple calls when useful.",
       "For an intended async wave of N workers, the next assistant response must contain exactly N separate, fully briefed orchestrate calls; one call is valid only when N=1. To run it asynchronously, include no other tool calls; harmless response text does not affect runtime classification.",
-      "Form all N native sibling calls before emitting or finalizing the response. A successfully admitted sole async orchestrate call returns terminate=true and ends the turn, so omitted siblings cannot be added afterward; never wait for one sibling's acceptance or completion.",
+      "When a parallel tool dispatcher is available, use it once with exactly N orchestrate entries and no other tools; for example, put N functions.orchestrate entries in multi_tool_use.parallel. Otherwise emit N native sibling orchestrate calls in one assistant response.",
+      "Form all N calls before emitting or finalizing the response. Never emit one call and wait for its result before forming the rest of the wave: a successfully admitted sole async orchestrate call returns terminate=true and ends the turn.",
     ],
     executionMode: "parallel",
     parameters: orchestrateSchema,

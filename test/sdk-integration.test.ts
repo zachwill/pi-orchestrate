@@ -661,7 +661,7 @@ describe("Pi 0.80.10 SDK integration", () => {
       expect(initialParent.systemPrompt).toBe(harness.effectivePrompts[0]!);
       expect(initialParent.systemPrompt).toStartWith(BASE_SYSTEM_PROMPT);
       expect(initialParent.systemPrompt).toContain("## Pi Orchestrate Contract");
-      expect(initialParent.systemPrompt).toContain("Pi executes native sibling tool calls concurrently");
+      expect(initialParent.systemPrompt).toContain("Pi executes sibling tool calls concurrently");
       expect(initialParent.systemPrompt).toMatch(
         /proactively identify.*every useful bounded independent scope.*materially distinct.*validation perspective/i,
       );
@@ -680,7 +680,10 @@ describe("Pi 0.80.10 SDK integration", () => {
         /form all N invocations before emitting or finalizing.*successfully admitted sole async invocation returns.*terminate: true.*ends the parent turn.*omitted siblings cannot be added afterward/i,
       );
       expect(initialParent.systemPrompt).toMatch(
-        /to run that wave asynchronously.*tool-call group.*no other tool calls.*harmless response text does not affect runtime classification.*Pi executes native sibling tool calls concurrently.*For N=3.*three native sibling calls in one response/i,
+        /parallel tool dispatcher is available.*multi_tool_use\.parallel.*exactly N.*functions\.orchestrate.*no other tools.*no parallel dispatcher is available.*N native sibling.*same assistant response/i,
+      );
+      expect(initialParent.systemPrompt).toMatch(
+        /to run that wave asynchronously.*resulting expanded tool-call group.*no other tool calls.*harmless response text does not affect runtime classification.*Pi executes sibling tool calls concurrently.*For N=3.*submit together three calls/i,
       );
       expect(initialParent.systemPrompt).toMatch(
         /Pi Orchestrate treats a successfully admitted sole `orchestrate` call or pure sibling group as async.*Pi executes native sibling tools concurrently/i,

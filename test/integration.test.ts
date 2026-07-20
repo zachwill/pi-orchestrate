@@ -360,7 +360,10 @@ describe("Pi Orchestrate extension integration", () => {
       /form all N invocations before emitting or finalizing.*successfully admitted sole async invocation returns.*terminate: true.*ends the parent turn.*omitted siblings cannot be added afterward/i,
     );
     expect(injectedPrompt).toMatch(
-      /to run that wave asynchronously.*tool-call group.*no other tool calls.*harmless response text does not affect runtime classification.*Pi executes native sibling tool calls concurrently.*For N=3.*three native sibling calls in one response/i,
+      /parallel tool dispatcher is available.*multi_tool_use\.parallel.*exactly N.*functions\.orchestrate.*no other tools.*no parallel dispatcher is available.*N native sibling.*same assistant response/i,
+    );
+    expect(injectedPrompt).toMatch(
+      /to run that wave asynchronously.*resulting expanded tool-call group.*no other tool calls.*harmless response text does not affect runtime classification.*Pi executes sibling tool calls concurrently.*For N=3.*submit together three calls/i,
     );
     expect(injectedPrompt).toMatch(
       /Pi Orchestrate treats a successfully admitted sole `orchestrate` call or pure sibling group as async.*Pi executes native sibling tools concurrently/i,
