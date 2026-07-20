@@ -84,22 +84,25 @@ describe("orchestrator contract", () => {
       /\bfrom the work itself\b/i,
     ]);
     expectContractRule(result, [
-      /\bmandatory wave cardinality\b/i,
-      /\bwave has N workers\b/i,
+      /\bmandatory asynchronous-wave cardinality\b/i,
+      /\bintended asynchronous wave has N workers\b/i,
       /\bnext assistant response must contain exactly N separate, fully briefed\b/i,
       /`orchestrate` invocations/,
       /\bsingle invocation is valid only when N=1\b/i,
       /\bform all N invocations before emitting or finalizing\b/i,
-      /\bsole asynchronous invocation ends the parent turn\b/i,
+      /\bsuccessfully admitted sole async invocation returns\b/i,
       /`terminate: true`/,
+      /\bends the parent turn\b/i,
       /\bomitted siblings cannot be added afterward\b/i,
     ]);
     expectContractRule(result, [
-      /\bmandatory response shape\b/i,
-      /\bpure orchestration\b/i,
+      /\basynchronous response shape\b/i,
+      /\bto run that wave asynchronously\b/i,
+      /\btool-call group\b/i,
       /\bexactly those N\b/i,
-      /\bno text or non-orchestration tools\b/i,
-      /\bPi natively supports sibling tool calls\b/i,
+      /\bno other tool calls\b/i,
+      /\bharmless response text does not affect runtime classification\b/i,
+      /\bPi executes native sibling tool calls concurrently\b/i,
       /\bFor N=3\b/i,
       /\bemit three native sibling calls in one response\b/i,
       /\{ worker, title, instructions \}/,
@@ -126,7 +129,15 @@ describe("orchestrator contract", () => {
       /\bsuccess criteria\b/i,
       /\bexpected output\b/i,
     ]);
-    expectContractRule(result, [/`orchestrate`/, /\basynchronously\b/i, /\binline\b/i, /\bblocking\b/i]);
+    expectContractRule(result, [
+      /\bPi Orchestrate treats\b/i,
+      /\bsuccessfully admitted sole\b/i,
+      /`orchestrate`/,
+      /\bpure sibling group as async\b/i,
+      /\bPi executes native sibling tools concurrently\b/i,
+      /\binline\b/i,
+      /\bblocking\b/i,
+    ]);
     expectContractRule(result, [
       /\bfull current wave\b/i,
       /\badmissions have resolved\b/i,

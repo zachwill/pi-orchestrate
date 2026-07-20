@@ -387,8 +387,10 @@ describe("registerOrchestrationTools", () => {
     const orchestrate = pi.tool("orchestrate");
     const orchestrateGuidance = orchestrate.promptGuidelines?.join(" ") ?? "";
     expect(orchestrate.description).toContain("worker scopes");
-    expect(orchestrate.description.toLowerCase()).toContain("sibling orchestrate calls");
-    expect(orchestrate.description).toContain("asynchronously");
+    expect(orchestrate.description).toContain("Pi executes native sibling tools concurrently");
+    expect(orchestrate.description).toContain(
+      "Pi Orchestrate treats a successfully admitted sole orchestrate call or pure sibling group as async",
+    );
     expect(orchestrate.promptSnippet).toContain("parallel worker scopes");
     expect(orchestrateGuidance).toContain("as many workers as needed");
     expect(orchestrateGuidance).toContain(
@@ -397,17 +399,17 @@ describe("registerOrchestrationTools", () => {
     expect(orchestrateGuidance).toContain("a floor unless explicitly capped");
     expect(orchestrateGuidance).toContain("same worker role across multiple calls");
     expect(orchestrateGuidance).toContain(
-      "enumerated wave of N workers, the next assistant response must contain exactly N separate, fully briefed orchestrate calls",
+      "intended async wave of N workers, the next assistant response must contain exactly N separate, fully briefed orchestrate calls",
     );
     expect(orchestrateGuidance).toContain("one call is valid only when N=1");
     expect(orchestrateGuidance).toContain(
-      "pure orchestration response with no text or other tools",
+      "To run it asynchronously, include no other tool calls; harmless response text does not affect runtime classification",
     );
     expect(orchestrateGuidance).toContain(
       "Form all N native sibling calls before emitting or finalizing the response",
     );
     expect(orchestrateGuidance).toContain(
-      "A sole async orchestrate call ends the turn, so omitted siblings cannot be added afterward",
+      "A successfully admitted sole async orchestrate call returns terminate=true and ends the turn, so omitted siblings cannot be added afterward",
     );
     expect(orchestrateGuidance).toContain(
       "never wait for one sibling's acceptance or completion",

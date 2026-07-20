@@ -661,7 +661,7 @@ describe("Pi 0.80.10 SDK integration", () => {
       expect(initialParent.systemPrompt).toBe(harness.effectivePrompts[0]!);
       expect(initialParent.systemPrompt).toStartWith(BASE_SYSTEM_PROMPT);
       expect(initialParent.systemPrompt).toContain("## Pi Orchestrate Contract");
-      expect(initialParent.systemPrompt).toContain("sibling `orchestrate` calls");
+      expect(initialParent.systemPrompt).toContain("Pi executes native sibling tool calls concurrently");
       expect(initialParent.systemPrompt).toMatch(
         /proactively identify.*every useful bounded independent scope.*materially distinct.*validation perspective/i,
       );
@@ -674,13 +674,16 @@ describe("Pi 0.80.10 SDK integration", () => {
       expect(initialParent.systemPrompt).toMatch(/worker role is reusable.*same catalog worker.*many calls/i);
       expect(initialParent.systemPrompt).toMatch(/enumerate the full first parallel wave.*from the work itself/i);
       expect(initialParent.systemPrompt).toMatch(
-        /wave has N workers.*next assistant response must contain exactly N separate, fully briefed `orchestrate` invocations.*single invocation is valid only when N=1/i,
+        /intended asynchronous wave has N workers.*next assistant response must contain exactly N separate, fully briefed `orchestrate` invocations.*single invocation is valid only when N=1/i,
       );
       expect(initialParent.systemPrompt).toMatch(
-        /form all N invocations before emitting or finalizing.*sole asynchronous invocation ends the parent turn.*terminate: true.*omitted siblings cannot be added afterward/i,
+        /form all N invocations before emitting or finalizing.*successfully admitted sole async invocation returns.*terminate: true.*ends the parent turn.*omitted siblings cannot be added afterward/i,
       );
       expect(initialParent.systemPrompt).toMatch(
-        /pure orchestration.*no text or non-orchestration tools.*For N=3.*three native sibling calls in one response/i,
+        /to run that wave asynchronously.*tool-call group.*no other tool calls.*harmless response text does not affect runtime classification.*Pi executes native sibling tool calls concurrently.*For N=3.*three native sibling calls in one response/i,
+      );
+      expect(initialParent.systemPrompt).toMatch(
+        /Pi Orchestrate treats a successfully admitted sole `orchestrate` call or pure sibling group as async.*Pi executes native sibling tools concurrently/i,
       );
       expect(initialParent.systemPrompt).toMatch(/deliberate overlap.*only.*distinct evidence sources.*competing hypotheses.*validation perspectives/i);
       expect(initialParent.systemPrompt).toMatch(/accidental duplicate assignments are forbidden/i);

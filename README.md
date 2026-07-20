@@ -28,12 +28,12 @@ Pi Orchestrate adds exactly five tools:
 
 Each `orchestrate` call validates its input, worker definition, and model before allocating IDs or starting a session. Calls are admitted independently: a rejected sibling does not block valid siblings. After admission, a startup or prompt failure settles only that worker as `failed`.
 
-Pi executes native sibling tool calls concurrently. There is no extension-level sibling-group cap or hidden throttle. Before dispatching, enumerate the full wave. If that wave has N workers, the next assistant response must contain exactly N separate, fully briefed `orchestrate` calls; one call is valid only when N=1. Form all N calls before emitting or finalizing the response because a sole asynchronous call ends the parent turn, so omitted siblings cannot be added afterward. The response must contain only those orchestration calls—no text or other tools. For example, a three-worker wave is one assistant response containing three native sibling `orchestrate({ worker, title, instructions })` calls.
+Pi executes native sibling tool calls concurrently. There is no extension-level sibling-group cap or hidden throttle. Before dispatching, enumerate the full wave. If an intended asynchronous wave has N workers, the next assistant response must contain exactly N separate, fully briefed `orchestrate` calls; one call is valid only when N=1. Form all N calls before emitting or finalizing the response because a successfully admitted sole async call returns `terminate: true` and ends the parent turn, so omitted siblings cannot be added afterward. To run the wave asynchronously, its tool-call group must contain exactly those N orchestration calls and no other tool calls. Harmless response text does not affect runtime classification. For example, a three-worker wave is one assistant response containing three native sibling `orchestrate({ worker, title, instructions })` calls.
 
 Execution mode depends on the complete tool-call group:
 
-- One `orchestrate` call is asynchronous.
-- A pure group of sibling `orchestrate` calls is asynchronous and concurrent.
+- Pi Orchestrate treats a successfully admitted sole `orchestrate` call as async.
+- Pi Orchestrate treats a successfully admitted pure group of sibling `orchestrate` calls as async; Pi executes the siblings concurrently.
 - Mixing `orchestrate` with any other tool makes the orchestration calls inline and blocking.
 - `worker_send` is asynchronous only when it is the sole tool call in the message.
 
@@ -67,7 +67,7 @@ Pi Orchestrate injects the authoritative orchestration contract and trusted cata
 
 1. Keep trivial or tightly coupled work in the parent. For broad work, spin up as many workers as needed to cover every useful bounded independent scope and distinct validation perspective; never use a small default or the number of roles the user names. Named workers and counts are a floor unless the user explicitly states an exact cap; the same role can be instantiated for multiple scopes.
 2. Give every worker a thorough, self-contained brief with the objective, paths and scope, context, success criteria, and expected output. Distinct validation perspectives can intentionally overlap, but avoid accidental duplicate work. State forbidden actions explicitly.
-3. For an enumerated wave of N workers, make the next assistant response exactly N fully briefed native sibling `orchestrate` calls and nothing else. A single call is valid only for N=1. Form the complete response before emitting it because a sole asynchronous call ends the turn; never wait for one sibling before dispatching the rest.
+3. For an intended asynchronous wave of N workers, make the next assistant response's tool-call group exactly N fully briefed native sibling `orchestrate` calls and no other tool calls. Harmless response text does not affect runtime classification. A single call is valid only for N=1. Form the complete group before emitting it because a successfully admitted sole async call returns `terminate: true` and ends the turn; never wait for one sibling before dispatching the rest.
 4. As results expose new independent work, dispatch each full adaptive wave in parallel and continue until the whole task is complete.
 5. Review evidence and changes, resolve conflicts, integrate deliberately, and verify the result.
 6. Produce the final answer from the parent session.

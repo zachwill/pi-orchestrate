@@ -111,12 +111,12 @@ export function registerOrchestrationTools(
     name: "orchestrate",
     label: "Orchestrate",
     description:
-      "Dispatch fully briefed worker scopes. Native sibling orchestrate calls run concurrently and asynchronously. Mixing orchestrate with another tool makes it inline and blocking.",
+      "Dispatch fully briefed worker scopes. Pi executes native sibling tools concurrently; Pi Orchestrate treats a successfully admitted sole orchestrate call or pure sibling group as async. Mixing orchestrate with another tool makes it inline and blocking.",
     promptSnippet: "Dispatch fully briefed parallel worker scopes",
     promptGuidelines: [
       "Spin up as many workers as needed to cover every useful parallel scope and distinct validation perspective. Treat user-named workers or counts as a floor unless explicitly capped, and reuse the same worker role across multiple calls when useful.",
-      "For an enumerated wave of N workers, the next assistant response must contain exactly N separate, fully briefed orchestrate calls; one call is valid only when N=1. Make it a pure orchestration response with no text or other tools.",
-      "Form all N native sibling calls before emitting or finalizing the response. A sole async orchestrate call ends the turn, so omitted siblings cannot be added afterward; never wait for one sibling's acceptance or completion.",
+      "For an intended async wave of N workers, the next assistant response must contain exactly N separate, fully briefed orchestrate calls; one call is valid only when N=1. To run it asynchronously, include no other tool calls; harmless response text does not affect runtime classification.",
+      "Form all N native sibling calls before emitting or finalizing the response. A successfully admitted sole async orchestrate call returns terminate=true and ends the turn, so omitted siblings cannot be added afterward; never wait for one sibling's acceptance or completion.",
     ],
     executionMode: "parallel",
     parameters: orchestrateSchema,

@@ -260,15 +260,21 @@ function install(
   })(pi as unknown as ExtensionAPI);
 }
 
-function assistantToolCalls(calls: Array<{ id: string; name: string }>) {
+function assistantToolCalls(
+  calls: Array<{ id: string; name: string }>,
+  text?: string,
+) {
+  const toolCalls = calls.map((call) => ({
+    type: "toolCall" as const,
+    id: call.id,
+    name: call.name,
+    arguments: {},
+  }));
   return {
     role: "assistant",
-    content: calls.map((call) => ({
-      type: "toolCall" as const,
-      id: call.id,
-      name: call.name,
-      arguments: {},
-    })),
+    content: text === undefined
+      ? toolCalls
+      : [{ type: "text" as const, text }, ...toolCalls],
   };
 }
 
@@ -348,13 +354,16 @@ describe("Pi Orchestrate extension integration", () => {
     expect(injectedPrompt).toMatch(/worker role is reusable.*same catalog worker.*many calls/i);
     expect(injectedPrompt).toMatch(/enumerate the full first parallel wave.*from the work itself/i);
     expect(injectedPrompt).toMatch(
-      /wave has N workers.*next assistant response must contain exactly N separate, fully briefed `orchestrate` invocations.*single invocation is valid only when N=1/i,
+      /intended asynchronous wave has N workers.*next assistant response must contain exactly N separate, fully briefed `orchestrate` invocations.*single invocation is valid only when N=1/i,
     );
     expect(injectedPrompt).toMatch(
-      /form all N invocations before emitting or finalizing.*sole asynchronous invocation ends the parent turn.*terminate: true.*omitted siblings cannot be added afterward/i,
+      /form all N invocations before emitting or finalizing.*successfully admitted sole async invocation returns.*terminate: true.*ends the parent turn.*omitted siblings cannot be added afterward/i,
     );
     expect(injectedPrompt).toMatch(
-      /pure orchestration.*no text or non-orchestration tools.*For N=3.*three native sibling calls in one response/i,
+      /to run that wave asynchronously.*tool-call group.*no other tool calls.*harmless response text does not affect runtime classification.*Pi executes native sibling tool calls concurrently.*For N=3.*three native sibling calls in one response/i,
+    );
+    expect(injectedPrompt).toMatch(
+      /Pi Orchestrate treats a successfully admitted sole `orchestrate` call or pure sibling group as async.*Pi executes native sibling tools concurrently/i,
     );
     expect(injectedPrompt).toMatch(/deliberate overlap.*only.*distinct evidence sources.*competing hypotheses.*validation perspectives/i);
     expect(injectedPrompt).toMatch(/accidental duplicate assignments are forbidden/i);
@@ -390,7 +399,7 @@ describe("Pi Orchestrate extension integration", () => {
     expect(runtime.snapshotOwners).toEqual(snapshotCallsBeforeDispatch);
   });
 
-  test("keeps mixed calls inline and accepts pure sibling orchestrations asynchronously", async () => {
+  test("keeps mixed calls inline and accepts sibling-only tool groups with harmless text asynchronously", async () => {
     const pi = new FakePi();
     const { host, runtime } = fakeHost();
     install(pi, host);
@@ -424,7 +433,7 @@ describe("Pi Orchestrate extension integration", () => {
           { id: "first-dispatch", name: "orchestrate" },
           { id: "second-dispatch", name: "orchestrate" },
           { id: "third-dispatch", name: "orchestrate" },
-        ]),
+        ], "Dispatching the full three-worker wave."),
       },
       ctx,
     );

@@ -203,18 +203,28 @@ describe("published documentation", () => {
       /\bhidden throttle\b/i,
     ]);
     expectBlockWith(dispatch, [
-      /\bwave has N workers\b/i,
+      /\bintended asynchronous wave has N workers\b/i,
       /\bnext assistant response must contain exactly N separate, fully briefed\b/i,
       /\bone call is valid only when N=1\b/i,
       /\bform all N calls before emitting or finalizing\b/i,
-      /\bsole asynchronous call ends the parent turn\b/i,
+      /\bsuccessfully admitted sole async call returns\b/i,
+      /`terminate: true`/,
+      /\bends the parent turn\b/i,
       /\bomitted siblings cannot be added afterward\b/i,
-      /\bno text or other tools\b/i,
+      /\bno other tool calls\b/i,
+      /\bharmless response text does not affect runtime classification\b/i,
       /\bthree-worker wave\b/i,
       /\bthree native sibling\b/i,
     ]);
     expectBlockWith(dispatch, [/\bpreflight|validates\b/i, /\bsibling\b/i, /\bindependently\b/i]);
-    expectBlockWith(dispatch, [/\bpure group\b/i, /\basynchronous\b/i, /\bconcurrent\b/i]);
+    expectBlockWith(dispatch, [
+      /\bPi Orchestrate treats\b/i,
+      /\bsuccessfully admitted sole\b/i,
+      /\bpure group\b/i,
+      /\basync\b/i,
+      /\bPi executes\b/i,
+      /\bconcurrently\b/i,
+    ]);
     expectBlockWith(dispatch, [/\bmixing\b/i, /\binline\b/i, /\bblocking\b/i]);
     expectBlockWith(dispatch, [/\bworker_send\b/i, /\bsole\b/i, /\basynchronous\b/i]);
     expectBlockWith(dispatch, [/\binline\b/i, /\bcancellation\b/i, /\bdetaches\b/i]);
@@ -243,11 +253,14 @@ describe("published documentation", () => {
     ]);
     expectBlockWith(parent, [/\bself-contained\b/i, /\bsuccess criteria\b/i, /\bexpected output\b/i]);
     expectBlockWith(parent, [
-      /\benumerated wave of N workers\b/i,
-      /\bnext assistant response exactly N fully briefed native sibling\b/i,
-      /\bnothing else\b/i,
+      /\bintended asynchronous wave of N workers\b/i,
+      /\btool-call group exactly N fully briefed native sibling\b/i,
+      /\bno other tool calls\b/i,
+      /\bharmless response text does not affect runtime classification\b/i,
       /\bsingle call is valid only for N=1\b/i,
-      /\bsole asynchronous call ends the turn\b/i,
+      /\bsuccessfully admitted sole async call returns\b/i,
+      /`terminate: true`/,
+      /\bends the turn\b/i,
     ]);
     expectBlockWith(parent, [/\bresults expose\b/i, /\bfull adaptive wave\b/i, /\bwhole task\b/i]);
     expectBlockWith(parent, [/\breview\b/i, /\bverify\b/i, /\bfinal answer\b/i]);
