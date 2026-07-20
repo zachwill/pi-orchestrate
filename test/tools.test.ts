@@ -396,8 +396,19 @@ describe("registerOrchestrationTools", () => {
     );
     expect(orchestrateGuidance).toContain("a floor unless explicitly capped");
     expect(orchestrateGuidance).toContain("same worker role across multiple calls");
-    expect(orchestrateGuidance).toContain("each call one complete brief");
-    expect(orchestrateGuidance).toContain("all sibling orchestrate calls before yielding");
+    expect(orchestrateGuidance).toContain(
+      "enumerated wave of N workers, the next assistant response must contain exactly N separate, fully briefed orchestrate calls",
+    );
+    expect(orchestrateGuidance).toContain("one call is valid only when N=1");
+    expect(orchestrateGuidance).toContain(
+      "pure orchestration response with no text or other tools",
+    );
+    expect(orchestrateGuidance).toContain(
+      "Form all N native sibling calls before emitting or finalizing the response",
+    );
+    expect(orchestrateGuidance).toContain(
+      "A sole async orchestrate call ends the turn, so omitted siblings cannot be added afterward",
+    );
     expect(orchestrateGuidance).toContain(
       "never wait for one sibling's acceptance or completion",
     );

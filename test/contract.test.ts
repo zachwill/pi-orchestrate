@@ -80,23 +80,35 @@ describe("orchestrator contract", () => {
     ]);
     expectContractRule(result, [
       /\bbefore dispatching\b/i,
-      /\bfull first parallel wave\b/i,
+      /\benumerate the full first parallel wave\b/i,
       /\bfrom the work itself\b/i,
-      /\bdispatch that entire wave before yielding\b/i,
     ]);
     expectContractRule(result, [
-      /\bnever stop\b/i,
-      /`orchestrate`/,
-      /\banother useful scope or perspective can run independently\b/i,
+      /\bmandatory wave cardinality\b/i,
+      /\bwave has N workers\b/i,
+      /\bnext assistant response must contain exactly N separate, fully briefed\b/i,
+      /`orchestrate` invocations/,
+      /\bsingle invocation is valid only when N=1\b/i,
+      /\bform all N invocations before emitting or finalizing\b/i,
+      /\bsole asynchronous invocation ends the parent turn\b/i,
+      /`terminate: true`/,
+      /\bomitted siblings cannot be added afterward\b/i,
+    ]);
+    expectContractRule(result, [
+      /\bmandatory response shape\b/i,
+      /\bpure orchestration\b/i,
+      /\bexactly those N\b/i,
+      /\bno text or non-orchestration tools\b/i,
+      /\bPi natively supports sibling tool calls\b/i,
+      /\bFor N=3\b/i,
+      /\bemit three native sibling calls in one response\b/i,
+      /\{ worker, title, instructions \}/,
+    ]);
+    expectContractRule(result, [
+      /\beach independent scope or distinct perspective\b/i,
+      /\bfully briefed\b/i,
       /\bacceptance or completion\b/i,
       /\bdispatching the rest\b/i,
-    ]);
-    expectContractRule(result, [
-      /`orchestrate`/,
-      /\{ worker, title, instructions \}/,
-      /\bfull wave\b/i,
-      /\bsibling\b/i,
-      /\bone assistant message\b/i,
     ]);
     expectContractRule(result, [
       /\bdeliberate overlap\b/i,

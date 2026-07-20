@@ -346,7 +346,16 @@ describe("Pi Orchestrate extension integration", () => {
       /roles and counts named by the user.*minimum requirements, not ceilings.*exact cap/i,
     );
     expect(injectedPrompt).toMatch(/worker role is reusable.*same catalog worker.*many calls/i);
-    expect(injectedPrompt).toMatch(/full first parallel wave.*before yielding/i);
+    expect(injectedPrompt).toMatch(/enumerate the full first parallel wave.*from the work itself/i);
+    expect(injectedPrompt).toMatch(
+      /wave has N workers.*next assistant response must contain exactly N separate, fully briefed `orchestrate` invocations.*single invocation is valid only when N=1/i,
+    );
+    expect(injectedPrompt).toMatch(
+      /form all N invocations before emitting or finalizing.*sole asynchronous invocation ends the parent turn.*terminate: true.*omitted siblings cannot be added afterward/i,
+    );
+    expect(injectedPrompt).toMatch(
+      /pure orchestration.*no text or non-orchestration tools.*For N=3.*three native sibling calls in one response/i,
+    );
     expect(injectedPrompt).toMatch(/deliberate overlap.*only.*distinct evidence sources.*competing hypotheses.*validation perspectives/i);
     expect(injectedPrompt).toMatch(/accidental duplicate assignments are forbidden/i);
     expect(injectedPrompt).toMatch(/another full parallel wave before yielding.*adaptive full waves/i);
@@ -414,6 +423,7 @@ describe("Pi Orchestrate extension integration", () => {
         message: assistantToolCalls([
           { id: "first-dispatch", name: "orchestrate" },
           { id: "second-dispatch", name: "orchestrate" },
+          { id: "third-dispatch", name: "orchestrate" },
         ]),
       },
       ctx,
@@ -423,24 +433,33 @@ describe("Pi Orchestrate extension integration", () => {
       title: "Review",
       instructions: "Review the project.",
     };
+    const thirdParams = {
+      worker: "scout",
+      title: "Validate",
+      instructions: "Validate the project.",
+    };
     const groupedResults = await Promise.all([
       invoke(pi, "orchestrate", "first-dispatch", orchestrationParams, ctx),
       invoke(pi, "orchestrate", "second-dispatch", secondParams, ctx),
+      invoke(pi, "orchestrate", "third-dispatch", thirdParams, ctx),
     ]);
 
     expect(runtime.orchestrateCalls.map((call) => call.mode)).toEqual([
       "inline",
       "async",
       "async",
+      "async",
     ]);
-    expect(runtime.orchestrateCalls.slice(-2).map((call) => call.task)).toEqual([
+    expect(runtime.orchestrateCalls.slice(-3).map((call) => call.task)).toEqual([
       orchestrationParams,
       secondParams,
+      thirdParams,
     ]);
-    expect(runtime.orchestrateCalls.slice(-2).map((call) => call.context.synthesisGroup))
+    expect(runtime.orchestrateCalls.slice(-3).map((call) => call.context.synthesisGroup))
       .toEqual([
-        { id: "orchestrate:first-dispatch", size: 2 },
-        { id: "orchestrate:first-dispatch", size: 2 },
+        { id: "orchestrate:first-dispatch", size: 3 },
+        { id: "orchestrate:first-dispatch", size: 3 },
+        { id: "orchestrate:first-dispatch", size: 3 },
       ]);
     expect(groupedResults.every((result) => "terminate" in result && result.terminate === true))
       .toBe(true);

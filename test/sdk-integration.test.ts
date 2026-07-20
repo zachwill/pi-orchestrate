@@ -672,7 +672,16 @@ describe("Pi 0.80.10 SDK integration", () => {
         /roles and counts named by the user.*minimum requirements, not ceilings.*exact cap/i,
       );
       expect(initialParent.systemPrompt).toMatch(/worker role is reusable.*same catalog worker.*many calls/i);
-      expect(initialParent.systemPrompt).toMatch(/full first parallel wave.*before yielding/i);
+      expect(initialParent.systemPrompt).toMatch(/enumerate the full first parallel wave.*from the work itself/i);
+      expect(initialParent.systemPrompt).toMatch(
+        /wave has N workers.*next assistant response must contain exactly N separate, fully briefed `orchestrate` invocations.*single invocation is valid only when N=1/i,
+      );
+      expect(initialParent.systemPrompt).toMatch(
+        /form all N invocations before emitting or finalizing.*sole asynchronous invocation ends the parent turn.*terminate: true.*omitted siblings cannot be added afterward/i,
+      );
+      expect(initialParent.systemPrompt).toMatch(
+        /pure orchestration.*no text or non-orchestration tools.*For N=3.*three native sibling calls in one response/i,
+      );
       expect(initialParent.systemPrompt).toMatch(/deliberate overlap.*only.*distinct evidence sources.*competing hypotheses.*validation perspectives/i);
       expect(initialParent.systemPrompt).toMatch(/accidental duplicate assignments are forbidden/i);
       expect(initialParent.systemPrompt).toMatch(/another full parallel wave before yielding.*adaptive full waves/i);

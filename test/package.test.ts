@@ -203,10 +203,15 @@ describe("published documentation", () => {
       /\bhidden throttle\b/i,
     ]);
     expectBlockWith(dispatch, [
-      /\bspin up as many workers as needed\b/i,
-      /\bfull initial wave\b/i,
-      /\bevery useful independent task\b/i,
-      /\bbefore yielding\b/i,
+      /\bwave has N workers\b/i,
+      /\bnext assistant response must contain exactly N separate, fully briefed\b/i,
+      /\bone call is valid only when N=1\b/i,
+      /\bform all N calls before emitting or finalizing\b/i,
+      /\bsole asynchronous call ends the parent turn\b/i,
+      /\bomitted siblings cannot be added afterward\b/i,
+      /\bno text or other tools\b/i,
+      /\bthree-worker wave\b/i,
+      /\bthree native sibling\b/i,
     ]);
     expectBlockWith(dispatch, [/\bpreflight|validates\b/i, /\bsibling\b/i, /\bindependently\b/i]);
     expectBlockWith(dispatch, [/\bpure group\b/i, /\basynchronous\b/i, /\bconcurrent\b/i]);
@@ -237,7 +242,13 @@ describe("published documentation", () => {
       /\baccidental duplicate work\b/i,
     ]);
     expectBlockWith(parent, [/\bself-contained\b/i, /\bsuccess criteria\b/i, /\bexpected output\b/i]);
-    expectBlockWith(parent, [/\bfull initial wave\b/i, /\bbefore yielding\b/i]);
+    expectBlockWith(parent, [
+      /\benumerated wave of N workers\b/i,
+      /\bnext assistant response exactly N fully briefed native sibling\b/i,
+      /\bnothing else\b/i,
+      /\bsingle call is valid only for N=1\b/i,
+      /\bsole asynchronous call ends the turn\b/i,
+    ]);
     expectBlockWith(parent, [/\bresults expose\b/i, /\bfull adaptive wave\b/i, /\bwhole task\b/i]);
     expectBlockWith(parent, [/\breview\b/i, /\bverify\b/i, /\bfinal answer\b/i]);
 
