@@ -62,7 +62,7 @@ class FakeRuntime {
     signal?: AbortSignal;
   }> = [];
   settlementToEmit: WorkerSettlement | undefined;
-  readonly sendCalls: Array<{
+  readonly interactiveSendCalls: Array<{
     context: OrchestrationContext;
     workerId: WorkerId;
     instructions: string;
@@ -70,7 +70,7 @@ class FakeRuntime {
     signal?: AbortSignal;
   }> = [];
   readonly abortCalls: Array<{ ownerSessionId: string; target: AbortTarget }> = [];
-  readonly closeCalls: Array<{ ownerSessionId: string; workerId: WorkerId }> = [];
+  readonly interactiveCloseCalls: Array<{ ownerSessionId: string; workerId: WorkerId }> = [];
   readonly snapshotCalls: string[] = [];
 
   acceptedRun: AcceptedRun = {
@@ -80,7 +80,7 @@ class FakeRuntime {
   completedRun: CompletedRun = completedRun();
   snapshotResult: RuntimeSnapshot = snapshot();
   failures: Partial<
-    Record<"orchestrate" | "send" | "abort" | "close" | "snapshot", Error>
+    Record<"orchestrate" | "sendInteractive" | "abort" | "closeInteractive" | "snapshot", Error>
   > = {};
 
   async orchestrate(
@@ -97,7 +97,7 @@ class FakeRuntime {
     return mode === "async" ? this.acceptedRun : this.completedRun;
   }
 
-  async send(
+  async sendInteractive(
     context: OrchestrationContext,
     workerId: WorkerId,
     instructions: string,
@@ -106,8 +106,8 @@ class FakeRuntime {
     onSettlement?: SettlementListener,
   ): Promise<AcceptedRun | CompletedRun> {
     if (signal?.aborted) throw signal.reason;
-    this.sendCalls.push({ context, workerId, instructions, mode, signal });
-    if (this.failures.send) throw this.failures.send;
+    this.interactiveSendCalls.push({ context, workerId, instructions, mode, signal });
+    if (this.failures.sendInteractive) throw this.failures.sendInteractive;
     if (mode === "inline" && this.settlementToEmit) onSettlement?.(this.settlementToEmit);
     return mode === "async" ? this.acceptedRun : this.completedRun;
   }
@@ -117,9 +117,9 @@ class FakeRuntime {
     if (this.failures.abort) throw this.failures.abort;
   }
 
-  async close(ownerSessionId: string, workerId: WorkerId): Promise<void> {
-    this.closeCalls.push({ ownerSessionId, workerId });
-    if (this.failures.close) throw this.failures.close;
+  async closeInteractive(ownerSessionId: string, workerId: WorkerId): Promise<void> {
+    this.interactiveCloseCalls.push({ ownerSessionId, workerId });
+    if (this.failures.closeInteractive) throw this.failures.closeInteractive;
   }
 
   async snapshot(ownerSessionId: string): Promise<RuntimeSnapshot> {
@@ -314,7 +314,7 @@ function snapshot(): RuntimeSnapshot {
         runId: "run-owned" as RunId,
         title: "Inspect",
         instructions: "Inspect the runtime.",
-        lifecycle: "reusable",
+        lifecycle: "interactive",
         status: "ready",
         usage,
         outcome: { status: "ready", assistantText: "Ready for follow-up." },
@@ -332,9 +332,9 @@ describe("registerOrchestrationTools", () => {
     expect(pi.tools.map((tool) => tool.name)).toEqual([
       "orchestrate",
       "orchestration_status",
-      "worker_send",
+      "interactive_send",
       "worker_abort",
-      "worker_close",
+      "interactive_close",
     ]);
     for (const tool of pi.tools) {
       expect(tool.renderCall).toBeFunction();
@@ -361,7 +361,7 @@ describe("registerOrchestrationTools", () => {
     expect(Value.Check(pi.tool("orchestration_status").parameters, { poll: true })).toBe(false);
 
     expect(
-      Value.Check(pi.tool("worker_send").parameters, {
+      Value.Check(pi.tool("interactive_send").parameters, {
         worker_id: "worker-1",
         instructions: "Continue.",
       }),
@@ -374,7 +374,7 @@ describe("registerOrchestrationTools", () => {
     expect(Value.Check(abortSchema, { all: false })).toBe(false);
     expect(Value.Check(abortSchema, { worker_ids: ["worker-1"], all: true })).toBe(false);
 
-    expect(Value.Check(pi.tool("worker_close").parameters, { worker_id: "worker-1" })).toBe(
+    expect(Value.Check(pi.tool("interactive_close").parameters, { worker_id: "worker-1" })).toBe(
       true,
     );
   });
@@ -425,10 +425,19 @@ describe("registerOrchestrationTools", () => {
     );
     expect(pi.tool("orchestration_status").description).toContain("Never poll");
     expect(pi.tool("orchestration_status").promptGuidelines?.[0]).toContain("never poll");
-    expect(pi.tool("worker_send").promptGuidelines?.[0]).toContain("ready reusable");
+    for (const name of ["interactive_send", "interactive_close"] as const) {
+      const guidance = [
+        pi.tool(name).description,
+        pi.tool(name).promptSnippet,
+        ...(pi.tool(name).promptGuidelines ?? []),
+      ].join(" ");
+      expect(guidance).toContain("owned lifecycle interactive worker");
+      expect(guidance).toContain("status is ready");
+      expect(guidance).toContain("one-shot or completed workers");
+      expect(guidance).toContain("one-shot sessions terminate automatically");
+    }
     expect(pi.tool("worker_abort").description).toContain("active");
-    expect(pi.tool("worker_abort").promptGuidelines?.[0]).toContain("worker_close");
-    expect(pi.tool("worker_close").description).toContain("ready reusable");
+    expect(pi.tool("worker_abort").promptGuidelines?.[0]).toContain("interactive_close");
   });
 
   test("constructs the complete runtime context and selects async mode by tool call ID", async () => {
@@ -552,7 +561,7 @@ describe("registerOrchestrationTools", () => {
     );
   });
 
-  test("worker_send validates its branded boundary and follows mode termination semantics", async () => {
+  test("interactive_send validates its branded boundary and follows mode termination semantics", async () => {
     const { pi, runtime, context, modes } = harness();
     modes.set("send-async", "async");
     modes.set("send-inline", "inline");
@@ -560,7 +569,7 @@ describe("registerOrchestrationTools", () => {
 
     const asyncResult = await invoke(
       pi,
-      "worker_send",
+      "interactive_send",
       "send-async",
       { worker_id: "worker-ready", instructions: "Continue." },
       context,
@@ -568,14 +577,14 @@ describe("registerOrchestrationTools", () => {
     );
     const inlineResult = await invoke(
       pi,
-      "worker_send",
+      "interactive_send",
       "send-inline",
       { worker_id: "worker-ready", instructions: "Finish." },
       context,
       controller.signal,
     );
 
-    expect(runtime.sendCalls.map(({ workerId, instructions, mode, signal }) => ({
+    expect(runtime.interactiveSendCalls.map(({ workerId, instructions, mode, signal }) => ({
       workerId,
       instructions,
       mode,
@@ -594,23 +603,23 @@ describe("registerOrchestrationTools", () => {
         signal: controller.signal,
       },
     ]);
-    expect(runtime.sendCalls[0]?.context.ownerSessionId).toBe("owner-session");
+    expect(runtime.interactiveSendCalls[0]?.context.ownerSessionId).toBe("owner-session");
     expect(asyncResult.terminate).toBe(true);
     expect(inlineResult).not.toHaveProperty("terminate");
 
     await expect(
       invoke(
         pi,
-        "worker_send",
+        "interactive_send",
         "send-blank",
         { worker_id: "   ", instructions: "Continue." },
         context,
       ),
     ).rejects.toThrow("worker_id must not be blank");
-    expect(runtime.sendCalls).toHaveLength(2);
+    expect(runtime.interactiveSendCalls).toHaveLength(2);
   });
 
-  test("rejects already-aborted async worker_send admission with the exact reason", async () => {
+  test("rejects already-aborted async interactive_send admission with the exact reason", async () => {
     const { pi, runtime, context, modes } = harness();
     modes.set("send-aborted", "async");
     const reason = new Error("parent turn ended before admission");
@@ -619,7 +628,7 @@ describe("registerOrchestrationTools", () => {
 
     const rejectedReason = await invoke(
       pi,
-      "worker_send",
+      "interactive_send",
       "send-aborted",
       { worker_id: "worker-ready", instructions: "Continue." },
       context,
@@ -630,7 +639,7 @@ describe("registerOrchestrationTools", () => {
     );
 
     expect(rejectedReason).toBe(reason);
-    expect(runtime.sendCalls).toHaveLength(0);
+    expect(runtime.interactiveSendCalls).toHaveLength(0);
   });
 
   test("status forwards only the current owner and returns catalog diagnostics plus state", async () => {
@@ -653,7 +662,7 @@ describe("registerOrchestrationTools", () => {
       owner_session_id: "owner-session",
       run_id: "run-owned",
       title: "Inspect",
-      lifecycle: "reusable",
+      lifecycle: "interactive",
       status: "ready",
       usage: expect.anything(),
     });
@@ -706,27 +715,27 @@ describe("registerOrchestrationTools", () => {
     expect(runtime.abortCalls).toHaveLength(2);
   });
 
-  test("closes an owner-scoped ready reusable worker", async () => {
+  test("closes an owner-scoped ready interactive worker", async () => {
     const { pi, runtime, context } = harness();
 
     const result = await invoke(
       pi,
-      "worker_close",
+      "interactive_close",
       "close-call",
       { worker_id: "worker-ready" },
       context,
     );
 
-    expect(runtime.closeCalls).toEqual([
+    expect(runtime.interactiveCloseCalls).toEqual([
       { ownerSessionId: "owner-session", workerId: "worker-ready" as WorkerId },
     ]);
     expect(result.details).toEqual({ worker_id: "worker-ready" });
     expect(result).not.toHaveProperty("terminate");
 
     await expect(
-      invoke(pi, "worker_close", "close-blank", { worker_id: "\t" }, context),
+      invoke(pi, "interactive_close", "close-blank", { worker_id: "\t" }, context),
     ).rejects.toThrow("worker_id must not be blank");
-    expect(runtime.closeCalls).toHaveLength(1);
+    expect(runtime.interactiveCloseCalls).toHaveLength(1);
   });
 
   test("renders incomplete streaming tool arguments without crashing", () => {
@@ -748,13 +757,13 @@ describe("registerOrchestrationTools", () => {
     ).render(40);
     expect(Bun.stripANSI(missingTask.join("\n"))).toContain("orchestrate");
 
-    const partialSend = pi.tool("worker_send").renderCall!(
+    const partialSend = pi.tool("interactive_send").renderCall!(
       { worker_id: "worker-ready" } as never,
       themeForRendering(),
       renderContext(false),
     ).render(40);
     expect(partialSend.every((line) => Bun.stringWidth(line) <= 40)).toBe(true);
-    expect(Bun.stripANSI(partialSend.join("\n"))).toContain("worker_send worker-ready");
+    expect(Bun.stripANSI(partialSend.join("\n"))).toContain("interactive_send worker-ready");
   });
 
   test("renders and stores one exact expandable outbound message with a safe bounded preview", async () => {
@@ -776,14 +785,14 @@ describe("registerOrchestrationTools", () => {
     expect(expanded).toContain("UNBROKEN".repeat(12_500));
     expect(expanded).toContain("TAIL  ");
 
-    const sendExpanded = Bun.stripANSI(pi.tool("worker_send").renderCall!({ worker_id: "worker-1", instructions } as never, themeForRendering(), renderContext(true)).render(120_000).join("\n"));
+    const sendExpanded = Bun.stripANSI(pi.tool("interactive_send").renderCall!({ worker_id: "worker-1", instructions } as never, themeForRendering(), renderContext(true)).render(120_000).join("\n"));
     expect(sendExpanded).toContain("UNBROKEN".repeat(12_500));
     expect(sendExpanded).toContain("TAIL  ");
 
     await invoke(pi, "orchestrate", "exact-storage", task, context);
     expect(runtime.orchestrateCalls.at(-1)?.task).toEqual(task);
-    await invoke(pi, "worker_send", "exact-send", { worker_id: "worker-1", instructions }, context);
-    expect(runtime.sendCalls.at(-1)?.instructions).toBe(instructions);
+    await invoke(pi, "interactive_send", "exact-send", { worker_id: "worker-1", instructions }, context);
+    expect(runtime.interactiveSendCalls.at(-1)?.instructions).toBe(instructions);
   });
 
   test("renders malformed inline details neutrally rather than as success", () => {
@@ -840,21 +849,26 @@ describe("registerOrchestrationTools", () => {
     for (const name of [
       "orchestrate",
       "orchestration_status",
-      "worker_send",
+      "interactive_send",
       "worker_abort",
-      "worker_close",
+      "interactive_close",
     ] as const) {
       const { pi, runtime, context } = harness();
-      const runtimeMethod =
-        name === "orchestration_status" ? "snapshot" : name.replace("worker_", "");
+      const runtimeMethod = {
+        orchestrate: "orchestrate",
+        orchestration_status: "snapshot",
+        interactive_send: "sendInteractive",
+        worker_abort: "abort",
+        interactive_close: "closeInteractive",
+      }[name];
       const error = new Error(`${name} failed`);
       runtime.failures[runtimeMethod as keyof FakeRuntime["failures"]] = error;
       const params = {
         orchestrate: { worker: "scout", title: "Inspect", instructions: "Inspect." },
         orchestration_status: {},
-        worker_send: { worker_id: "worker-ready", instructions: "Continue." },
+        interactive_send: { worker_id: "worker-ready", instructions: "Continue." },
         worker_abort: { all: true },
-        worker_close: { worker_id: "worker-ready" },
+        interactive_close: { worker_id: "worker-ready" },
       }[name];
 
       await expect(invoke(pi, name, `${name}-call`, params, context)).rejects.toBe(error);

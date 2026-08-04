@@ -348,7 +348,7 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
 
   constructor(
     private readonly runtime: OwnedWorkerRuntime,
-    private readonly reusable: boolean,
+    private readonly interactive: boolean,
     sessionFile: string,
     private readonly scope: Scope.Closeable,
     private readonly cleanupReporter: WorkerSessionCleanupReporter,
@@ -429,7 +429,7 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
       return { status: "failed", message: message.errorMessage ?? failureMessage ?? "Worker assistant reported a failure", ...assistantPayload };
     }
     if (failureMessage) return { status: "failed", message: failureMessage, ...assistantPayload };
-    return { status: this.reusable ? "ready" : "completed", assistantText: text ?? "" };
+    return { status: this.interactive ? "ready" : "completed", assistantText: text ?? "" };
   }
 
   async abort(): Promise<void> {
@@ -852,7 +852,7 @@ const createWorkerSession = Effect.fn("WorkerSession.create")(function* (
 
     const handle = new DefaultWorkerSessionHandle(
       runtime,
-      definition.lifecycle === "reusable",
+      definition.lifecycle === "interactive",
       sessionFile,
       scope,
       dependencies.reportCleanupFailure,

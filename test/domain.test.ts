@@ -85,7 +85,7 @@ describe("ID factories", () => {
 });
 
 describe("worker status transitions", () => {
-  test("supports one-shot completion and reusable readiness", () => {
+  test("supports one-shot completion and interactive readiness", () => {
     const ids = createSequentialIdFactories();
     const starting = workerRecord(ids.workerId(), ids.runId(), "starting");
     const running = transitionWorkerStatus(starting, "running");
@@ -93,17 +93,17 @@ describe("worker status transitions", () => {
 
     expect(starting.status).toBe("starting");
     expect(completed.status).toBe("completed");
-    expect(canTransitionWorkerStatus("running", "ready", "reusable")).toBe(true);
-    expect(canTransitionWorkerStatus("ready", "running", "reusable")).toBe(true);
-    expect(canTransitionWorkerStatus("ready", "closed", "reusable")).toBe(true);
+    expect(canTransitionWorkerStatus("running", "ready", "interactive")).toBe(true);
+    expect(canTransitionWorkerStatus("ready", "running", "interactive")).toBe(true);
+    expect(canTransitionWorkerStatus("ready", "closed", "interactive")).toBe(true);
     expect(canTransitionWorkerStatus("running", "ready", "one-shot")).toBe(false);
-    expect(canTransitionWorkerStatus("running", "completed", "reusable")).toBe(false);
+    expect(canTransitionWorkerStatus("running", "completed", "interactive")).toBe(false);
   });
 
   test("clears the prior ready outcome and rejects invalid transitions", () => {
     const ids = createSequentialIdFactories();
     const ready: WorkerRecord = {
-      ...workerRecord(ids.workerId(), ids.runId(), "ready", "reusable"),
+      ...workerRecord(ids.workerId(), ids.runId(), "ready", "interactive"),
       outcome: { status: "ready", assistantText: "Ready for follow-up." },
     };
     expect(transitionWorkerStatus(ready, "running").outcome).toBeUndefined();

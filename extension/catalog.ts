@@ -76,7 +76,7 @@ const WorkerFrontmatter = Schema.Struct({
   tools: commaList(Schema.Literals(SUPPORTED_TOOL_NAMES)),
   skills: Schema.optionalKey(commaList(Schema.NonEmptyString, true)),
   compaction: Schema.optionalKey(Compaction),
-  lifecycle: Schema.Literals(["one-shot", "reusable"]),
+  lifecycle: Schema.Literals(["one-shot", "interactive"]),
 });
 const decodeWorkerFrontmatter = Schema.decodeUnknownResult(WorkerFrontmatter, {
   errors: "all",
@@ -267,7 +267,7 @@ function schemaDiagnostic(issue: SchemaIssue.Issue, frontmatter: unknown): strin
     return "frontmatter field 'compaction' must be a mapping";
   }
   if (field === "lifecycle") {
-    return "frontmatter field 'lifecycle' must be 'one-shot' or 'reusable'";
+    return "frontmatter field 'lifecycle' must be 'one-shot' or 'interactive'";
   }
   return "invalid worker definition";
 }

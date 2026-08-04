@@ -29,7 +29,7 @@ Effect interruption alone does not guarantee the rejection identity expected by 
 | Process host | Pi process; survives extension reload attachments | Process shutdown closes host-held resources best-effort | Process-scoped host value with Promise lifecycle adapters |
 | Scheduler | Process-host/runtime scheduler shared across owners | Parent-turn cancellation affects that owner's inline work; shutdown settles admitted work | Internal Effect only where interruption or finalization helps |
 | Worker workflow | One admitted generation or wave result | Abort interrupts active work; settlement completes it | Scoped operation surfaced as Promise to the tool |
-| Retained session | Reusable worker identity across generations | `worker_abort` stops active work; `worker_close` disposes the ready session | Explicit retained owner and close handle |
+| Retained interactive session | Interactive worker identity across generations | `worker_abort` stops active work; `interactive_close` disposes the ready session | Explicit retained owner and close handle |
 | Prompt generation | One child creation or generation | Cancellation abandons the generation; no separate durable resource | Value or Effect under the worker workflow |
 | Catalog snapshot | One atomic preflight decision | Immutable after admission; refresh creates a new snapshot | Validated value passed to runtime, not a Context tag |
 
@@ -80,18 +80,18 @@ Child sessions must have reduced authority:
 
 Capability minimization is stronger than prompt instructions saying not to use a tool.
 
-## Reusable Sessions
+## Interactive Sessions
 
-A retained sequential worker is a durable product scope even if implemented without Effect Scope.
+A retained interactive worker is a durable product scope even if implemented without Effect Scope.
 
 Keep lifecycle operations explicit:
 
-- create/acquire session
+- create/acquire interactive session
 - prompt one generation
 - abort active generation
 - return to ready
-- close retained session
-- evict through the same close policy
+- close retained interactive session
+- evict through the same interactive close policy
 
 Aggregate the session, subscriptions, resource loaders, and clients under an Effect scope only when teardown complexity earns it. Do not add Scope merely to wrap one disposable.
 
@@ -130,7 +130,7 @@ Shutdown is idempotent and best-effort without leaving admitted lifecycle state 
 Test Pi integration at the SDK boundary, not only as isolated Effects:
 
 - exact caller abort reason
-- active abort versus retained close
+- active abort versus retained interactive close
 - owner isolation
 - extension reload attachment behavior
 - partial child-session acquisition

@@ -30,7 +30,7 @@ function expectContractRule(contract: string, concepts: readonly RegExp[]): void
 
 describe("orchestrator contract", () => {
   test("appends exactly one idempotent section", () => {
-    const snapshot = catalog([worker("scout", "package"), worker("expert", "user", "reusable")]);
+    const snapshot = catalog([worker("scout", "package"), worker("expert", "user", "interactive")]);
     const once = appendOrchestratorContract("Base system prompt.", snapshot);
     const twice = appendOrchestratorContract(once, snapshot);
 
@@ -50,7 +50,7 @@ describe("orchestrator contract", () => {
   test("teaches the parent orchestration contract with a sorted trusted catalog", () => {
     const result = appendOrchestratorContract(
       "",
-      catalog([worker("zeta", "project", "reusable"), worker("alpha", "package")]),
+      catalog([worker("zeta", "project", "interactive"), worker("alpha", "package")]),
     );
 
     expectContractRule(result, [
@@ -73,10 +73,11 @@ describe("orchestrator contract", () => {
       /\bexact cap\b/i,
     ]);
     expectContractRule(result, [
-      /\bworker role is reusable\b/i,
-      /\bsame catalog worker\b/i,
-      /\bmany calls\b/i,
+      /\bsame worker definition can be dispatched in multiple independent calls\b/i,
       /\bseparate scopes or perspectives\b/i,
+      /\beach call creates an independent worker session\b/i,
+      /\bdistinct from interactive session continuity\b/i,
+      /\bkeeps one worker ID\b/i,
     ]);
     expectContractRule(result, [
       /\bbefore dispatching\b/i,
@@ -166,10 +167,19 @@ describe("orchestrator contract", () => {
     ]);
     expectContractRule(result, [/\bparent\b/i, /\bsynthesi[sz]/i, /\breview/i, /\bverification\b/i]);
     expect(result).not.toContain("active-work widget");
-    expectContractRule(result, [/\breusable\b/i, /\bready\b/i, /`worker_send`/, /`worker_close`/]);
+    expectContractRule(result, [
+      /\bprefer one-shot workers\b/i,
+      /`interactive_send`/,
+      /`interactive_close`/,
+      /\bowned lifecycle interactive worker\b/i,
+      /\bstatus is ready\b/i,
+      /\bnever\b/i,
+      /\bone-shot or completed workers\b/i,
+      /\bone-shot sessions terminate automatically\b/i,
+    ]);
 
     expectContractRule(result, [/`alpha`/, /\bpackage\b/i, /\bone-shot\b/i]);
-    expectContractRule(result, [/`zeta`/, /\bproject\b/i, /\breusable\b/i]);
+    expectContractRule(result, [/`zeta`/, /\bproject\b/i, /\binteractive\b/i]);
     expect(result.indexOf("`alpha`")).toBeLessThan(result.indexOf("`zeta`"));
   });
 });

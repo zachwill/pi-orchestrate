@@ -1,13 +1,13 @@
 # Resources, Concurrency, And Interruption
 
-Use this when code acquires resources, forks work, waits for completion, adapts cancellation, owns a runtime, or manages reusable sessions.
+Use this when code acquires resources, forks work, waits for completion, adapts cancellation, owns a runtime, or manages interactive sessions.
 
 ## Lifetime Follows Product Ownership
 
 A scope should mean a real owner lifetime:
 
 - one operation or admitted generation
-- one retained reusable worker
+- one retained interactive worker
 - one owning Pi session
 - one process host
 
@@ -70,11 +70,11 @@ Long duration is not automatically slowness. A fiber awaiting a Deferred, queue 
 Keep these domain actions distinct:
 
 - **interrupt/abort:** stop the active operation or generation
-- **close/dispose:** release a reusable resource permanently
+- **close/dispose:** release a retained resource permanently
 - **evict:** remove retained state and execute the same close policy
 - **shutdown:** settle or interrupt process-owned work and release host resources
 
-For pi-orchestrate, aborting a prompt must not implicitly close its reusable session. `worker_abort` stops active work; `worker_close` disposes the ready retained worker. Preserve those semantics in names, states, and tests.
+For pi-orchestrate, aborting a prompt must not implicitly close its interactive session. `worker_abort` stops active work; `interactive_close` disposes the ready retained worker. Preserve those semantics in names, states, and tests.
 
 An `Effect.async` canceler or interrupted Promise adapter can stop an active subprocess or request. It does not decide whether a durable session should remain available afterward; the domain owner decides that.
 
@@ -125,7 +125,7 @@ Use deterministic observations, not sleeps. Cover:
 - abort, unsubscribe, dispose, or close throws
 - cleanup repeats safely
 - stale fiber completion cannot mutate a newer generation
-- abort leaves a reusable resource ready when specified
+- abort leaves a retained interactive resource ready when specified
 - close disposes the durable resource exactly once
 
 Read `TESTING.md` for Bun and TestClock patterns and `PI_BOUNDARIES.md` for the repository ownership matrix.

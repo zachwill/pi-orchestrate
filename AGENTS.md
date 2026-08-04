@@ -20,7 +20,7 @@ Keep decisions in the module that owns them:
 
 - `domain.ts` owns worker and run types, state transitions, IDs, and limits.
 - `catalog.ts` and `contract.ts` own trusted worker discovery, parsing, precedence, diagnostics, and parent guidance.
-- `runtime.ts` and `scheduler.ts` own admission, preflight, concurrency, ownership, cancellation, reusable generations, and retained state.
+- `runtime.ts` and `scheduler.ts` own admission, preflight, concurrency, ownership, cancellation, interactive generations, and retained state.
 - `worker-session.ts` and `worker-settlement.ts` own durable child sessions, usage and activity reporting, message direction, and persisted settlement decoding.
 - `host.ts` and `delivery.ts` own process-scoped persistence, owner binding, grouped synthesis, and exact-session delivery.
 - `tools.ts` owns public schemas, execution adapters, streaming updates, and tool renderers.
@@ -35,7 +35,7 @@ Do not add cross-layer shortcuts. Change an owning boundary directly instead of 
 - Once admitted, workers start and settle independently. One worker failure must not roll back its peers.
 - Preserve the dispatch modes, grouped synthesis, lifecycle, and delivery behavior defined by the README and encoded in contract and integration tests.
 - Scope state, operations, cancellation, and delivery to the exact owner. Never leak results or controls across sessions.
-- Reject stale reusable generations and race-losing operations without corrupting current worker state.
+- Reject stale interactive generations and race-losing operations without corrupting current worker state.
 - Keep child sessions as direct Pi Orchestrate children. Do not load Pi Orchestrate recursively or create descendant Pi worker sessions.
 - Read project workers and project context only when Pi reports the project trusted.
 - Make cleanup idempotent and best-effort while still settling lifecycle state.

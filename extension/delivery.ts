@@ -198,10 +198,12 @@ export class DeliveryCoordinator {
     byteLimit: number,
   ): WorkerDeliveryMessage {
     const heading = `## Worker result — ${settlement.title} · ${settlement.worker}`;
+    const disposition = renderDisposition(settlement);
     const metadata = [
       `Worker \`${settlement.workerId}\``,
       `run \`${settlement.runId}\``,
       `status \`${settlement.status}\``,
+      ...(disposition ? [disposition] : []),
     ].join(" · ");
     const body = renderOutcome(settlement.outcome);
     const content = body.length > 0
@@ -281,6 +283,16 @@ function truncateUtf8(content: string, byteLimit: number): string {
     end -= 1;
   }
   return bytes.subarray(0, end).toString("utf8");
+}
+
+function renderDisposition(settlement: WorkerSettlement): string | undefined {
+  if (settlement.status === "completed" && settlement.lifecycle === "one-shot") {
+    return "one-shot session ended automatically; no close needed";
+  }
+  if (settlement.status === "ready" && settlement.lifecycle === "interactive") {
+    return "interactive session retained; use `interactive_send` or `interactive_close`";
+  }
+  return undefined;
 }
 
 function renderOutcome(outcome: WorkerSettlement["outcome"]): string {

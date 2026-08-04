@@ -359,17 +359,17 @@ describe("orchestration admission and concurrency", () => {
 
 });
 
-describe("completion, reusable workers, and run ownership", () => {
-  test("keeps one worker ID across reusable ready, send, and close", async () => {
+describe("completion, interactive workers, and run ownership", () => {
+  test("keeps one worker ID across interactive ready, interactive send, and interactive close", async () => {
     const tracker = new PromptTracker();
     const first = promptPlan({ status: "ready", assistantText: "first" });
     const second = promptPlan({ status: "ready", assistantText: "second" });
-    const handle = new FakeHandle("reusable", [first, second], tracker);
+    const handle = new FakeHandle("interactive", [first, second], tracker);
     const factory = new FakeFactory([{ handle }]);
     const orchestrator = runtime(factory);
-    const owner = context("owner", [definition("reusable", "reusable")]);
+    const owner = context("owner", [definition("interactive", "interactive")]);
 
-    const initial = orchestrator.orchestrate(owner, task("reusable"), "inline");
+    const initial = orchestrator.orchestrate(owner, task("interactive"), "inline");
     await tracker.starts.waitFor(1);
     handle.emitMessageDirection("from-model");
     first.gate.resolve(undefined);
@@ -378,7 +378,7 @@ describe("completion, reusable workers, and run ownership", () => {
     expect(firstRun.result?.status).toBe("ready");
     expect(handle.disposeCalls).toBe(0);
 
-    const followUp = orchestrator.send(owner, workerId, "Follow up", "inline");
+    const followUp = orchestrator.sendInteractive(owner, workerId, "Follow up", "inline");
     await tracker.starts.waitFor(2);
     const running = await orchestrator.snapshot("owner");
     expect(running.workers[0]?.status).toBe("running");
@@ -390,12 +390,16 @@ describe("completion, reusable workers, and run ownership", () => {
     expect(secondRun.result?.workerId).toBe(workerId);
     expect(secondRun.result?.outcome).toEqual({ status: "ready", assistantText: "second" });
     expect(factory.creates.value).toBe(1);
-    expect(handle.prompts).toEqual(["Instructions for reusable", "Follow up"]);
+    expect(handle.prompts).toEqual(["Instructions for interactive", "Follow up"]);
 
-    await orchestrator.close("owner", workerId);
-    await expect(orchestrator.close("owner", workerId)).rejects.toThrow("ready reusable");
-    await expect(orchestrator.send(owner, workerId, "Again", "async")).rejects.toThrow(
-      "worker_send",
+    await orchestrator.closeInteractive("owner", workerId);
+    await expect(orchestrator.closeInteractive("owner", workerId)).rejects.toThrow(
+      "interactive_close requires an owned ready interactive worker",
+    );
+    await expect(
+      orchestrator.sendInteractive(owner, workerId, "Again", "async"),
+    ).rejects.toThrow(
+      "interactive_send requires an owned ready interactive worker",
     );
     expect(handle.disposeCalls).toBe(1);
     expect((await orchestrator.snapshot("owner")).workers[0]).toMatchObject({
@@ -403,25 +407,61 @@ describe("completion, reusable workers, and run ownership", () => {
       status: "closed",
       outcome: { status: "closed" },
     });
+    expect((orchestrator as unknown as { send?: unknown }).send).toBeUndefined();
+    expect((orchestrator as unknown as { close?: unknown }).close).toBeUndefined();
     await orchestrator.shutdown();
   });
 
-  test("bounds completed run history across repeated reusable responses", async () => {
+  test("automatically disposes completed one-shot workers and rejects interactive close", async () => {
+    const tracker = new PromptTracker();
+    const prompt = promptPlan({ status: "completed", assistantText: "done" });
+    const handle = new FakeHandle("one-shot", [prompt], tracker);
+    const orchestrator = runtime(new FakeFactory([{ handle }]));
+    const owner = context("owner", [definition("one-shot")]);
+
+    const completion = orchestrator.orchestrate(owner, task("one-shot"), "inline");
+    await tracker.starts.waitFor(1);
+    prompt.gate.resolve(undefined);
+    const completed = await completion;
+    await handle.disposed.promise;
+
+    expect(completed.result.status).toBe("completed");
+    expect(handle.disposeCalls).toBe(1);
+    await expect(
+      orchestrator.closeInteractive("owner", completed.result.workerId),
+    ).rejects.toThrow(
+      "interactive_close requires an owned ready interactive worker",
+    );
+    await expect(
+      orchestrator.sendInteractive(
+        owner,
+        completed.result.workerId,
+        "not eligible",
+        "async",
+      ),
+    ).rejects.toThrow(
+      "interactive_send requires an owned ready interactive worker",
+    );
+    expect(handle.disposeCalls).toBe(1);
+    await orchestrator.shutdown();
+  });
+
+  test("bounds completed run history across repeated interactive responses", async () => {
     const tracker = new PromptTracker();
     const responseCount = MAX_COMPLETED_RUN_HISTORY + 1;
     const handle = new FakeHandle(
-      "reusable-history",
+      "interactive-history",
       Array.from({ length: responseCount }, (_, index) =>
         promptPlan({ status: "ready", assistantText: `response-${index}` }, true)),
       tracker,
     );
     const orchestrator = runtime(new FakeFactory([{ handle }]));
-    const owner = context("owner", [definition("reusable", "reusable")]);
+    const owner = context("owner", [definition("interactive", "interactive")]);
 
-    const initial = await orchestrator.orchestrate(owner, task("reusable"), "inline");
+    const initial = await orchestrator.orchestrate(owner, task("interactive"), "inline");
     const workerId = initial.result.workerId;
     for (let index = 1; index < responseCount; index += 1) {
-      await orchestrator.send(owner, workerId, `Follow up ${index}`, "inline");
+      await orchestrator.sendInteractive(owner, workerId, `Follow up ${index}`, "inline");
     }
 
     const snapshot = await orchestrator.snapshot("owner");
@@ -434,8 +474,8 @@ describe("completion, reusable workers, and run ownership", () => {
 
   test("retains ready workers and bounds terminal worker and completed run history globally", async () => {
     const tracker = new PromptTracker();
-    const reusableHandle = new FakeHandle(
-      "reusable",
+    const interactiveHandle = new FakeHandle(
+      "interactive",
       [promptPlan({ status: "ready", assistantText: "ready" }, true)],
       tracker,
     );
@@ -446,13 +486,13 @@ describe("completion, reusable workers, and run ownership", () => {
         tracker,
       ),
     }));
-    const orchestrator = runtime(new FakeFactory([{ handle: reusableHandle }, ...terminalPlans]));
-    const reusable = definition("reusable", "reusable");
+    const orchestrator = runtime(new FakeFactory([{ handle: interactiveHandle }, ...terminalPlans]));
+    const interactive = definition("interactive", "interactive");
     const oneShot = definition("one-shot");
-    const owner = context("owner", [reusable, oneShot]);
+    const owner = context("owner", [interactive, oneShot]);
 
-    const reusableRun = await orchestrator.orchestrate(owner, task("reusable"), "inline");
-    const reusableId = reusableRun.result.workerId;
+    const interactiveRun = await orchestrator.orchestrate(owner, task("interactive"), "inline");
+    const interactiveId = interactiveRun.result.workerId;
     for (let index = 0; index < 101; index += 1) {
       await orchestrator.orchestrate(owner, task("one-shot", `Work ${index}`), "inline");
     }
@@ -461,13 +501,13 @@ describe("completion, reusable workers, and run ownership", () => {
     expect(snapshot.runs).toHaveLength(MAX_COMPLETED_RUN_HISTORY);
     expect(String(snapshot.runs[0]?.id)).toBe("run-3");
     expect(snapshot.workers).toHaveLength(MAX_TERMINAL_WORKER_HISTORY + 1);
-    expect(snapshot.workers.some((worker) => worker.id === reusableId && worker.status === "ready")).toBe(true);
+    expect(snapshot.workers.some((worker) => worker.id === interactiveId && worker.status === "ready")).toBe(true);
     expect(snapshot.workers.some((worker) => worker.id === "worker-2")).toBe(false);
 
-    await orchestrator.close("owner", reusableId);
+    await orchestrator.closeInteractive("owner", interactiveId);
     const closed = await orchestrator.snapshot("owner");
     expect(closed.workers).toHaveLength(MAX_TERMINAL_WORKER_HISTORY);
-    expect(closed.workers.some((worker) => worker.id === reusableId && worker.status === "closed")).toBe(true);
+    expect(closed.workers.some((worker) => worker.id === interactiveId && worker.status === "closed")).toBe(true);
     await orchestrator.shutdown();
   });
 });
@@ -506,23 +546,23 @@ describe("per-worker settlement observability", () => {
     await orchestrator.shutdown();
   });
 
-  test("observes inline reusable generations locally with distinct event IDs and final usage", async () => {
+  test("observes inline interactive generations locally with distinct event IDs and final usage", async () => {
     const tracker = new PromptTracker();
     const first = promptPlan({ status: "ready", assistantText: "first" });
     const second = promptPlan({ status: "ready", assistantText: "second" });
-    const handle = new FakeHandle("local-reusable", [first, second], tracker);
+    const handle = new FakeHandle("local-interactive", [first, second], tracker);
     const orchestrator = runtime(new FakeFactory([{ handle }]));
-    const owner = context("owner", [definition("reusable", "reusable")]);
+    const owner = context("owner", [definition("interactive", "interactive")]);
     const local: import("../extension/runtime.ts").WorkerSettlement[] = [];
     const global: import("../extension/runtime.ts").WorkerSettlement[] = [];
     orchestrator.subscribeSettlement((event) => global.push(event));
 
-    const initial = orchestrator.orchestrate(owner, task("reusable"), "inline", undefined, (event) => local.push(event));
+    const initial = orchestrator.orchestrate(owner, task("interactive"), "inline", undefined, (event) => local.push(event));
     await tracker.starts.waitFor(1);
     first.gate.resolve(undefined);
     const workerId = (await initial).result.workerId;
 
-    const followUp = orchestrator.send(owner, workerId, "follow up", "inline", undefined, (event) => local.push(event));
+    const followUp = orchestrator.sendInteractive(owner, workerId, "follow up", "inline", undefined, (event) => local.push(event));
     await tracker.starts.waitFor(2);
     const finalUsage: WorkerUsage = { ...EMPTY_USAGE, output: 9, turns: 2 };
     handle.emitUsage(finalUsage);
@@ -534,7 +574,7 @@ describe("per-worker settlement observability", () => {
     expect(local[0]?.workerId).toBe(local[1]?.workerId);
     expect(local[0]?.eventId).not.toBe(local[1]?.eventId);
     expect(local[1]?.usage).toEqual(finalUsage);
-    await orchestrator.close("owner", workerId);
+    await orchestrator.closeInteractive("owner", workerId);
     expect(local).toHaveLength(2);
     await orchestrator.shutdown();
   });
@@ -666,18 +706,18 @@ describe("ownership, cancellation, and shutdown", () => {
   test("keeps snapshots and worker operations isolated by owner", async () => {
     const tracker = new PromptTracker();
     const plan = promptPlan({ status: "ready", assistantText: "ready" });
-    const handle = new FakeHandle("reusable", [plan], tracker);
+    const handle = new FakeHandle("interactive", [plan], tracker);
     const orchestrator = runtime(new FakeFactory([{ handle }]));
-    const worker = definition("reusable", "reusable");
+    const worker = definition("interactive", "interactive");
     const ownerA = context("owner-a", [worker]);
     const ownerB = context("owner-b", [worker]);
-    const accepted = await orchestrator.orchestrate(ownerA, task("reusable"), "async");
+    const accepted = await orchestrator.orchestrate(ownerA, task("interactive"), "async");
 
     expect(await orchestrator.snapshot("owner-b")).toEqual({ runs: [], workers: [] });
     await expect(
-      orchestrator.send(ownerB, accepted.workerId, "intrude", "async"),
+      orchestrator.sendInteractive(ownerB, accepted.workerId, "intrude", "async"),
     ).rejects.toThrow("not owned");
-    await expect(orchestrator.close("owner-b", accepted.workerId)).rejects.toThrow("not owned");
+    await expect(orchestrator.closeInteractive("owner-b", accepted.workerId)).rejects.toThrow("not owned");
     await expect(
       orchestrator.abort("owner-b", { workerIds: [accepted.workerId] }),
     ).rejects.toThrow("not owned");
@@ -750,15 +790,15 @@ describe("ownership, cancellation, and shutdown", () => {
     await orchestrator.shutdown();
   });
 
-  test("shutdown force-closes and disposes a ready reusable session", async () => {
+  test("shutdown force-closes and disposes a ready interactive session", async () => {
     const tracker = new PromptTracker();
     const prompt = promptPlan({ status: "ready", assistantText: "ready" });
-    const handle = new FakeHandle("reusable", [prompt], tracker);
+    const handle = new FakeHandle("interactive", [prompt], tracker);
     handle.abortGate = new Deferred();
     const orchestrator = runtime(new FakeFactory([{ handle }]));
-    const owner = context("owner", [definition("reusable", "reusable")]);
+    const owner = context("owner", [definition("interactive", "interactive")]);
 
-    const initial = orchestrator.orchestrate(owner, task("reusable"), "inline");
+    const initial = orchestrator.orchestrate(owner, task("interactive"), "inline");
     await tracker.starts.waitFor(1);
     prompt.gate.resolve(undefined);
     await initial;
@@ -771,13 +811,13 @@ describe("ownership, cancellation, and shutdown", () => {
       status: "closed",
       outcome: { status: "closed" },
     });
-    await expect(orchestrator.orchestrate(owner, task("reusable"), "async")).rejects.toThrow(
+    await expect(orchestrator.orchestrate(owner, task("interactive"), "async")).rejects.toThrow(
       "shutting down",
     );
   });
 });
 
-describe("keyed scheduling and reentrant reusable sends", () => {
+describe("keyed scheduling and reentrant interactive operations", () => {
   test("replacement interrupts the Effect workflow and runs its finalizer", async () => {
     const scheduler = createWorkflowScheduler<string>();
     const firstStarted = new Deferred();
@@ -899,14 +939,14 @@ describe("keyed scheduling and reentrant reusable sends", () => {
     expect(finalizerRuns).toBe(1);
   });
 
-  test("state listeners can synchronously send the next reusable generation", async () => {
+  test("state listeners can synchronously send the next interactive generation", async () => {
     const tracker = new PromptTracker();
     const first = promptPlan({ status: "ready", assistantText: "first" });
     const second = promptPlan({ status: "ready", assistantText: "second" });
     const handle = new FakeHandle("state-reentrant", [first, second], tracker);
     const orchestrator = runtime(new FakeFactory([{ handle }]));
-    const owner = context("owner", [definition("reusable", "reusable")]);
-    const accepted = await orchestrator.orchestrate(owner, task("reusable"), "async");
+    const owner = context("owner", [definition("interactive", "interactive")]);
+    const accepted = await orchestrator.orchestrate(owner, task("interactive"), "async");
     await tracker.starts.waitFor(1);
     let followUp: Promise<CompletedRun> | undefined;
     let sent = false;
@@ -914,7 +954,7 @@ describe("keyed scheduling and reentrant reusable sends", () => {
     orchestrator.subscribeState(() => {
       if (sent) return;
       sent = true;
-      followUp = orchestrator.send(
+      followUp = orchestrator.sendInteractive(
         owner,
         accepted.workerId,
         "State follow-up",
@@ -924,10 +964,10 @@ describe("keyed scheduling and reentrant reusable sends", () => {
 
     first.gate.resolve(undefined);
     await tracker.starts.waitFor(2);
-    expect(handle.prompts).toEqual(["Instructions for reusable", "State follow-up"]);
+    expect(handle.prompts).toEqual(["Instructions for interactive", "State follow-up"]);
     second.gate.resolve(undefined);
     expect((await followUp!).result?.status).toBe("ready");
-    await orchestrator.close("owner", accepted.workerId);
+    await orchestrator.closeInteractive("owner", accepted.workerId);
     await orchestrator.shutdown();
   });
 });
@@ -1031,20 +1071,20 @@ describe("inline AbortSignal ownership", () => {
     await orchestrator.shutdown();
   });
 
-  test("abort after inline send cancels that reusable generation", async () => {
+  test("abort after inline interactive send cancels that generation", async () => {
     const tracker = new PromptTracker();
     const first = promptPlan({ status: "ready", assistantText: "ready" });
     const second = promptPlan({ status: "ready", assistantText: "late" });
-    const handle = new FakeHandle("send-abort", [first, second], tracker);
+    const handle = new FakeHandle("interactive-abort", [first, second], tracker);
     const orchestrator = runtime(new FakeFactory([{ handle }]));
-    const owner = context("owner", [definition("reusable", "reusable")]);
+    const owner = context("owner", [definition("interactive", "interactive")]);
 
-    const initial = orchestrator.orchestrate(owner, task("reusable"), "inline");
+    const initial = orchestrator.orchestrate(owner, task("interactive"), "inline");
     await tracker.starts.waitFor(1);
     first.gate.resolve(undefined);
     const workerId = (await initial).result.workerId;
     const controller = new AbortController();
-    const followUp = orchestrator.send(
+    const followUp = orchestrator.sendInteractive(
       owner,
       workerId,
       "cancel this generation",
@@ -1052,9 +1092,9 @@ describe("inline AbortSignal ownership", () => {
       controller.signal,
     );
     await tracker.starts.waitFor(2);
-    controller.abort(new Error("send cancelled"));
+    controller.abort(new Error("interactive send cancelled"));
 
-    await expect(followUp).rejects.toThrow("send cancelled");
+    await expect(followUp).rejects.toThrow("interactive send cancelled");
     expect((await orchestrator.snapshot("owner")).workers[0]?.status).toBe("aborted");
     second.gate.resolve(undefined);
     await orchestrator.shutdown();
@@ -1082,26 +1122,26 @@ describe("inline AbortSignal ownership", () => {
 });
 
 describe("active-only aborts and bounded lifecycle barriers", () => {
-  test("ready workers reject explicit abort with use worker_close and all aborts active only", async () => {
+  test("ready workers reject explicit abort with use interactive_close and all aborts active only", async () => {
     const tracker = new PromptTracker();
     const prompt = promptPlan({ status: "ready", assistantText: "ready" });
     const handle = new FakeHandle("ready", [prompt], tracker);
     const orchestrator = runtime(new FakeFactory([{ handle }]));
-    const owner = context("owner", [definition("reusable", "reusable")]);
+    const owner = context("owner", [definition("interactive", "interactive")]);
 
-    const initial = orchestrator.orchestrate(owner, task("reusable"), "inline");
+    const initial = orchestrator.orchestrate(owner, task("interactive"), "inline");
     await tracker.starts.waitFor(1);
     prompt.gate.resolve(undefined);
     const workerId = (await initial).result.workerId;
 
     await expect(orchestrator.abort("owner", { workerIds: [workerId] })).rejects.toThrow(
-      "use worker_close",
+      "use interactive_close",
     );
     await orchestrator.abort("owner", { all: true });
     expect((await orchestrator.snapshot("owner")).workers[0]?.status).toBe("ready");
     expect(handle.abortCalls).toBe(0);
 
-    await orchestrator.close("owner", workerId);
+    await orchestrator.closeInteractive("owner", workerId);
     await orchestrator.shutdown();
   });
 

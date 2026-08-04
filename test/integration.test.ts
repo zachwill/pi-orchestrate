@@ -34,9 +34,9 @@ import type {
 const TOOL_NAMES = [
   "orchestrate",
   "orchestration_status",
-  "worker_send",
+  "interactive_send",
   "worker_abort",
-  "worker_close",
+  "interactive_close",
 ] as const;
 
 type Handler = (event: any, ctx: ExtensionContext) => unknown;
@@ -86,7 +86,7 @@ class FakeRuntime {
     task: unknown;
     mode: string;
   }> = [];
-  readonly sendCalls: Array<{ context: OrchestrationContext; mode: string }> = [];
+  readonly interactiveSendCalls: Array<{ context: OrchestrationContext; mode: string }> = [];
   readonly stateListeners = new Set<(ownerSessionId: string) => void>();
   readonly snapshotOwners: string[] = [];
   shutdownCalls = 0;
@@ -110,20 +110,20 @@ class FakeRuntime {
     return inlineCompletedRun(context.ownerSessionId);
   }
 
-  async send(
+  async sendInteractive(
     context: OrchestrationContext,
     _workerId: WorkerId,
     _instructions: string,
     mode: "async" | "inline",
   ): Promise<unknown> {
-    this.sendCalls.push({ context, mode });
+    this.interactiveSendCalls.push({ context, mode });
     return mode === "async"
       ? { id: "run-send", workerId: "worker-ready" }
       : inlineCompletedRun(context.ownerSessionId);
   }
 
   async abort(): Promise<void> {}
-  async close(): Promise<void> {}
+  async closeInteractive(): Promise<void> {}
 
   async snapshot(ownerSessionId: string): Promise<RuntimeSnapshot> {
     this.snapshotOwners.push(ownerSessionId);
@@ -351,7 +351,12 @@ describe("Pi Orchestrate extension integration", () => {
     expect(injectedPrompt).toMatch(
       /roles and counts named by the user.*minimum requirements, not ceilings.*exact cap/i,
     );
-    expect(injectedPrompt).toMatch(/worker role is reusable.*same catalog worker.*many calls/i);
+    expect(injectedPrompt).toMatch(
+      /same worker definition can be dispatched in multiple independent calls.*each call creates an independent worker session.*distinct from interactive session continuity.*keeps one worker ID/i,
+    );
+    expect(injectedPrompt).toMatch(
+      /Prefer one-shot workers.*interactive_send.*owned lifecycle interactive worker.*status is ready.*interactive_close.*Never use either tool for one-shot or completed workers.*one-shot sessions terminate automatically/i,
+    );
     expect(injectedPrompt).toMatch(/enumerate the full first parallel wave.*from the work itself/i);
     expect(injectedPrompt).toMatch(
       /intended asynchronous wave has N workers.*next assistant response must contain exactly N separate, fully briefed `orchestrate` invocations.*single invocation is valid only when N=1/i,
@@ -400,6 +405,49 @@ describe("Pi Orchestrate extension integration", () => {
     expect(runtime.orchestrateCalls.map((call) => call.mode)).toEqual(["async", "inline"]);
     expect(asyncResult.terminate).toBe(true);
     expect(runtime.snapshotOwners).toEqual(snapshotCallsBeforeDispatch);
+  });
+
+  test("classifies interactive_send as async only when it is the sole tool call", async () => {
+    const pi = new FakePi();
+    const { host, runtime } = fakeHost();
+    install(pi, host);
+    const { ctx } = createContext();
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+
+    await pi.emit(
+      "message_end",
+      { message: assistantToolCalls([{ id: "interactive-sole", name: "interactive_send" }]) },
+      ctx,
+    );
+    const asyncResult = await invoke(
+      pi,
+      "interactive_send",
+      "interactive-sole",
+      { worker_id: "worker-ready", instructions: "Continue." },
+      ctx,
+    );
+
+    await pi.emit(
+      "message_end",
+      {
+        message: assistantToolCalls([
+          { id: "interactive-mixed", name: "interactive_send" },
+          { id: "ordinary", name: "read" },
+        ]),
+      },
+      ctx,
+    );
+    const inlineResult = await invoke(
+      pi,
+      "interactive_send",
+      "interactive-mixed",
+      { worker_id: "worker-ready", instructions: "Finish." },
+      ctx,
+    );
+
+    expect(runtime.interactiveSendCalls.map((call) => call.mode)).toEqual(["async", "inline"]);
+    expect(asyncResult.terminate).toBe(true);
+    expect(inlineResult).not.toHaveProperty("terminate");
   });
 
   test("keeps mixed calls inline and accepts sibling-only tool groups with harmless text asynchronously", async () => {
@@ -475,7 +523,7 @@ describe("Pi Orchestrate extension integration", () => {
       ]);
     expect(groupedResults.every((result) => "terminate" in result && result.terminate === true))
       .toBe(true);
-    expect(runtime.sendCalls).toEqual([]);
+    expect(runtime.interactiveSendCalls).toEqual([]);
     expect(inlineUpdates).toEqual([{
       content: [{ type: "text", text: "Worker response received." }],
       details: {

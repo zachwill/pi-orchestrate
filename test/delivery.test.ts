@@ -94,6 +94,34 @@ describe("DeliveryCoordinator worker settlements", () => {
     expect(parent.sent[0]?.message.content).toContain(DELIVERY_PARENT_INSTRUCTIONS);
   });
 
+  test("states whether successful sessions ended or remain interactive", () => {
+    const completedCoordinator = new DeliveryCoordinator();
+    const completedParent = createBinding("owner-a", 1);
+    completedCoordinator.bind(completedParent.binding);
+    completedCoordinator.accept(settlement({ eventId: "completed-disposition", sequence: 2 }));
+
+    expect(completedParent.sent[0]?.message.content).toContain(
+      "one-shot session ended automatically; no close needed",
+    );
+    expect(completedParent.sent[0]?.message.content).not.toContain("interactive_close");
+
+    const interactiveCoordinator = new DeliveryCoordinator();
+    const interactiveParent = createBinding("owner-a", 1);
+    interactiveCoordinator.bind(interactiveParent.binding);
+    interactiveCoordinator.accept(settlement({
+      eventId: "interactive-disposition",
+      sequence: 3,
+      lifecycle: "interactive",
+      status: "ready",
+      outcome: { status: "ready", assistantText: "Waiting for follow-up." },
+    }));
+
+    expect(interactiveParent.sent[0]?.message.content).toContain(
+      "interactive session retained; use `interactive_send` or `interactive_close`",
+    );
+    expect(interactiveParent.sent[0]?.message.content).not.toContain("no close needed");
+  });
+
   test("groups independent async runs behind one final synthesis boundary", () => {
     const coordinator = new DeliveryCoordinator();
     const parent = createBinding("owner-a", 1);

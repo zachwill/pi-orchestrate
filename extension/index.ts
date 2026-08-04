@@ -29,7 +29,7 @@ import {
 
 const DISPATCH_TOOL_NAMES: ReadonlySet<string> = new Set([
   "orchestrate",
-  "worker_send",
+  "interactive_send",
 ]);
 
 interface StoredDispatchDecision extends DispatchDecision {

@@ -99,7 +99,7 @@ describe("worker catalog discovery", () => {
     });
     fs.addDirectory(userDirectory, { "shared.md": definition("shared", "user prompt") });
     fs.addDirectory(projectDirectory, {
-      "shared.md": definition("shared", "project prompt", "", "reusable"),
+      "shared.md": definition("shared", "project prompt", "", "interactive"),
     });
 
     const catalog = createWorkerCatalogDiscovery(fs)(options(true));
@@ -110,7 +110,7 @@ describe("worker catalog discovery", () => {
       filePath: join(projectDirectory, "shared.md"),
     });
     expect(shared?.systemPrompt).toBe("project prompt");
-    expect(shared?.lifecycle).toBe("reusable");
+    expect(shared?.lifecycle).toBe("interactive");
     expect(workers(catalog).map((worker) => worker.name)).toEqual(["package", "shared"]);
   });
 
@@ -118,7 +118,7 @@ describe("worker catalog discovery", () => {
     const fs = new FakeFileSystem();
     fs.addDirectory(packageDirectory, {
       "one-shot.md": definition("one-shot", "prompt"),
-      "reusable.md": definition("reusable", "prompt", "", "reusable"),
+      "interactive.md": definition("interactive", "prompt", "", "interactive"),
       "invalid.md": definition("invalid", "prompt", "", "forever"),
       "missing.md": definition("missing", "prompt").replace("lifecycle: one-shot\n", ""),
     });
@@ -127,8 +127,8 @@ describe("worker catalog discovery", () => {
     const catalog = createWorkerCatalogDiscovery(fs)(options(false));
 
     expect(workers(catalog).map(({ name, lifecycle }) => ({ name, lifecycle }))).toEqual([
+      { name: "interactive", lifecycle: "interactive" },
       { name: "one-shot", lifecycle: "one-shot" },
-      { name: "reusable", lifecycle: "reusable" },
     ]);
     expect(catalog.diagnostics).toHaveLength(2);
     expect(catalog.diagnostics.map((item) => item.message).join("\n")).toContain("lifecycle");
@@ -187,7 +187,7 @@ compaction:
   enabled: true
   reserveTokens: 1200
   keepRecentTokens: 400
-lifecycle: reusable
+lifecycle: interactive
 ---
 prompt`,
     });
@@ -202,7 +202,7 @@ prompt`,
       skills: ["bun", "effect"],
       thinking: "high",
       compaction: { enabled: true, reserveTokens: 1200, keepRecentTokens: 400 },
-      lifecycle: "reusable",
+      lifecycle: "interactive",
     });
   });
 
@@ -323,7 +323,7 @@ prompt`,
       ["bad-description.md", "frontmatter field 'description' must be a non-empty string"],
       ["bad-enabled.md", "frontmatter field 'compaction.enabled' must be a boolean"],
       ["bad-keep-recent.md", "frontmatter field 'compaction.keepRecentTokens' must be a non-negative integer"],
-      ["bad-lifecycle.md", "frontmatter field 'lifecycle' must be 'one-shot' or 'reusable'"],
+      ["bad-lifecycle.md", "frontmatter field 'lifecycle' must be 'one-shot' or 'interactive'"],
       ["bad-model.md", "frontmatter field 'model' must use provider/model format"],
       ["bad-name.md", "frontmatter field 'name' must be a non-empty string"],
       ["bad-reserve.md", "frontmatter field 'compaction.reserveTokens' must be a non-negative integer"],
@@ -333,7 +333,7 @@ prompt`,
       ["compaction-priority.md", "frontmatter field 'compaction.enabled' must be a boolean"],
       ["empty-model.md", "frontmatter field 'model' must be a non-empty string"],
       ["empty-thinking.md", "frontmatter field 'thinking' must be a non-empty string"],
-      ["missing-lifecycle.md", "frontmatter field 'lifecycle' must be 'one-shot' or 'reusable'"],
+      ["missing-lifecycle.md", "frontmatter field 'lifecycle' must be 'one-shot' or 'interactive'"],
       ["missing-tools.md", "frontmatter field 'tools' is required"],
       ["not-mapping.md", "frontmatter must be a mapping"],
       ["priority.md", "frontmatter field 'description' must be a non-empty string"],

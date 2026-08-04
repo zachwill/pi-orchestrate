@@ -59,7 +59,7 @@ const orchestrateSchema = taskSchema;
 
 const statusSchema = Type.Object({}, STRICT_OBJECT);
 
-const workerSendSchema = Type.Object(
+const interactiveSendSchema = Type.Object(
   {
     worker_id: Type.String({ minLength: 1 }),
     instructions: Type.String(),
@@ -82,7 +82,7 @@ const workerAbortSchema = Type.Union([
   ),
 ]);
 
-const workerCloseSchema = Type.Object(
+const interactiveCloseSchema = Type.Object(
   {
     worker_id: Type.String({ minLength: 1 }),
   },
@@ -213,17 +213,17 @@ export function registerOrchestrationTools(
   });
 
   pi.registerTool({
-    name: "worker_send",
-    label: "Worker Send",
+    name: "interactive_send",
+    label: "Interactive Send",
     description:
-      "Send follow-up instructions to an owned ready reusable worker. A sole tool call runs asynchronously; sibling tool calls make it inline and blocking.",
-    promptSnippet: "Send follow-up work to an owned ready reusable worker",
+      "Send follow-up instructions only to an owned lifecycle interactive worker whose status is ready. Never use for one-shot or completed workers; one-shot sessions terminate automatically. A sole tool call runs asynchronously; sibling tool calls make it inline and blocking.",
+    promptSnippet: "Use only for an owned lifecycle interactive worker with status ready; never one-shot/completed because one-shot sessions terminate automatically",
     promptGuidelines: [
-      "Use worker_send only for follow-up work on an owned ready reusable worker.",
+      "Use interactive_send only for an owned lifecycle interactive worker whose status is ready; never use it for one-shot or completed workers because one-shot sessions terminate automatically.",
     ],
-    parameters: workerSendSchema,
+    parameters: interactiveSendSchema,
     renderCall(args, theme, { expanded }) {
-      return renderWorkerMessageCall(theme, "worker_send", args.worker_id, args.instructions, expanded);
+      return renderInteractiveMessageCall(theme, "interactive_send", args.worker_id, args.instructions, expanded);
     },
     renderResult(result, { isPartial, expanded }, theme, context) {
       return renderOrchestrationResult(result, isPartial, expanded, theme, context.lastComponent);
@@ -233,7 +233,7 @@ export function registerOrchestrationTools(
       const mode = deps.getDispatchDecision(toolCallId).mode;
       const runtimeContext = await buildRuntimeContext(ctx, deps);
       if (mode === "async") {
-        const acceptedRun = await deps.runtime.send(
+        const acceptedRun = await deps.runtime.sendInteractive(
           runtimeContext,
           workerId,
           params.instructions,
@@ -253,7 +253,7 @@ export function registerOrchestrationTools(
         };
       }
 
-      const completedRun = await deps.runtime.send(
+      const completedRun = await deps.runtime.sendInteractive(
         runtimeContext,
         workerId,
         params.instructions,
@@ -281,10 +281,10 @@ export function registerOrchestrationTools(
     name: "worker_abort",
     label: "Worker Abort",
     description:
-      "Abort owned active work by worker IDs or all active owned workers. Use worker_close for ready reusable workers.",
+      "Abort owned active work by worker IDs or all active owned workers. Use interactive_close for owned lifecycle interactive workers whose status is ready.",
     promptSnippet: "Abort active owned workers by worker IDs or all",
     promptGuidelines: [
-      "Use worker_abort only for active work; use worker_close for a ready reusable worker.",
+      "Use worker_abort only for active work; use interactive_close only for an owned lifecycle interactive worker whose status is ready, never for one-shot or completed workers because one-shot sessions terminate automatically.",
     ],
     parameters: workerAbortSchema,
     renderCall(args, theme) {
@@ -317,16 +317,16 @@ export function registerOrchestrationTools(
   });
 
   pi.registerTool({
-    name: "worker_close",
-    label: "Worker Close",
-    description: "Close an owned ready reusable worker that no longer needs follow-up work.",
-    promptSnippet: "Close an owned ready reusable worker",
+    name: "interactive_close",
+    label: "Interactive Close",
+    description: "Close only an owned lifecycle interactive worker whose status is ready. Never use for one-shot or completed workers; one-shot sessions terminate automatically.",
+    promptSnippet: "Use only for an owned lifecycle interactive worker with status ready; never one-shot/completed because one-shot sessions terminate automatically",
     promptGuidelines: [
-      "Use worker_close when an owned ready reusable worker is finished.",
+      "Use interactive_close only for an owned lifecycle interactive worker whose status is ready; never use it for one-shot or completed workers because one-shot sessions terminate automatically.",
     ],
-    parameters: workerCloseSchema,
+    parameters: interactiveCloseSchema,
     renderCall(args, theme) {
-      return renderCompactCall(theme, "worker_close", args.worker_id);
+      return renderCompactCall(theme, "interactive_close", args.worker_id);
     },
     renderResult(result, { isPartial }, theme) {
       return renderSimpleResult(result, isPartial ? "Closing worker…" : "✓ Worker closed", theme);
@@ -337,7 +337,7 @@ export function registerOrchestrationTools(
         ctx.sessionManager.getSessionId(),
       );
       const workerId = asWorkerId(params.worker_id);
-      await deps.runtime.close(ownerSessionId, workerId);
+      await deps.runtime.closeInteractive(ownerSessionId, workerId);
       const readable = { worker_id: workerId };
       return {
         content: [
@@ -642,7 +642,7 @@ class InstructionPreview implements Component {
   invalidate(): void {}
 }
 
-function renderWorkerMessageCall(
+function renderInteractiveMessageCall(
   theme: Theme,
   tool: string,
   workerId: unknown,

@@ -24,7 +24,7 @@ const theme = { fg: (_: string, text: string) => text, bg: (_: string, text: str
 const usage = { input: 1200, output: 345, cacheRead: 12, cacheWrite: 3, cost: 0.0123, contextTokens: 12345, turns: 2 };
 
 function worker(id: string, status: WorkerStatus, overrides: Partial<WorkerRecord> = {}): WorkerRecord {
-  return { id: id as WorkerId, worker: "scout", ownerSessionId: "owner", runId: "run" as RunId, title: `Task ${id}`, instructions: "Do it", lifecycle: status === "ready" ? "reusable" : "one-shot", status, usage, messageDirection: status === "starting" ? "to-model" : "from-model", startedAt: Date.now() - 78_000, ...overrides };
+  return { id: id as WorkerId, worker: "scout", ownerSessionId: "owner", runId: "run" as RunId, title: `Task ${id}`, instructions: "Do it", lifecycle: status === "ready" ? "interactive" : "one-shot", status, usage, messageDirection: status === "starting" ? "to-model" : "from-model", startedAt: Date.now() - 78_000, ...overrides };
 }
 function snapshot(workers: readonly WorkerRecord[]): RuntimeSnapshot {
   return {
@@ -42,7 +42,7 @@ function snapshot(workers: readonly WorkerRecord[]): RuntimeSnapshot {
 function settlement(status: "completed" | "ready" | "failed" | "aborted" = "completed", text = "A useful worker response.") {
   return {
     eventId: "event", sequence: 1, ownerSessionId: "owner", runId: "run", workerId: "worker-1", generation: 2,
-    mode: "async", worker: "scout", title: "Inspect code", lifecycle: status === "ready" ? "reusable" : "one-shot", status,
+    mode: "async", worker: "scout", title: "Inspect code", lifecycle: status === "ready" ? "interactive" : "one-shot", status,
     outcome: status === "completed" || status === "ready" ? { status, assistantText: text } : { status, message: text, assistantText: "Partial evidence." },
     usage, startedAt: 1000, settledAt: 6200, sessionFile: "/sessions/worker.jsonl",
   };
@@ -58,8 +58,8 @@ function renderResult(details: unknown, expanded: boolean, width: number, conten
 
 describe("per-worker result messages", () => {
   test.each([
-    ["completed", "✓ Inspect code · scout · 5s"],
-    ["ready", "✓ Inspect code · scout · ready for follow-up · 5s"],
+    ["completed", "✓ Inspect code · scout · one-shot ended · 5s"],
+    ["ready", "✓ Inspect code · scout · interactive ready · 5s"],
     ["failed", "✗ Inspect code · scout · failed · 5s"],
     ["aborted", "■ Inspect code · scout · aborted · 5s"],
   ] as const)("renders truthful %s styling", (status, heading) => {
@@ -88,7 +88,7 @@ describe("per-worker result messages", () => {
     )!;
 
     const output = Bun.stripANSI(component.render(80).join("\n"));
-    expect(output).toContain("✓ Inspect code · <italic>scout</italic> · 5s");
+    expect(output).toContain("✓ Inspect code · <italic>scout</italic> · one-shot ended · 5s");
   });
 
   test("expanded output reconstructs full response and adjacent metadata", () => {
@@ -108,7 +108,7 @@ describe("per-worker result messages", () => {
       80,
     ).join("\n"));
 
-    expect(output).toContain("✓ Inspect code · scout · 5s");
+    expect(output).toContain("✓ Inspect code · scout · one-shot ended · 5s");
     expect(output).toContain("Changed the worker bootstrap.");
     expect(output).not.toContain("Completed");
   });
@@ -211,12 +211,12 @@ describe("per-worker result messages", () => {
     const mutableTheme = { ...theme, fg: (_: string, text: string) => `${marker}:${text}` } as Theme;
     const component = renderer()({ role: "custom", customType: "pi-orchestrate-worker-result", content: "fallback", display: true, details: settlement(), timestamp: 1 }, { expanded: false }, mutableTheme)!;
     expect(Bun.stripANSI(component.render(80).join("\n"))).toContain(
-      "old:✓ Inspect code · old:scout · old:5s",
+      "old:✓ Inspect code · old:scout · old:one-shot ended · 5s",
     );
     marker = "new";
     component.invalidate();
     const refreshed = Bun.stripANSI(component.render(80).join("\n"));
-    expect(refreshed).toContain("new:✓ Inspect code · new:scout · new:5s");
+    expect(refreshed).toContain("new:✓ Inspect code · new:scout · new:one-shot ended · 5s");
     expect(refreshed).not.toContain("old:✓ Inspect code");
   });
 });
@@ -344,8 +344,8 @@ describe("active widget", () => {
     expect(requests).toBe(stopped);
   });
 
-  test("footer contains reusable facts only", () => {
-    expect(formatFooterStatus(snapshot([worker("run", "running"), worker("ready", "ready")]))).toBe("1 available for follow-up");
+  test("footer contains interactive-ready facts only", () => {
+    expect(formatFooterStatus(snapshot([worker("run", "running"), worker("ready", "ready")]))).toBe("1 interactive ready");
     expect(formatFooterStatus(snapshot([worker("run", "running")]))).toBeUndefined();
   });
 });
@@ -376,7 +376,7 @@ test("controller ignores stale owner and out-of-order same-owner snapshots", asy
   expect(listeners.size).toBe(1);
   requests[0]!.resolve(snapshot([worker("stale", "ready")]));
   await Promise.resolve(); await Promise.resolve();
-  expect(statuses).not.toContain("1 available for follow-up");
+  expect(statuses).not.toContain("1 interactive ready");
   requests[1]!.resolve(snapshot([]));
   await Promise.resolve(); await Promise.resolve();
   const listener = [...listeners][0]!;
@@ -384,7 +384,7 @@ test("controller ignores stale owner and out-of-order same-owner snapshots", asy
   requests[3]!.resolve(snapshot([worker("latest", "ready")]));
   requests[2]!.resolve(snapshot([]));
   await Promise.resolve(); await Promise.resolve();
-  expect(statuses.at(-1)).toBe("1 available for follow-up");
+  expect(statuses.at(-1)).toBe("1 interactive ready");
   controller.dispose();
   controller.dispose();
   expect(listeners.size).toBe(0);
@@ -462,6 +462,6 @@ test("controller updates one widget instance, removes terminal rows, and clears 
   runtime.value = snapshot([worker("a", "completed"), worker("b", "ready")]);
   runtime.emit(); await Promise.resolve(); await Promise.resolve();
   expect(widgets.at(-1)).toBeUndefined();
-  expect(statuses.at(-1)).toBe("1 available for follow-up");
+  expect(statuses.at(-1)).toBe("1 interactive ready");
   controller.dispose();
 });

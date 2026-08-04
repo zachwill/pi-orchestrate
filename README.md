@@ -18,9 +18,9 @@ Pi Orchestrate adds exactly five tools:
 | --- | --- | --- |
 | `orchestrate` | `orchestrate({ worker, title, instructions })` | Start one worker task |
 | `orchestration_status` | `orchestration_status({})` | Inspect the trusted catalog, diagnostics, runs, and worker states |
-| `worker_send` | `worker_send({ worker_id, instructions })` | Send a follow-up to a ready reusable worker |
+| `interactive_send` | `interactive_send({ worker_id, instructions })` | Send a follow-up to a ready interactive worker |
 | `worker_abort` | `worker_abort({ worker_ids })` or `worker_abort({ all: true })` | Stop active owned work |
-| `worker_close` | `worker_close({ worker_id })` | Close a ready reusable worker |
+| `interactive_close` | `interactive_close({ worker_id })` | Close a ready interactive worker |
 
 `title` is a label. `instructions` is the complete worker brief. Collapsed tool calls preview those instructions; expanded calls show them in full.
 
@@ -37,7 +37,7 @@ Execution mode depends on the complete tool-call group:
 - Pi Orchestrate treats a successfully admitted sole `orchestrate` call as async.
 - Pi Orchestrate treats a successfully admitted pure group of sibling `orchestrate` calls as async; Pi executes the siblings concurrently.
 - Mixing `orchestrate` with any other tool makes the orchestration calls inline and blocking.
-- `worker_send` is asynchronous only when it is the sole tool call in the message.
+- `interactive_send` is asynchronous only when it is the sole tool call in the message.
 
 Inline work follows the parent turn's cancellation signal. Accepted asynchronous work detaches from that signal and continues independently.
 
@@ -49,19 +49,19 @@ All state and delivery are owner-scoped. If an owning session is busy or inactiv
 
 `orchestration_status` is for diagnostics and recovery, not completion polling. It exposes bounded owner-scoped state without full task instructions or worker prompts.
 
-The bottom widget shows active work only. Completed, failed, aborted, and reusable ready workers disappear immediately. Inline work shows its current response in the live tool output while it blocks.
+The bottom widget shows active work only. Completed, failed, aborted, and interactive ready workers disappear immediately. Inline work shows its current response in the live tool output while it blocks.
 
 ## Lifecycle
 
-A run represents one worker generation. A worker ID identifies the live worker session.
+A run represents one worker generation. A worker ID identifies its worker session. Completed one-shot IDs may remain in bounded diagnostics history, but their sessions have already terminated.
 
-- A **one-shot** worker succeeds as `completed` and terminates.
-- A **reusable** worker succeeds as `ready` and keeps the same worker ID.
-- `worker_send` starts a new run on that ready reusable worker.
-- `worker_close` closes a ready reusable worker.
-- `worker_abort` stops active work only; `{ all: true }` does not close ready workers.
+- A **one-shot** worker is the default. It automatically terminates after settling and requires no cleanup.
+- An **interactive** worker is explicitly retained after a successful response as `ready`, keeping the same worker ID for follow-up work.
+- `interactive_send` starts a new run on that ready interactive worker.
+- `interactive_close` closes a ready interactive worker.
+- `worker_abort` stops active work only; `{ all: true }` does not close ready interactive workers.
 
-Workers, runs, and queued delivery survive extension reloads and session switches within the same Pi process. Reusable workers do not survive process exit, so close them when continuity is no longer needed.
+Workers, runs, and queued delivery survive extension reloads and session switches within the same Pi process. Runtime shutdown releases retained interactive workers automatically; use `interactive_close` earlier only when their continuity is no longer needed.
 
 ## Parent contract
 
@@ -88,6 +88,8 @@ A higher-precedence definition replaces a lower one with the same `name`. Pi per
 
 The package includes `scout`, `investigator`, `web`, and `worker` fallbacks. `scout`, `investigator`, and `worker` omit `model`, so they inherit the parent's active model at dispatch. `web` uses an installed, authenticated Codex CLI for public-web research and pins its Pi session and searches to `gpt-5.6-sol`. To customize one, copy its definition to the user or project directory and keep the same filename and `name`. Add an explicit model only when that worker needs one.
 
+A catalog definition is dispatch configuration, not a retained session. The same definition can be dispatched repeatedly; each one-shot dispatch creates a fresh session that terminates automatically without cleanup.
+
 ## Worker definitions
 
 A worker is a regular Markdown file whose basename matches its `name`:
@@ -97,7 +99,7 @@ A worker is a regular Markdown file whose basename matches its `name`:
 name: reviewer
 description: Reviews a bounded change and returns evidence.
 tools: read, grep, find, ls, bash
-lifecycle: reusable
+lifecycle: interactive
 ---
 
 Inspect the assigned scope and return concise findings with file paths.
@@ -108,7 +110,7 @@ Inspect the assigned scope and return concise findings with file paths.
 | `name` | Required; must match the filename |
 | `description` | Required; used by the parent to choose a worker |
 | `tools` | Required, nonempty list using `read`, `bash`, `edit`, `write`, `grep`, `find`, or `ls` |
-| `lifecycle` | Required; exactly `one-shot` or `reusable` |
+| `lifecycle` | Required; exactly `one-shot` or `interactive` |
 | `model` | Optional `provider/model`; omitted inherits the parent model |
 | `thinking` | Optional Pi thinking level |
 | `skills` | Optional; omitted uses normal discovery, a list is an exact allowlist, and `[]` disables skills |

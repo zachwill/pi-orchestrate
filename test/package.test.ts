@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readdir, stat } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { appendOrchestratorContract } from "../extension/contract.js";
 
 const root = join(import.meta.dir, "..");
 const manifestPath = join(root, "package.json");
@@ -13,9 +14,9 @@ const workerPaths = workerNames.map((name) => join(workerDirectory, `${name}.md`
 const canonicalTools = [
   "orchestrate",
   "orchestration_status",
-  "worker_send",
+  "interactive_send",
   "worker_abort",
-  "worker_close",
+  "interactive_close",
 ] as const;
 const supportedWorkerTools = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
 const piPeerPackages = [
@@ -156,7 +157,8 @@ describe("fallback worker definitions", () => {
     expect(fields.get("name")).toBe(workerName);
     expect(fields.get("description")?.trim().length).toBeGreaterThan(0);
     expect(fields.get("thinking")?.trim().length).toBeGreaterThan(0);
-    expect(fields.get("lifecycle")).toMatch(/^(one-shot|reusable)$/);
+    expect(fields.get("lifecycle")).toMatch(/^(one-shot|interactive)$/);
+    expect(fields.get("lifecycle")).toBe("one-shot");
     expect(definition.body.trim().length).toBeGreaterThan(0);
 
     expect(fields.has("tools")).toBe(true);
@@ -187,6 +189,7 @@ describe("published documentation", () => {
     const lifecycle = markdownSection(readme, "Lifecycle");
     const parent = markdownSection(readme, "Parent contract");
     const catalog = markdownSection(readme, "Worker catalog");
+    const definitions = markdownSection(readme, "Worker definitions");
     const trust = markdownSection(readme, "Trust and isolation");
 
     expect(install).toContain(`pi install npm:${manifest.name}`);
@@ -233,16 +236,38 @@ describe("published documentation", () => {
       /\bconcurrently\b/i,
     ]);
     expectBlockWith(dispatch, [/\bmixing\b/i, /\binline\b/i, /\bblocking\b/i]);
-    expectBlockWith(dispatch, [/\bworker_send\b/i, /\bsole\b/i, /\basynchronous\b/i]);
+    expectBlockWith(dispatch, [/\binteractive_send\b/i, /\bsole\b/i, /\basynchronous\b/i]);
     expectBlockWith(dispatch, [/\binline\b/i, /\bcancellation\b/i, /\bdetaches\b/i]);
 
     expectBlockWith(results, [/\bsibling\b/i, /\bfinal\b/i, /\bsynthesis\b/i]);
     expectBlockWith(results, [/\bowner-scoped\b/i, /\bqueue\b/i, /\bnever\b/i]);
     expectBlockWith(results, [/\bpolling\b/i, /\borchestration_status\b/i]);
 
-    expectBlockWith(lifecycle, [/\bone-shot\b/i, /\bcompleted\b/i, /\breusable\b/i, /\bready\b/i]);
-    expectBlockWith(lifecycle, [/\bworker_send\b/i, /\bworker_close\b/i, /\bworker_abort\b/i]);
-    expectBlockWith(lifecycle, [/\bprocess\b/i, /\breloads?\b/i, /\bclose\b/i]);
+    expectBlockWith(lifecycle, [
+      /\bone-shot\b/i,
+      /\bdefault\b/i,
+      /\bautomatically terminates\b/i,
+      /\brequires no cleanup\b/i,
+    ]);
+    expectBlockWith(lifecycle, [
+      /\binteractive\b/i,
+      /\bexplicitly retained\b/i,
+      /\bready\b/i,
+      /\bfollow-up\b/i,
+    ]);
+    expectBlockWith(lifecycle, [
+      /\binteractive_send\b/i,
+      /\binteractive_close\b/i,
+      /\bworker_abort\b/i,
+    ]);
+    expectBlockWith(lifecycle, [
+      /\bprocess\b/i,
+      /\breloads?\b/i,
+      /\bruntime shutdown releases\b/i,
+      /\bautomatically\b/i,
+      /`interactive_close`/,
+      /\bearlier only\b/i,
+    ]);
 
     expectBlockWith(parent, [/\bbounded\b/i, /\bindependent\b/i, /\bparallel\b/i]);
     expectBlockWith(parent, [
@@ -283,8 +308,55 @@ describe("published documentation", () => {
     expect(precedence[1]).toMatch(/user/i);
     expect(precedence[2]).toMatch(/project/i);
     expect(precedence[2]).toMatch(/trust/i);
+    expectBlockWith(catalog, [
+      /\bcatalog definition\b/i,
+      /\bdispatched repeatedly\b/i,
+      /\bone-shot\b/i,
+      /\bfresh session\b/i,
+      /\bwithout cleanup\b/i,
+    ]);
+
+    expect(definitions).toContain("lifecycle: interactive");
+    expectBlockWith(definitions, [
+      /`lifecycle`/,
+      /\brequired\b/i,
+      /\bexactly\b/i,
+      /`one-shot`/,
+      /`interactive`/,
+    ]);
+    expect(readme).not.toMatch(/\bworker_(?:send|close)\b/);
+    expect(readme).not.toContain("`reusable`");
 
     expectBlockWith(trust, [/\bdirect Pi children\b/i, /\bdescendant Pi worker sessions\b/i]);
     expectBlockWith(trust, [/\bbash\b/i, /\bexternal processes\b/i, /\bagent CLIs\b/i]);
+  });
+
+  test("shipped parent contract uses only the current tools and lifecycle semantics", () => {
+    const contract = appendOrchestratorContract("", { workers: [], diagnostics: [] });
+    const publicTools = contract
+      .split("\n")
+      .find((line) => line.includes("The public tools are"));
+
+    expect(publicTools).toBeDefined();
+    if (publicTools === undefined) throw new Error("missing public tools contract rule");
+    expect([...publicTools.matchAll(/`([^`]+)`/g)].map((match) => match[1])).toEqual([
+      ...canonicalTools,
+    ]);
+    expectBlockWith(contract, [
+      /\bprefer one-shot workers\b/i,
+      /\bterminate automatically\b/i,
+      /\bnever use either tool for one-shot or completed workers\b/i,
+    ]);
+    expectBlockWith(contract, [
+      /\bsame worker definition can be dispatched in multiple independent calls\b/i,
+      /\beach call creates an independent worker session\b/i,
+      /\binteractive session continuity\b/i,
+      /\bone worker ID\b/i,
+      /\bexplicit follow-up work\b/i,
+      /`interactive_send`/,
+      /`interactive_close`/,
+    ]);
+    expect(contract).not.toMatch(/\bworker_(?:send|close)\b/);
+    expect(contract).not.toMatch(/\breusable\b/i);
   });
 });

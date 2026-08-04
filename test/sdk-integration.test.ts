@@ -671,7 +671,12 @@ describe("Pi 0.80.10 SDK integration", () => {
       expect(initialParent.systemPrompt).toMatch(
         /roles and counts named by the user.*minimum requirements, not ceilings.*exact cap/i,
       );
-      expect(initialParent.systemPrompt).toMatch(/worker role is reusable.*same catalog worker.*many calls/i);
+      expect(initialParent.systemPrompt).toMatch(
+        /same worker definition can be dispatched in multiple independent calls.*each call creates an independent worker session.*distinct from interactive session continuity.*keeps one worker ID/i,
+      );
+      expect(initialParent.systemPrompt).toMatch(
+        /Prefer one-shot workers.*interactive_send.*owned lifecycle interactive worker.*status is ready.*interactive_close.*Never use either tool for one-shot or completed workers.*one-shot sessions terminate automatically/i,
+      );
       expect(initialParent.systemPrompt).toMatch(/enumerate the full first parallel wave.*from the work itself/i);
       expect(initialParent.systemPrompt).toMatch(
         /intended asynchronous wave has N workers.*next assistant response must contain exactly N separate, fully briefed `orchestrate` invocations.*single invocation is valid only when N=1/i,

@@ -1214,7 +1214,7 @@ describe("worker session factory", () => {
 });
 
 describe("worker session handle", () => {
-  test("returns assistant text with one-shot or reusable success status", async () => {
+  test("returns assistant text with one-shot or interactive success status", async () => {
     const oneShotHarness = harness();
     oneShotHarness.session.prompt.mockImplementation(async () => {
       oneShotHarness.session.finishTurn(assistant("first block"));
@@ -1225,14 +1225,14 @@ describe("worker session handle", () => {
       assistantText: "first block\nsecond block",
     });
 
-    const reusableHarness = harness();
-    reusableHarness.session.prompt.mockImplementation(async () => {
-      reusableHarness.session.finishTurn(assistant("continue"));
+    const interactiveHarness = harness();
+    interactiveHarness.session.prompt.mockImplementation(async () => {
+      interactiveHarness.session.finishTurn(assistant("continue"));
     });
-    const reusable = await createWorkerSessionFactory(reusableHarness.dependencies).create(
-      options({ definition: definition({ lifecycle: "reusable" }) }),
+    const interactive = await createWorkerSessionFactory(interactiveHarness.dependencies).create(
+      options({ definition: definition({ lifecycle: "interactive" }) }),
     );
-    expect(await reusable.prompt("instructions")).toEqual({
+    expect(await interactive.prompt("instructions")).toEqual({
       status: "ready",
       assistantText: "continue\nsecond block",
     });

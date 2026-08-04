@@ -140,7 +140,7 @@ export interface OrchestratorRuntime {
     signal?: AbortSignal,
     onSettlement?: SettlementListener,
   ): Promise<AcceptedRun | CompletedRun>;
-  send(
+  sendInteractive(
     context: OrchestrationContext,
     workerId: WorkerId,
     instructions: string,
@@ -148,7 +148,7 @@ export interface OrchestratorRuntime {
     signal?: AbortSignal,
     onSettlement?: SettlementListener,
   ): Promise<AcceptedRun>;
-  send(
+  sendInteractive(
     context: OrchestrationContext,
     workerId: WorkerId,
     instructions: string,
@@ -156,7 +156,7 @@ export interface OrchestratorRuntime {
     signal?: AbortSignal,
     onSettlement?: SettlementListener,
   ): Promise<CompletedRun>;
-  send(
+  sendInteractive(
     context: OrchestrationContext,
     workerId: WorkerId,
     instructions: string,
@@ -165,7 +165,7 @@ export interface OrchestratorRuntime {
     onSettlement?: SettlementListener,
   ): Promise<AcceptedRun | CompletedRun>;
   abort(ownerSessionId: string, target: AbortTarget): Promise<void>;
-  close(ownerSessionId: string, workerId: WorkerId): Promise<void>;
+  closeInteractive(ownerSessionId: string, workerId: WorkerId): Promise<void>;
   snapshot(ownerSessionId: string): Promise<RuntimeSnapshot>;
   subscribeSettlement(listener: SettlementListener): UnsubscribeSettlement;
   subscribeState(listener: StateListener): () => void;
@@ -314,7 +314,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     return freezeAcceptedRun(runId, workerId);
   }
 
-  send(
+  sendInteractive(
     context: OrchestrationContext,
     workerId: WorkerId,
     instructions: string,
@@ -322,7 +322,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     signal?: AbortSignal,
     onSettlement?: SettlementListener,
   ): Promise<AcceptedRun>;
-  send(
+  sendInteractive(
     context: OrchestrationContext,
     workerId: WorkerId,
     instructions: string,
@@ -330,7 +330,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     signal?: AbortSignal,
     onSettlement?: SettlementListener,
   ): Promise<CompletedRun>;
-  send(
+  sendInteractive(
     context: OrchestrationContext,
     workerId: WorkerId,
     instructions: string,
@@ -338,7 +338,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     signal?: AbortSignal,
     onSettlement?: SettlementListener,
   ): Promise<AcceptedRun | CompletedRun>;
-  async send(
+  async sendInteractive(
     context: OrchestrationContext,
     workerId: WorkerId,
     instructions: string,
@@ -353,11 +353,11 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     validateText("instructions", instructions, MAX_WORKER_INSTRUCTIONS_LENGTH);
 
     const current = this.ownedWorker(context.ownerSessionId, workerId);
-    if (current.lifecycle !== "reusable" || current.status !== "ready") {
-      throw new Error("worker_send requires an owned ready reusable worker");
+    if (current.lifecycle !== "interactive" || current.status !== "ready") {
+      throw new Error("interactive_send requires an owned ready interactive worker");
     }
     const entry = this.entries.get(workerId);
-    if (!entry?.session) throw new Error("Ready reusable worker has no session handle");
+    if (!entry?.session) throw new Error("Ready interactive worker has no session handle");
 
     const runId = this.idFactories.runId();
     if (this.runs.has(runId)) throw new Error(`Duplicate run ID: ${runId}`);
@@ -403,14 +403,14 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     await this.cancelWorkers(targets);
   }
 
-  async close(ownerSessionId: string, workerId: WorkerId): Promise<void> {
+  async closeInteractive(ownerSessionId: string, workerId: WorkerId): Promise<void> {
     this.assertOpen();
     validateContextOwner(ownerSessionId);
     const current = this.ownedWorker(ownerSessionId, workerId);
-    if (current.lifecycle !== "reusable" || current.status !== "ready") {
-      throw new Error("worker_close requires an owned ready reusable worker");
+    if (current.lifecycle !== "interactive" || current.status !== "ready") {
+      throw new Error("interactive_close requires an owned ready interactive worker");
     }
-    this.closeReadyWorker(current);
+    this.closeReadyInteractiveWorker(current);
   }
 
   async snapshot(ownerSessionId: string): Promise<RuntimeSnapshot> {
@@ -458,7 +458,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
 
   private async performShutdown(): Promise<void> {
     try {
-      this.closeReadyWorkersForShutdown();
+      this.closeReadyInteractiveWorkersForShutdown();
       const active = [...this.workers.values()]
         .filter((worker) => isActiveWorkerStatus(worker.status))
         .map((worker) => worker.id);
@@ -748,7 +748,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     let status: "ready" | "completed" | "failed" | "aborted";
     if (outcome.status === "failed" || outcome.status === "aborted") {
       status = outcome.status;
-    } else if (current.lifecycle === "reusable" && outcome.status === "ready") {
+    } else if (current.lifecycle === "interactive" && outcome.status === "ready") {
       status = "ready";
     } else if (current.lifecycle === "one-shot" && outcome.status === "completed") {
       status = "completed";
@@ -928,7 +928,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
       for (const workerId of unique) {
         const worker = this.ownedWorker(ownerSessionId, workerId);
         if (worker.status === "ready") {
-          throw new Error("Ready reusable workers are not active; use worker_close");
+          throw new Error("Ready interactive workers are not active; use interactive_close");
         }
         if (!isActiveWorkerStatus(worker.status)) {
           throw new Error("worker_abort requires owned active workers");
@@ -1068,7 +1068,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     });
   }
 
-  private closeReadyWorker(current: WorkerRecord): void {
+  private closeReadyInteractiveWorker(current: WorkerRecord): void {
     const entry = this.entries.get(current.id);
     if (entry) this.disposeEntrySession(entry);
     this.workers.set(current.id, {
@@ -1083,9 +1083,13 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     this.emitStateForOwners(affectedOwners);
   }
 
-  private closeReadyWorkersForShutdown(): void {
-    const ready = [...this.workers.values()].filter((worker) => worker.status === "ready");
-    for (const worker of ready) this.closeReadyWorker(worker);
+  private closeReadyInteractiveWorkersForShutdown(): void {
+    const readyInteractiveWorkers = [...this.workers.values()].filter(
+      (worker) => worker.lifecycle === "interactive" && worker.status === "ready",
+    );
+    for (const worker of readyInteractiveWorkers) {
+      this.closeReadyInteractiveWorker(worker);
+    }
   }
 
   private subscribeEntryObservability(

@@ -53,7 +53,7 @@ export const WorkerSettlementDetails = Schema.Struct({
   mode: Schema.Literals(["async", "inline"]),
   worker: Schema.String,
   title: Schema.String,
-  lifecycle: Schema.Literals(["one-shot", "reusable"]),
+  lifecycle: Schema.Literals(["one-shot", "interactive"]),
   status: Schema.Literals(["completed", "ready", "failed", "aborted"]),
   outcome: WorkerOutcome,
   usage: WorkerUsage,

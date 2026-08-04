@@ -36,7 +36,7 @@ export interface WorkerCompaction {
   readonly keepRecentTokens?: number;
 }
 
-export type WorkerLifecycle = "one-shot" | "reusable";
+export type WorkerLifecycle = "one-shot" | "interactive";
 
 export interface WorkerDefinition {
   readonly name: string;
@@ -278,11 +278,11 @@ export function canTransitionWorkerStatus(
     case "starting":
       return to === "running" || to === "stopping" || to === "failed" || to === "aborted";
     case "running":
-      if (to === "ready") return lifecycle === "reusable";
+      if (to === "ready") return lifecycle === "interactive";
       if (to === "completed") return lifecycle === "one-shot";
       return to === "stopping" || to === "failed" || to === "aborted";
     case "ready":
-      if (lifecycle !== "reusable") return false;
+      if (lifecycle !== "interactive") return false;
       return to === "running" || to === "stopping" || to === "closed";
     case "stopping":
       return to === "aborted" || to === "failed";

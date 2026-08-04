@@ -66,7 +66,7 @@ export function registerOrchestrationPresentation(pi: ExtensionAPI): void {
 
 export function formatFooterStatus(snapshot: RuntimeSnapshot): string | undefined {
   const ready = snapshot.workers.filter((worker) => worker.status === "ready").length;
-  return ready > 0 ? `${ready} available for follow-up` : undefined;
+  return ready > 0 ? `${ready} interactive ready` : undefined;
 }
 
 export class StatusController {
@@ -331,7 +331,8 @@ function resultQualifier(result: SafeSettlement): string | undefined {
     return "could not start";
   }
   if (result.status === "failed") return "failed";
-  if (result.status === "ready") return "ready for follow-up";
+  if (result.status === "ready") return "interactive ready";
+  if (result.status === "completed") return "one-shot ended";
   return undefined;
 }
 
