@@ -33,7 +33,7 @@ import type {
 
 const TOOL_NAMES = [
   "orchestrate",
-  "orchestration_status",
+  "worker_status",
   "interactive_send",
   "worker_abort",
   "interactive_close",
@@ -309,7 +309,7 @@ describe("Pi Orchestrate extension integration", () => {
 
     expect(pi.tools.map((tool) => tool.name)).toEqual([...TOOL_NAMES]);
     expect(pi.renderers).toEqual(["pi-orchestrate-worker-result"]);
-    expect(pi.tools.map((tool) => tool.name)).not.toContain("worker_status");
+    expect(pi.tools.map((tool) => tool.name)).not.toContain("orchestration_status");
     expect(pi.tools.map((tool) => tool.name)).not.toContain("worker_respond");
     expect(shared.runtime.stateListeners.size).toBe(0);
   });

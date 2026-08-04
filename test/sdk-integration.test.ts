@@ -752,7 +752,7 @@ describe("Pi 0.80.10 SDK integration", () => {
       expect(resultDelivered).toBeLessThan(synthesisStarted);
       expect(session.messages.some((message) =>
         message.role === "assistant" && message.content.some((part) =>
-          part.type === "toolCall" && part.name === "orchestration_status"))).toBe(false);
+          part.type === "toolCall" && part.name === "worker_status"))).toBe(false);
 
       await harness.runtime.dispose();
       harness.disposed = true;

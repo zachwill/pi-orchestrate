@@ -175,17 +175,17 @@ export function registerOrchestrationTools(
   });
 
   pi.registerTool({
-    name: "orchestration_status",
-    label: "Orchestration Status",
+    name: "worker_status",
+    label: "Worker Status",
     description:
       "Diagnostics and recovery only: inspect trusted catalog entries, catalog diagnostics, and this session's runtime state. Never poll for completion.",
-    promptSnippet: "Inspect owned orchestration state for diagnostics or recovery",
+    promptSnippet: "Inspect owned worker state for diagnostics or recovery",
     promptGuidelines: [
-      "Use orchestration_status only for diagnostics or recovery; never poll it for completion.",
+      "Use worker_status only for diagnostics or recovery; never poll it for completion.",
     ],
     parameters: statusSchema,
     renderCall(_args, theme) {
-      return new Text(theme.fg("toolTitle", theme.bold("orchestration_status")), 0, 0);
+      return new Text(theme.fg("toolTitle", theme.bold("worker_status")), 0, 0);
     },
     renderResult(result, { isPartial }, theme) {
       return renderDiagnosticsResult(result, isPartial, theme);
@@ -204,7 +204,7 @@ export function registerOrchestrationTools(
         content: [
           {
             type: "text",
-            text: readableDetails("Orchestration diagnostics and recovery snapshot.", readable),
+            text: readableDetails("Worker diagnostics and recovery snapshot.", readable),
           },
         ],
         details: readable,
@@ -837,7 +837,7 @@ function formatElapsed(milliseconds: number): string {
 }
 
 function renderDiagnosticsResult(result: AgentToolResult<unknown>, isPartial: boolean, theme: Theme): Text {
-  if (isPartial) return new Text(theme.fg("muted", "Reading orchestration diagnostics…"), 0, 0);
+  if (isPartial) return new Text(theme.fg("muted", "Reading worker diagnostics…"), 0, 0);
   const details = result.details;
   if (isRecord(details) && isRecord(details.state) && Array.isArray(details.state.workers)) {
     const workers = details.state.workers.filter(isRecord);

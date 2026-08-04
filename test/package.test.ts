@@ -13,7 +13,7 @@ const workerPaths = workerNames.map((name) => join(workerDirectory, `${name}.md`
 
 const canonicalTools = [
   "orchestrate",
-  "orchestration_status",
+  "worker_status",
   "interactive_send",
   "worker_abort",
   "interactive_close",
@@ -28,6 +28,7 @@ const piPeerPackages = [
 
 interface PackageManifest {
   readonly name: string;
+  readonly version: string;
   readonly files: string[];
   readonly license: string;
   readonly repository: { readonly type: string; readonly url: string };
@@ -96,6 +97,7 @@ describe("published package resources", () => {
     const manifest = await readManifest();
 
     expect(manifest.name).toBe("@zachwill/pi-orchestrate");
+    expect(manifest.version).toBe("0.7.0");
     expect(manifest.files).toEqual(["extension/", "examples/", "README.md", "LICENSE"]);
     expect(manifest.pi).toEqual({ extensions: ["./extension/index.ts"] });
     expect(manifest.pi.skills).toBeUndefined();
@@ -241,7 +243,16 @@ describe("published documentation", () => {
 
     expectBlockWith(results, [/\bsibling\b/i, /\bfinal\b/i, /\bsynthesis\b/i]);
     expectBlockWith(results, [/\bowner-scoped\b/i, /\bqueue\b/i, /\bnever\b/i]);
-    expectBlockWith(results, [/\bpolling\b/i, /\borchestration_status\b/i]);
+    expectBlockWith(results, [
+      /`worker_status`/,
+      /\baggregate worker-system diagnostics and recovery snapshot\b/i,
+      /\btrusted catalog\b/i,
+      /\bdiagnostics\b/i,
+      /\bruns\b/i,
+      /\bworker states\b/i,
+      /\bnot for completion polling\b/i,
+    ]);
+    expect(readme).not.toContain("orchestration_status");
 
     expectBlockWith(lifecycle, [
       /\bone-shot\b/i,
@@ -357,6 +368,7 @@ describe("published documentation", () => {
       /`interactive_close`/,
     ]);
     expect(contract).not.toMatch(/\bworker_(?:send|close)\b/);
+    expect(contract).not.toContain("orchestration_status");
     expect(contract).not.toMatch(/\breusable\b/i);
   });
 });

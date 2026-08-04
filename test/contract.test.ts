@@ -156,7 +156,8 @@ describe("orchestrator contract", () => {
       /\badmissions have resolved\b/i,
       /\brejected sibling does not block yielding\b/i,
     ]);
-    expectContractRule(result, [/\bpoll\b/i, /`orchestration_status`/]);
+    expectContractRule(result, [/\bpoll\b/i, /`worker_status`/]);
+    expect(result).not.toContain("orchestration_status");
     expectContractRule(result, [
       /\bresults\b/i,
       /\bmore useful independent scopes\b/i,
@@ -167,6 +168,14 @@ describe("orchestrator contract", () => {
     ]);
     expectContractRule(result, [/\bparent\b/i, /\bsynthesi[sz]/i, /\breview/i, /\bverification\b/i]);
     expect(result).not.toContain("active-work widget");
+    expectContractRule(result, [
+      /\bpublic tools are\b/i,
+      /`orchestrate`/,
+      /`worker_status`/,
+      /`interactive_send`/,
+      /`worker_abort`/,
+      /`interactive_close`/,
+    ]);
     expectContractRule(result, [
       /\bprefer one-shot workers\b/i,
       /`interactive_send`/,

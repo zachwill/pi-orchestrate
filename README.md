@@ -17,7 +17,7 @@ Pi Orchestrate adds exactly five tools:
 | Tool | Call | Purpose |
 | --- | --- | --- |
 | `orchestrate` | `orchestrate({ worker, title, instructions })` | Start one worker task |
-| `orchestration_status` | `orchestration_status({})` | Inspect the trusted catalog, diagnostics, runs, and worker states |
+| `worker_status` | `worker_status({})` | Inspect the aggregate worker-system diagnostics and recovery snapshot |
 | `interactive_send` | `interactive_send({ worker_id, instructions })` | Send a follow-up to a ready interactive worker |
 | `worker_abort` | `worker_abort({ worker_ids })` or `worker_abort({ all: true })` | Stop active owned work |
 | `interactive_close` | `interactive_close({ worker_id })` | Close a ready interactive worker |
@@ -47,7 +47,7 @@ Asynchronous worker results enter the transcript individually. An ungrouped resu
 
 All state and delivery are owner-scoped. If an owning session is busy or inactive, completed results queue until that exact session is active and idle again. They are never delivered to another session.
 
-`orchestration_status` is for diagnostics and recovery, not completion polling. It exposes bounded owner-scoped state without full task instructions or worker prompts.
+`worker_status` is the aggregate worker-system diagnostics and recovery snapshot, containing the trusted catalog, diagnostics, runs, and worker states. It is not for completion polling and exposes bounded owner-scoped state without full task instructions or worker prompts.
 
 The bottom widget shows active work only. Completed, failed, aborted, and interactive ready workers disappear immediately. Inline work shows its current response in the live tool output while it blocks.
 

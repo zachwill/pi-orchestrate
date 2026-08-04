@@ -331,7 +331,7 @@ describe("registerOrchestrationTools", () => {
 
     expect(pi.tools.map((tool) => tool.name)).toEqual([
       "orchestrate",
-      "orchestration_status",
+      "worker_status",
       "interactive_send",
       "worker_abort",
       "interactive_close",
@@ -342,6 +342,17 @@ describe("registerOrchestrationTools", () => {
     }
 
     expect(pi.tool("orchestrate").executionMode).toBe("parallel");
+    const workerStatus = pi.tool("worker_status");
+    expect(workerStatus.label).toBe("Worker Status");
+    const renderedCall = workerStatus.renderCall!(
+      {},
+      themeForRendering(),
+      { expanded: false } as never,
+    );
+    expect(Bun.stripANSI(renderedCall.render(80).join("\n")).trimEnd()).toBe("worker_status");
+    expect(() => pi.tool("orchestration_status")).toThrow(
+      "Missing registered tool: orchestration_status",
+    );
 
   });
 
@@ -357,8 +368,8 @@ describe("registerOrchestrationTools", () => {
       title: "Inspect",
     })).toBe(false);
 
-    expect(Value.Check(pi.tool("orchestration_status").parameters, {})).toBe(true);
-    expect(Value.Check(pi.tool("orchestration_status").parameters, { poll: true })).toBe(false);
+    expect(Value.Check(pi.tool("worker_status").parameters, {})).toBe(true);
+    expect(Value.Check(pi.tool("worker_status").parameters, { poll: true })).toBe(false);
 
     expect(
       Value.Check(pi.tool("interactive_send").parameters, {
@@ -423,8 +434,11 @@ describe("registerOrchestrationTools", () => {
     expect(orchestrateGuidance).toContain(
       "a successfully admitted sole async orchestrate call returns terminate=true and ends the turn",
     );
-    expect(pi.tool("orchestration_status").description).toContain("Never poll");
-    expect(pi.tool("orchestration_status").promptGuidelines?.[0]).toContain("never poll");
+    expect(pi.tool("worker_status").description).toContain("Never poll");
+    expect(pi.tool("worker_status").promptSnippet).toContain("owned worker state");
+    expect(pi.tool("worker_status").promptGuidelines?.[0]).toContain(
+      "Use worker_status only for diagnostics or recovery; never poll",
+    );
     for (const name of ["interactive_send", "interactive_close"] as const) {
       const guidance = [
         pi.tool(name).description,
@@ -642,10 +656,10 @@ describe("registerOrchestrationTools", () => {
     expect(runtime.interactiveSendCalls).toHaveLength(0);
   });
 
-  test("status forwards only the current owner and returns catalog diagnostics plus state", async () => {
+  test("worker_status forwards only the current owner and returns catalog diagnostics plus state", async () => {
     const { pi, runtime, context, catalogCalls } = harness();
 
-    const result = await invoke(pi, "orchestration_status", "status-call", {}, context);
+    const result = await invoke(pi, "worker_status", "status-call", {}, context);
 
     expect(runtime.snapshotCalls).toEqual(["owner-session"]);
     expect(catalogCalls).toEqual([context]);
@@ -839,16 +853,22 @@ describe("registerOrchestrationTools", () => {
   test("renders concrete neutral diagnostics", async () => {
     const { pi, runtime, context } = harness();
     runtime.snapshotResult = { runs: [], workers: [] };
-    const result = await invoke(pi, "orchestration_status", "status-render", {}, context);
-    const rendered = pi.tool("orchestration_status").renderResult!(result, { isPartial: false, expanded: false }, themeForRendering(), {} as never);
+    const result = await invoke(pi, "worker_status", "status-render", {}, context);
+    expect(result.content[0]?.type === "text" && result.content[0].text).toContain(
+      "Worker diagnostics and recovery snapshot.",
+    );
+    const tool = pi.tool("worker_status");
+    const rendered = tool.renderResult!(result, { isPartial: false, expanded: false }, themeForRendering(), {} as never);
     expect(Bun.stripANSI(rendered.render(80).join("\n"))).toContain("No active workers");
     expect(Bun.stripANSI(rendered.render(80).join("\n"))).not.toContain("state ready");
+    const partial = tool.renderResult!(result, { isPartial: true, expanded: false }, themeForRendering(), {} as never);
+    expect(Bun.stripANSI(partial.render(80).join("\n")).trimEnd()).toBe("Reading worker diagnostics…");
   });
 
   test("throws execution failures instead of returning fake error results", async () => {
     for (const name of [
       "orchestrate",
-      "orchestration_status",
+      "worker_status",
       "interactive_send",
       "worker_abort",
       "interactive_close",
@@ -856,7 +876,7 @@ describe("registerOrchestrationTools", () => {
       const { pi, runtime, context } = harness();
       const runtimeMethod = {
         orchestrate: "orchestrate",
-        orchestration_status: "snapshot",
+        worker_status: "snapshot",
         interactive_send: "sendInteractive",
         worker_abort: "abort",
         interactive_close: "closeInteractive",
@@ -865,7 +885,7 @@ describe("registerOrchestrationTools", () => {
       runtime.failures[runtimeMethod as keyof FakeRuntime["failures"]] = error;
       const params = {
         orchestrate: { worker: "scout", title: "Inspect", instructions: "Inspect." },
-        orchestration_status: {},
+        worker_status: {},
         interactive_send: { worker_id: "worker-ready", instructions: "Continue." },
         worker_abort: { all: true },
         interactive_close: { worker_id: "worker-ready" },
