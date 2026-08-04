@@ -182,164 +182,54 @@ describe("fallback worker definitions", () => {
 });
 
 describe("published documentation", () => {
-  test("README covers the current package and orchestration contract", async () => {
+  test("README covers the current package and public boundaries", async () => {
     const [manifest, readme] = await Promise.all([readManifest(), readText(readmePath)]);
     const install = markdownSection(readme, "Install");
     const tools = markdownSection(readme, "Tools");
-    const dispatch = markdownSection(readme, "Dispatch");
-    const results = markdownSection(readme, "Results and ownership");
-    const lifecycle = markdownSection(readme, "Lifecycle");
-    const parent = markdownSection(readme, "Parent contract");
-    const catalog = markdownSection(readme, "Worker catalog");
-    const definitions = markdownSection(readme, "Worker definitions");
+    const parent = markdownSection(readme, "Parent responsibilities");
+    const definitions = markdownSection(readme, "Configure workers");
     const trust = markdownSection(readme, "Trust and isolation");
 
     expect(install).toContain(`pi install npm:${manifest.name}`);
 
-    const documentedTools = [...tools.matchAll(/^\| `([^`]+)` \|/gm)].map(
+    const documentedTools = [...tools.matchAll(/^### `([^`]+)`$/gm)].map(
       (match) => match[1],
     );
-    expect(documentedTools).toEqual([...canonicalTools]);
+    expect(documentedTools).toEqual([
+      "orchestrate",
+      "worker_abort",
+      "worker_status",
+      "interactive_close",
+      "interactive_send",
+    ]);
     expect(tools).toContain("orchestrate({ worker, title, instructions })");
+    expect(tools).toMatch(/complete wave[\s\S]*no other tool calls/i);
+    expect(tools).toMatch(/multi_tool_use\.parallel[\s\S]*functions\.orchestrate/i);
+    expect(tools).toMatch(/mixing another tool[\s\S]*inline and blocking/i);
+    expect(tools).toMatch(/worker_status[\s\S]*diagnostics and recovery, not completion polling/i);
+    expect(tools).toMatch(/worker_abort[\s\S]*active workers/i);
+    expect(tools).toMatch(/interactive_close[\s\S]*status is `ready`/i);
+    expect(tools).toMatch(/interactive_send[\s\S]*keeps its ID/i);
 
-    expectBlockWith(dispatch, [
-      /\bno extension-level\b/i,
-      /\bsibling-group cap\b/i,
-      /\bhidden throttle\b/i,
-    ]);
-    expectBlockWith(dispatch, [
-      /\bintended asynchronous wave has N workers\b/i,
-      /\bnext assistant response must contain exactly N separate, fully briefed\b/i,
-      /\bone call is valid only when N=1\b/i,
-      /\bform all N calls before emitting or finalizing\b/i,
-      /\bsuccessfully admitted sole async call returns\b/i,
-      /`terminate: true`/,
-      /\bends the parent turn\b/i,
-      /\bomitted siblings cannot be added afterward\b/i,
-    ]);
-    expectBlockWith(dispatch, [
-      /\bparallel tool dispatcher\b/i,
-      /`multi_tool_use\.parallel`/,
-      /\bexactly N `functions\.orchestrate` entries\b/i,
-      /\bwithout a dispatcher\b/i,
-      /\bN native sibling\b/i,
-      /\bno other tool calls\b/i,
-      /\bharmless response text does not affect runtime classification\b/i,
-      /\bthree-worker wave\b/i,
-      /\bsubmits all three\b/i,
-    ]);
-    expectBlockWith(dispatch, [/\bpreflight|validates\b/i, /\bsibling\b/i, /\bindependently\b/i]);
-    expectBlockWith(dispatch, [
-      /\bPi Orchestrate treats\b/i,
-      /\bsuccessfully admitted sole\b/i,
-      /\bpure group\b/i,
-      /\basync\b/i,
-      /\bPi executes\b/i,
-      /\bconcurrently\b/i,
-    ]);
-    expectBlockWith(dispatch, [/\bmixing\b/i, /\binline\b/i, /\bblocking\b/i]);
-    expectBlockWith(dispatch, [/\binteractive_send\b/i, /\bsole\b/i, /\basynchronous\b/i]);
-    expectBlockWith(dispatch, [/\binline\b/i, /\bcancellation\b/i, /\bdetaches\b/i]);
+    expect(parent).toMatch(/bounded, independent scopes/i);
+    expect(parent).toMatch(/small fixed count/i);
+    expect(parent).toMatch(/floor unless the user sets an exact cap/i);
+    expect(parent).toMatch(/review[\s\S]*verify/i);
 
-    expectBlockWith(results, [/\bsibling\b/i, /\bfinal\b/i, /\bsynthesis\b/i]);
-    expectBlockWith(results, [/\bowner-scoped\b/i, /\bqueue\b/i, /\bnever\b/i]);
-    expectBlockWith(results, [
-      /`worker_status`/,
-      /\baggregate worker-system diagnostics and recovery snapshot\b/i,
-      /\btrusted catalog\b/i,
-      /\bdiagnostics\b/i,
-      /\bruns\b/i,
-      /\bworker states\b/i,
-      /\bnot for completion polling\b/i,
-    ]);
-    expect(readme).not.toContain("orchestration_status");
-
-    expectBlockWith(lifecycle, [
-      /\bone-shot\b/i,
-      /\bdefault\b/i,
-      /\bautomatically terminates\b/i,
-      /\brequires no cleanup\b/i,
-    ]);
-    expectBlockWith(lifecycle, [
-      /\binteractive\b/i,
-      /\bexplicitly retained\b/i,
-      /\bready\b/i,
-      /\bfollow-up\b/i,
-    ]);
-    expectBlockWith(lifecycle, [
-      /\binteractive_send\b/i,
-      /\binteractive_close\b/i,
-      /\bworker_abort\b/i,
-    ]);
-    expectBlockWith(lifecycle, [
-      /\bprocess\b/i,
-      /\breloads?\b/i,
-      /\bruntime shutdown releases\b/i,
-      /\bautomatically\b/i,
-      /`interactive_close`/,
-      /\bearlier only\b/i,
-    ]);
-
-    expectBlockWith(parent, [/\bbounded\b/i, /\bindependent\b/i, /\bparallel\b/i]);
-    expectBlockWith(parent, [
-      /\bspin up as many workers as needed\b/i,
-      /\bevery useful bounded independent scope\b/i,
-      /\bsmall default\b/i,
-      /\bnumber of roles\b/i,
-    ]);
-    expectBlockWith(parent, [/\bnamed workers and counts\b/i, /\bfloor\b/i, /\bexact cap\b/i]);
-    expectBlockWith(parent, [/\bsame role\b/i, /\bmultiple scopes\b/i]);
-    expectBlockWith(parent, [
-      /\bdistinct validation perspectives\b/i,
-      /\bintentionally overlap\b/i,
-      /\baccidental duplicate work\b/i,
-    ]);
-    expectBlockWith(parent, [/\bself-contained\b/i, /\bsuccess criteria\b/i, /\bexpected output\b/i]);
-    expectBlockWith(parent, [
-      /\bintended asynchronous wave of N workers\b/i,
-      /\bsubmit exactly N fully briefed `orchestrate` calls together\b/i,
-      /\bno other tool calls\b/i,
-      /\bprefer one parallel dispatcher call\b/i,
-      /`multi_tool_use\.parallel`/,
-      /\botherwise emit N native siblings\b/i,
-      /\bharmless response text does not affect runtime classification\b/i,
-      /\bsingle call is valid only for N=1\b/i,
-      /\bsuccessfully admitted sole async call returns\b/i,
-      /`terminate: true`/,
-      /\bends the turn\b/i,
-      /\bnever emit one call and wait for its result\b/i,
-    ]);
-    expectBlockWith(parent, [/\bresults expose\b/i, /\bfull adaptive wave\b/i, /\bwhole task\b/i]);
-    expectBlockWith(parent, [/\breview\b/i, /\bverify\b/i, /\bfinal answer\b/i]);
-
-    const precedence = catalog.match(/^\d+\. .*$/gm) ?? [];
-    expect(catalog).toMatch(/precedence/i);
+    const precedence = definitions.match(/^\d+\. .*$/gm) ?? [];
     expect(precedence).toHaveLength(3);
     expect(precedence[0]).toMatch(/package/i);
     expect(precedence[1]).toMatch(/user/i);
-    expect(precedence[2]).toMatch(/project/i);
-    expect(precedence[2]).toMatch(/trust/i);
-    expectBlockWith(catalog, [
-      /\bcatalog definition\b/i,
-      /\bdispatched repeatedly\b/i,
-      /\bone-shot\b/i,
-      /\bfresh session\b/i,
-      /\bwithout cleanup\b/i,
-    ]);
-
+    expect(precedence[2]).toMatch(/project.*trust/i);
     expect(definitions).toContain("lifecycle: interactive");
-    expectBlockWith(definitions, [
-      /`lifecycle`/,
-      /\brequired\b/i,
-      /\bexactly\b/i,
-      /`one-shot`/,
-      /`interactive`/,
-    ]);
-    expect(readme).not.toMatch(/\bworker_(?:send|close)\b/);
-    expect(readme).not.toContain("`reusable`");
+    expect(definitions).toMatch(/supported Pi tools are `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`/i);
+    expect(definitions).toMatch(/only `interactive_send` continues an existing one/i);
 
-    expectBlockWith(trust, [/\bdirect Pi children\b/i, /\bdescendant Pi worker sessions\b/i]);
-    expectBlockWith(trust, [/\bbash\b/i, /\bexternal processes\b/i, /\bagent CLIs\b/i]);
+    expect(trust).toMatch(/not security sandboxes/i);
+    expect(trust).toMatch(/`bash` can start external processes, including agent CLIs/i);
+    expect(trust).toMatch(/direct Pi children/i);
+    expect(readme).not.toContain("orchestration_status");
+    expect(readme).not.toMatch(/\bworker_(?:send|close)\b/);
   });
 
   test("shipped parent contract uses only the current tools and lifecycle semantics", () => {

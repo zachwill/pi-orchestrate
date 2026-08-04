@@ -1,6 +1,6 @@
 # Pi Orchestrate
 
-[`@zachwill/pi-orchestrate`](https://www.npmjs.com/package/@zachwill/pi-orchestrate) adds concurrent worker orchestration to [Pi](https://pi.dev). A parent agent can delegate bounded work to isolated child sessions, run independent tasks concurrently, and synthesize the results.
+[`@zachwill/pi-orchestrate`](https://www.npmjs.com/package/@zachwill/pi-orchestrate) lets a Pi agent delegate work to separate child sessions, run independent tasks concurrently, and synthesize their results.
 
 ## Install
 
@@ -8,126 +8,146 @@
 pi install npm:@zachwill/pi-orchestrate
 ```
 
-Pi packages run with your system permissions. Review this package and every worker definition you trust.
+The package includes `scout`, `investigator`, `web`, and `worker` definitions. Pi packages and workers run with your system permissions, so review every package and worker definition you trust.
+
+## How it works
+
+The current Pi session remains the parent and owns the task. Each `orchestrate` call starts a fresh worker session with its own transcript and a complete brief from the parent.
+
+Workers have one of two lifecycles:
+
+- `one-shot` workers return one result and stop automatically.
+- `interactive` workers return a result and remain `ready` for follow-up work.
+
+A **worker ID** identifies a worker session. A **run ID** identifies one generation within that session. Each interactive follow-up creates a new run while keeping the same worker ID.
 
 ## Tools
 
-Pi Orchestrate adds exactly five tools:
+Pi Orchestrate adds exactly five tools.
 
-| Tool | Call | Purpose |
-| --- | --- | --- |
-| `orchestrate` | `orchestrate({ worker, title, instructions })` | Start one worker task |
-| `worker_status` | `worker_status({})` | Inspect the aggregate worker-system diagnostics and recovery snapshot |
-| `interactive_send` | `interactive_send({ worker_id, instructions })` | Send a follow-up to a ready interactive worker |
-| `worker_abort` | `worker_abort({ worker_ids })` or `worker_abort({ all: true })` | Stop active owned work |
-| `interactive_close` | `interactive_close({ worker_id })` | Close a ready interactive worker |
+### `orchestrate`
 
-`title` is a label. `instructions` is the complete worker brief. Collapsed tool calls preview those instructions; expanded calls show them in full.
+```text
+orchestrate({ worker, title, instructions })
+```
 
-## Dispatch
+Starts one worker. `title` is a short label; `instructions` is the complete, self-contained brief, including scope, constraints, success criteria, and expected output.
 
-Each `orchestrate` call validates its input, worker definition, and model before allocating IDs or starting a session. Calls are admitted independently: a rejected sibling does not block valid siblings. After admission, a startup or prompt failure settles only that worker as `failed`.
+A sole call runs asynchronously. To run independent work concurrently, send the complete wave as sibling calls in one assistant response:
 
-Pi executes sibling tool calls concurrently. There is no extension-level sibling-group cap or hidden throttle. Before dispatching, enumerate the full wave. If an intended asynchronous wave has N workers, the next assistant response must contain exactly N separate, fully briefed `orchestrate` calls; one call is valid only when N=1. Form all N calls before emitting or finalizing the response because a successfully admitted sole async call returns `terminate: true` and ends the parent turn, so omitted siblings cannot be added afterward. Never emit one call and wait for its result before forming the rest of the wave.
+```text
+orchestrate({
+  worker: "investigator",
+  title: "Trace configuration loading",
+  instructions: "Trace configuration loading from entry point to runtime. Read only. Return the relevant symbols, file paths, and a concise data-flow summary."
+})
 
-When the host provides a parallel tool dispatcher, use it to submit the complete wave as one tool-call group. For example, with `multi_tool_use.parallel`, make one dispatcher call whose `tool_uses` contains exactly N `functions.orchestrate` entries and no other tools. Without a dispatcher, emit N native sibling `orchestrate` calls in one assistant response. In either form, the resulting expanded tool-call group must contain exactly those N orchestration calls and no other tool calls. Harmless response text does not affect runtime classification. A three-worker wave is one assistant response that submits all three `orchestrate({ worker, title, instructions })` calls together.
+orchestrate({
+  worker: "investigator",
+  title: "Trace shutdown cleanup",
+  instructions: "Trace shutdown and cleanup behavior. Read only. Return the relevant symbols, lifecycle invariants, and uncovered edge cases."
+})
+```
 
-Execution mode depends on the complete tool-call group:
+A wave must contain all N intended `orchestrate` calls and no other tool calls. Form the whole wave before sending it; a successfully admitted asynchronous call ends the parent turn. When Pi provides a parallel tool dispatcher such as `multi_tool_use.parallel`, put all N `functions.orchestrate` entries in one dispatcher call. Otherwise, emit N native sibling calls.
 
-- Pi Orchestrate treats a successfully admitted sole `orchestrate` call as async.
-- Pi Orchestrate treats a successfully admitted pure group of sibling `orchestrate` calls as async; Pi executes the siblings concurrently.
-- Mixing `orchestrate` with any other tool makes the orchestration calls inline and blocking.
-- `interactive_send` is asynchronous only when it is the sole tool call in the message.
+Pure orchestration groups run asynchronously, and their siblings execute concurrently. Mixing another tool into the group makes orchestration inline and blocking. Inline work follows cancellation of the parent turn; accepted asynchronous work continues independently.
 
-Inline work follows the parent turn's cancellation signal. Accepted asynchronous work detaches from that signal and continues independently.
+Each call validates its input, worker definition, and model before starting. Sibling calls are admitted independently, so one rejection or worker failure does not roll back its peers. There is no extension-level sibling-group limit or hidden throttle.
 
-## Results and ownership
+Asynchronous results return to the exact parent session automatically. A sibling wave produces one final parent synthesis turn after every admitted worker settles. If that parent is busy or inactive, results wait for it; they are never delivered to another session.
 
-Asynchronous worker results enter the transcript individually. An ungrouped result starts a parent synthesis turn. Results from a sibling orchestration group share one final synthesis turn after every admitted member settles.
+### `worker_abort`
 
-All state and delivery are owner-scoped. If an owning session is busy or inactive, completed results queue until that exact session is active and idle again. They are never delivered to another session.
+```text
+worker_abort({ worker_ids: ["worker-…"] })
+worker_abort({ all: true })
+```
 
-`worker_status` is the aggregate worker-system diagnostics and recovery snapshot, containing the trusted catalog, diagnostics, runs, and worker states. It is not for completion polling and exposes bounded owner-scoped state without full task instructions or worker prompts.
+Stops active workers owned by the current parent session. Explicit IDs are validated together. `{ all: true }` is a no-op when no owned workers are active and does not close interactive workers that are already `ready`.
 
-The bottom widget shows active work only. Completed, failed, aborted, and interactive ready workers disappear immediately. Inline work shows its current response in the live tool output while it blocks.
+Completed one-shot workers need no cleanup. Abort active interactive work before closing its retained session.
 
-## Lifecycle
+### `worker_status`
 
-A run represents one worker generation. A worker ID identifies its worker session. Completed one-shot IDs may remain in bounded diagnostics history, but their sessions have already terminated.
+```text
+worker_status({})
+```
 
-- A **one-shot** worker is the default. It automatically terminates after settling and requires no cleanup.
-- An **interactive** worker is explicitly retained after a successful response as `ready`, keeping the same worker ID for follow-up work.
-- `interactive_send` starts a new run on that ready interactive worker.
-- `interactive_close` closes a ready interactive worker.
-- `worker_abort` stops active work only; `{ all: true }` does not close ready interactive workers.
+Returns the trusted worker catalog, catalog diagnostics, and the current parent session's worker and run state. It omits worker prompts and full task instructions.
 
-Workers, runs, and queued delivery survive extension reloads and session switches within the same Pi process. Runtime shutdown releases retained interactive workers automatically; use `interactive_close` earlier only when their continuity is no longer needed.
+Use it for diagnostics and recovery, not completion polling. Normal asynchronous results arrive automatically. The TUI widget separately shows active work, and the footer reports interactive workers that are ready.
 
-## Parent contract
+### `interactive_close`
 
-Pi Orchestrate injects the authoritative orchestration contract and trusted catalog into the parent system prompt. The parent remains responsible for the task end to end:
+```text
+interactive_close({ worker_id: "worker-…" })
+```
 
-1. Keep trivial or tightly coupled work in the parent. For broad work, spin up as many workers as needed to cover every useful bounded independent scope and distinct validation perspective; never use a small default or the number of roles the user names. Named workers and counts are a floor unless the user explicitly states an exact cap; the same role can be instantiated for multiple scopes.
-2. Give every worker a thorough, self-contained brief with the objective, paths and scope, context, success criteria, and expected output. Distinct validation perspectives can intentionally overlap, but avoid accidental duplicate work. State forbidden actions explicitly.
-3. For an intended asynchronous wave of N workers, submit exactly N fully briefed `orchestrate` calls together and no other tool calls. Prefer one parallel dispatcher call containing N orchestration entries when a dispatcher such as `multi_tool_use.parallel` is available; otherwise emit N native siblings in one assistant response. Harmless response text does not affect runtime classification. A single call is valid only for N=1. Form the complete group before emitting it because a successfully admitted sole async call returns `terminate: true` and ends the turn; never emit one call and wait for its result before forming the rest.
-4. As results expose new independent work, dispatch each full adaptive wave in parallel and continue until the whole task is complete.
-5. Review evidence and changes, resolve conflicts, integrate deliberately, and verify the result.
-6. Produce the final answer from the parent session.
+Closes an owned interactive worker whose status is `ready`. It releases the retained session; it cannot close active work or a one-shot worker.
 
-Workers provide bounded evidence or changes. They do not replace parent judgment.
+### `interactive_send`
 
-## Worker catalog
+```text
+interactive_send({
+  worker_id: "worker-…",
+  instructions: "Verify the first risk against the tests and cite the relevant cases."
+})
+```
 
-Definitions are loaded by name in this precedence order, from lowest to highest:
+Starts a follow-up run on an owned interactive worker whose status is `ready`. The worker keeps its ID and prior session context. Send `interactive_send` as the only tool call in the assistant message to run it asynchronously; sibling tool calls make it inline and blocking.
+
+Interactive workers remain available across extension reloads and session switches within the same Pi process. Close them when their continuity is no longer useful. Runtime shutdown releases retained sessions automatically.
+
+## Parent responsibilities
+
+The parent agent still owns the result:
+
+- Delegate bounded, independent scopes and materially distinct validation perspectives. Keep trivial or tightly coupled work in the parent.
+- Use as many workers as the task supports instead of a small fixed count. User-named roles and counts are a floor unless the user sets an exact cap.
+- Give each worker a complete brief and non-overlapping write scope. Intentional overlap should serve a distinct review perspective.
+- Dispatch each full wave together. As findings expose new independent work, dispatch another full wave.
+- Review the evidence and changes, resolve conflicts, verify the integrated result, and answer from the parent session.
+
+## Configure workers
+
+Worker definitions are loaded by name in this precedence order:
 
 1. Package fallbacks in [`examples/workers/`](examples/workers/)
 2. User definitions in `~/.pi/agent/pi-orchestrate/workers/*.md`
-3. Project definitions in `<project>/.pi/pi-orchestrate/workers/*.md`, only after Pi trusts the project
+3. Project definitions in `<project>/.pi/pi-orchestrate/workers/*.md`, when Pi trusts the project
 
-A higher-precedence definition replaces a lower one with the same `name`. Pi performs no project-worker discovery for an untrusted project.
+A later definition replaces an earlier definition with the same name. Untrusted projects contribute no project definitions.
 
-The package includes `scout`, `investigator`, `web`, and `worker` fallbacks. `scout`, `investigator`, and `worker` omit `model`, so they inherit the parent's active model at dispatch. `web` uses an installed, authenticated Codex CLI for public-web research and pins its Pi session and searches to `gpt-5.6-sol`. To customize one, copy its definition to the user or project directory and keep the same filename and `name`. Add an explicit model only when that worker needs one.
+The bundled `scout`, `investigator`, and `worker` inherit the parent's active model. The bundled `web` worker requires an installed, authenticated Codex CLI and uses `openai-codex/gpt-5.6-sol`. Copy a fallback into a user or project directory to customize it.
 
-A catalog definition is dispatch configuration, not a retained session. The same definition can be dispatched repeatedly; each one-shot dispatch creates a fresh session that terminates automatically without cleanup.
-
-## Worker definitions
-
-A worker is a regular Markdown file whose basename matches its `name`:
+A definition is a Markdown file whose basename matches its `name`:
 
 ```md
 ---
 name: reviewer
-description: Reviews a bounded change and returns evidence.
-tools: read, grep, find, ls, bash
+description: Reviews a bounded area and answers follow-up questions.
+tools: read, grep, find, ls
 lifecycle: interactive
 ---
 
-Inspect the assigned scope and return concise findings with file paths.
+Inspect only the assigned scope. Do not modify files. Return concise findings with file paths.
 ```
 
-| Field | Rule |
-| --- | --- |
-| `name` | Required; must match the filename |
-| `description` | Required; used by the parent to choose a worker |
-| `tools` | Required, nonempty list using `read`, `bash`, `edit`, `write`, `grep`, `find`, or `ls` |
-| `lifecycle` | Required; exactly `one-shot` or `interactive` |
-| `model` | Optional `provider/model`; omitted inherits the parent model |
-| `thinking` | Optional Pi thinking level |
-| `skills` | Optional; omitted uses normal discovery, a list is an exact allowlist, and `[]` disables skills |
-| `compaction` | Optional worker compaction settings |
+Required fields are `name`, `description`, a nonempty `tools` list, and `lifecycle` (`one-shot` or `interactive`). The Markdown body is the worker's nonempty system prompt.
 
-The Markdown body is the worker system prompt and must be nonempty. Unknown fields, invalid values, symlinks, and filename/name mismatches invalidate a definition.
+Optional fields are `model`, `thinking`, `skills`, and `compaction`. An omitted `model` inherits the parent's model. For `skills`, omission uses normal discovery, a list is an exact allowlist, and `[]` disables skills.
 
-Grant the smallest useful tool set. A read-only prompt is not enforcement when the worker has tools that can write.
+Definitions are strict, regular non-symlink `.md` files up to 64 KiB. Supported Pi tools are `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`. Grant the smallest useful set: a read-only prompt does not prevent writes when the worker has tools with write authority.
+
+A definition is reusable dispatch configuration, not a retained session. Each `orchestrate` call starts a new worker session; only `interactive_send` continues an existing one.
 
 ## Trust and isolation
 
-Workers receive fresh durable Pi session lineage without the parent's conversation. They still run in the parent process and are not security sandboxes: they share your filesystem and environment permissions.
+Workers receive fresh durable Pi child-session lineage without the parent's conversation. They run in the parent process and are not security sandboxes: they share its filesystem and environment permissions.
 
-Workers use normal global Pi settings, authentication, packages, extensions, skills, and context. A trusted project may also contribute project-scoped definitions, settings, extensions, skills, and context. An untrusted project contributes none of those project-scoped resources; global resources remain available.
+Workers use global Pi settings, authentication, packages, extensions, skills, and context. Trusted projects may add project-scoped resources. Untrusted projects do not contribute project workers, settings, extensions, skills, or context; global resources remain available.
 
-Other configured extensions, including provider integrations such as `@benvargas/pi-claude-code-use`, load normally in worker sessions. Pi Orchestrate excludes itself, so workers remain direct Pi children. The injected boundary forbids recursive Pi Orchestrate delegation and descendant Pi worker sessions.
+A definition's `tools` field controls Pi's tool allowlist, not operating-system authority. A worker with `bash` can start external processes, including agent CLIs. Give concurrent workers separate write scopes and inspect their changes in the parent.
 
-The worker definition controls the Pi tool allowlist, not operating-system authority. A trusted worker with `bash` can launch explicitly required external processes, including agent CLIs.
-
-Pi Orchestrate performs no automatic filesystem writes. Workers write only through their granted tools and instructions. Give concurrent workers non-overlapping write scopes, then inspect and verify their changes in the parent.
+Pi Orchestrate excludes itself from child sessions and instructs workers not to create descendant Pi worker sessions. Workers remain direct Pi children.
