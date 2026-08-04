@@ -134,9 +134,9 @@ lifecycle: interactive
 Inspect only the assigned scope. Do not modify files. Return concise findings with file paths.
 ```
 
-Required fields are `name`, `description`, a nonempty `tools` list, and `lifecycle` (`one-shot` or `interactive`). The Markdown body is the worker's nonempty system prompt.
+Required fields are `name`, `description`, and a nonempty `tools` list. The Markdown body is the worker's nonempty system prompt.
 
-Optional fields are `model`, `thinking`, `skills`, and `compaction`. An omitted `model` inherits the parent's model. For `skills`, omission uses normal discovery, a list is an exact allowlist, and `[]` disables skills.
+`lifecycle` is optional, accepts `one-shot` or `interactive`, and defaults to `one-shot`. Other optional fields are `model`, `thinking`, `skills`, and `compaction`. An omitted `model` inherits the parent's model. For `skills`, omission uses normal discovery, a list is an exact allowlist, and `[]` disables skills.
 
 Definitions are strict, regular non-symlink `.md` files up to 64 KiB. Supported Pi tools are `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`. Grant the smallest useful set: a read-only prompt does not prevent writes when the worker has tools with write authority.
 

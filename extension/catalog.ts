@@ -6,7 +6,7 @@ import {
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { Result, Schema, SchemaGetter, type SchemaIssue } from "effect";
+import { Effect, Result, Schema, SchemaGetter, type SchemaIssue } from "effect";
 import type {
   CatalogDiagnostic,
   WorkerCatalog,
@@ -76,7 +76,9 @@ const WorkerFrontmatter = Schema.Struct({
   tools: commaList(Schema.Literals(SUPPORTED_TOOL_NAMES)),
   skills: Schema.optionalKey(commaList(Schema.NonEmptyString, true)),
   compaction: Schema.optionalKey(Compaction),
-  lifecycle: Schema.Literals(["one-shot", "interactive"]),
+  lifecycle: Schema.Literals(["one-shot", "interactive"]).pipe(
+    Schema.withDecodingDefaultKey(Effect.succeed("one-shot")),
+  ),
 });
 const decodeWorkerFrontmatter = Schema.decodeUnknownResult(WorkerFrontmatter, {
   errors: "all",

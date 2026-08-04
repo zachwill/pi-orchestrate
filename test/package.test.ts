@@ -97,7 +97,7 @@ describe("published package resources", () => {
     const manifest = await readManifest();
 
     expect(manifest.name).toBe("@zachwill/pi-orchestrate");
-    expect(manifest.version).toBe("0.7.1");
+    expect(manifest.version).toBe("0.7.2");
     expect(manifest.files).toEqual(["extension/", "examples/", "README.md", "LICENSE"]);
     expect(manifest.pi).toEqual({ extensions: ["./extension/index.ts"] });
     expect(manifest.pi.skills).toBeUndefined();
@@ -222,6 +222,9 @@ describe("published documentation", () => {
     expect(precedence[1]).toMatch(/user/i);
     expect(precedence[2]).toMatch(/project.*trust/i);
     expect(definitions).toContain("lifecycle: interactive");
+    expect(definitions).toMatch(/required fields are `name`, `description`, and a nonempty `tools` list/i);
+    expect(definitions).toMatch(/Markdown body is the worker's nonempty system prompt/i);
+    expect(definitions).toMatch(/`lifecycle` is optional, accepts `one-shot` or `interactive`, and defaults to `one-shot`/i);
     expect(definitions).toMatch(/supported Pi tools are `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`/i);
     expect(definitions).toMatch(/only `interactive_send` continues an existing one/i);
 

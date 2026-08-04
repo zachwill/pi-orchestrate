@@ -114,13 +114,13 @@ describe("worker catalog discovery", () => {
     expect(workers(catalog).map((worker) => worker.name)).toEqual(["package", "shared"]);
   });
 
-  test("parses both lifecycles and rejects missing or invalid lifecycle fields", () => {
+  test("parses explicit lifecycles, defaults omission, and rejects invalid lifecycle values", () => {
     const fs = new FakeFileSystem();
     fs.addDirectory(packageDirectory, {
       "one-shot.md": definition("one-shot", "prompt"),
       "interactive.md": definition("interactive", "prompt", "", "interactive"),
       "invalid.md": definition("invalid", "prompt", "", "forever"),
-      "missing.md": definition("missing", "prompt").replace("lifecycle: one-shot\n", ""),
+      "omitted.md": definition("omitted", "prompt").replace("lifecycle: one-shot\n", ""),
     });
     fs.addDirectory(userDirectory, {});
 
@@ -128,10 +128,17 @@ describe("worker catalog discovery", () => {
 
     expect(workers(catalog).map(({ name, lifecycle }) => ({ name, lifecycle }))).toEqual([
       { name: "interactive", lifecycle: "interactive" },
+      { name: "omitted", lifecycle: "one-shot" },
       { name: "one-shot", lifecycle: "one-shot" },
     ]);
-    expect(catalog.diagnostics).toHaveLength(2);
-    expect(catalog.diagnostics.map((item) => item.message).join("\n")).toContain("lifecycle");
+    expect(catalog.diagnostics).toEqual([
+      {
+        severity: "error",
+        source: "package",
+        filePath: join(packageDirectory, "invalid.md"),
+        message: "frontmatter field 'lifecycle' must be 'one-shot' or 'interactive'",
+      },
+    ]);
   });
 
   test("accepts only strict, regular Markdown worker definitions", () => {
@@ -300,10 +307,6 @@ prompt`,
         "prompt",
         "compaction:\n  enabled: 1\n  reserveTokens: -1\n  keepRecentTokens: -1\n",
       ),
-      "missing-lifecycle.md": definition("missing-lifecycle", "prompt").replace(
-        "lifecycle: one-shot\n",
-        "",
-      ),
       "bad-lifecycle.md": definition("bad-lifecycle", "prompt", "", "temporary"),
       "priority.md": definition("priority", "prompt", "", "temporary").replace(
         "description: priority description",
@@ -333,7 +336,6 @@ prompt`,
       ["compaction-priority.md", "frontmatter field 'compaction.enabled' must be a boolean"],
       ["empty-model.md", "frontmatter field 'model' must be a non-empty string"],
       ["empty-thinking.md", "frontmatter field 'thinking' must be a non-empty string"],
-      ["missing-lifecycle.md", "frontmatter field 'lifecycle' must be 'one-shot' or 'interactive'"],
       ["missing-tools.md", "frontmatter field 'tools' is required"],
       ["not-mapping.md", "frontmatter must be a mapping"],
       ["priority.md", "frontmatter field 'description' must be a non-empty string"],
