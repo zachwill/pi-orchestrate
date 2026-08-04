@@ -97,7 +97,7 @@ describe("published package resources", () => {
     const manifest = await readManifest();
 
     expect(manifest.name).toBe("@zachwill/pi-orchestrate");
-    expect(manifest.version).toBe("0.7.0");
+    expect(manifest.version).toBe("0.7.1");
     expect(manifest.files).toEqual(["extension/", "examples/", "README.md", "LICENSE"]);
     expect(manifest.pi).toEqual({ extensions: ["./extension/index.ts"] });
     expect(manifest.pi.skills).toBeUndefined();
