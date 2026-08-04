@@ -58,7 +58,7 @@ function renderResult(details: unknown, expanded: boolean, width: number, conten
 
 describe("per-worker result messages", () => {
   test.each([
-    ["completed", "✓ Inspect code · scout · one-shot ended · 5s"],
+    ["completed", "✓ Inspect code · scout · 5s"],
     ["ready", "✓ Inspect code · scout · interactive ready · 5s"],
     ["failed", "✗ Inspect code · scout · failed · 5s"],
     ["aborted", "■ Inspect code · scout · aborted · 5s"],
@@ -88,7 +88,7 @@ describe("per-worker result messages", () => {
     )!;
 
     const output = Bun.stripANSI(component.render(80).join("\n"));
-    expect(output).toContain("✓ Inspect code · <italic>scout</italic> · one-shot ended · 5s");
+    expect(output).toContain("✓ Inspect code · <italic>scout</italic> · 5s");
   });
 
   test("expanded output reconstructs full response and adjacent metadata", () => {
@@ -108,7 +108,7 @@ describe("per-worker result messages", () => {
       80,
     ).join("\n"));
 
-    expect(output).toContain("✓ Inspect code · scout · one-shot ended · 5s");
+    expect(output).toContain("✓ Inspect code · scout · 5s");
     expect(output).toContain("Changed the worker bootstrap.");
     expect(output).not.toContain("Completed");
   });
@@ -211,12 +211,12 @@ describe("per-worker result messages", () => {
     const mutableTheme = { ...theme, fg: (_: string, text: string) => `${marker}:${text}` } as Theme;
     const component = renderer()({ role: "custom", customType: "pi-orchestrate-worker-result", content: "fallback", display: true, details: settlement(), timestamp: 1 }, { expanded: false }, mutableTheme)!;
     expect(Bun.stripANSI(component.render(80).join("\n"))).toContain(
-      "old:✓ Inspect code · old:scout · old:one-shot ended · 5s",
+      "old:✓ Inspect code · old:scout · old:5s",
     );
     marker = "new";
     component.invalidate();
     const refreshed = Bun.stripANSI(component.render(80).join("\n"));
-    expect(refreshed).toContain("new:✓ Inspect code · new:scout · new:one-shot ended · 5s");
+    expect(refreshed).toContain("new:✓ Inspect code · new:scout · new:5s");
     expect(refreshed).not.toContain("old:✓ Inspect code");
   });
 });

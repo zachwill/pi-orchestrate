@@ -94,15 +94,13 @@ describe("DeliveryCoordinator worker settlements", () => {
     expect(parent.sent[0]?.message.content).toContain(DELIVERY_PARENT_INSTRUCTIONS);
   });
 
-  test("states whether successful sessions ended or remain interactive", () => {
+  test("calls out retained interactive sessions without annotating one-shot completion", () => {
     const completedCoordinator = new DeliveryCoordinator();
     const completedParent = createBinding("owner-a", 1);
     completedCoordinator.bind(completedParent.binding);
     completedCoordinator.accept(settlement({ eventId: "completed-disposition", sequence: 2 }));
 
-    expect(completedParent.sent[0]?.message.content).toContain(
-      "one-shot session ended automatically; no close needed",
-    );
+    expect(completedParent.sent[0]?.message.content).not.toContain("one-shot session");
     expect(completedParent.sent[0]?.message.content).not.toContain("interactive_close");
 
     const interactiveCoordinator = new DeliveryCoordinator();

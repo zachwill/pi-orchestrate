@@ -286,9 +286,6 @@ function truncateUtf8(content: string, byteLimit: number): string {
 }
 
 function renderDisposition(settlement: WorkerSettlement): string | undefined {
-  if (settlement.status === "completed" && settlement.lifecycle === "one-shot") {
-    return "one-shot session ended automatically; no close needed";
-  }
   if (settlement.status === "ready" && settlement.lifecycle === "interactive") {
     return "interactive session retained; use `interactive_send` or `interactive_close`";
   }

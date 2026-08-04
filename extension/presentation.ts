@@ -332,7 +332,6 @@ function resultQualifier(result: SafeSettlement): string | undefined {
   }
   if (result.status === "failed") return "failed";
   if (result.status === "ready") return "interactive ready";
-  if (result.status === "completed") return "one-shot ended";
   return undefined;
 }
 
