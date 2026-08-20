@@ -44,6 +44,12 @@ import type {
 } from "./runtime.js";
 import type { OrchestratorRuntime } from "./host.js";
 import {
+  disposeComponent,
+  formatElapsed,
+  resultAppearance,
+  WidthBoundComponent,
+} from "./tui.js";
+import {
   decodeInlineWorkerToolDetails,
   encodeInlineWorkerToolDetails,
   type InlineWorkerSettlementDetails,
@@ -52,8 +58,16 @@ import {
 } from "./worker-settlement.js";
 
 const STRICT_OBJECT = { additionalProperties: false } as const;
-const WORKER_ID_OPTIONS = { pattern: "^worker-\\S+$" } as const;
 const MAX_INSTRUCTION_PREVIEW_LINES = 2;
+const shortTextSchema = Type.String({
+  pattern: "\\S",
+  maxLength: MAX_WORKER_TITLE_LENGTH,
+});
+const instructionsSchema = Type.String({
+  pattern: "\\S",
+  maxLength: MAX_WORKER_INSTRUCTIONS_LENGTH,
+});
+const workerIdSchema = Type.String({ pattern: "^worker-\\S+$" });
 
 const AcceptedRunRenderDetails = Schema.Struct({
   mode: Schema.Literal("async"),
@@ -73,27 +87,19 @@ const decodeUnavailableWorkerRenderDetails = Schema.decodeUnknownResult(
 
 const taskSchema = Type.Object(
   {
-    worker: Type.String({ pattern: "\\S", maxLength: MAX_WORKER_TITLE_LENGTH }),
-    title: Type.String({ pattern: "\\S", maxLength: MAX_WORKER_TITLE_LENGTH }),
-    instructions: Type.String({
-      pattern: "\\S",
-      maxLength: MAX_WORKER_INSTRUCTIONS_LENGTH,
-    }),
+    worker: shortTextSchema,
+    title: shortTextSchema,
+    instructions: instructionsSchema,
   },
   STRICT_OBJECT,
 );
-
-const orchestrateSchema = taskSchema;
 
 const statusSchema = Type.Object({}, STRICT_OBJECT);
 
 const interactiveSendSchema = Type.Object(
   {
-    worker_id: Type.String(WORKER_ID_OPTIONS),
-    instructions: Type.String({
-      pattern: "\\S",
-      maxLength: MAX_WORKER_INSTRUCTIONS_LENGTH,
-    }),
+    worker_id: workerIdSchema,
+    instructions: instructionsSchema,
   },
   STRICT_OBJECT,
 );
@@ -101,7 +107,7 @@ const interactiveSendSchema = Type.Object(
 const workerAbortSchema = Type.Union([
   Type.Object(
     {
-      worker_ids: Type.Array(Type.String(WORKER_ID_OPTIONS), { minItems: 1 }),
+      worker_ids: Type.Array(workerIdSchema, { minItems: 1 }),
     },
     STRICT_OBJECT,
   ),
@@ -115,7 +121,7 @@ const workerAbortSchema = Type.Union([
 
 const interactiveCloseSchema = Type.Object(
   {
-    worker_id: Type.String(WORKER_ID_OPTIONS),
+    worker_id: workerIdSchema,
   },
   STRICT_OBJECT,
 );
@@ -151,7 +157,7 @@ export function registerOrchestrationTools(
       "Form all N calls before emitting or finalizing the response. Never emit one call and wait for its result before forming the rest of the wave: a successfully admitted sole async orchestrate call returns terminate=true and ends the turn.",
     ],
     executionMode: "parallel",
-    parameters: orchestrateSchema,
+    parameters: taskSchema,
     renderCall(args, theme, { expanded }) {
       return renderDispatchCall(theme, args, expanded);
     },
@@ -171,13 +177,7 @@ export function registerOrchestrationTools(
         );
         const readable = acceptedRunDetails(acceptedRun);
         return {
-          content: [
-            {
-              type: "text",
-              text: readableDetails(`Accepted async run ${readable.run_id}.`, readable),
-            },
-          ],
-          details: readable,
+          ...readableToolResult(`Accepted async run ${readable.run_id}.`, readable),
           terminate: true,
         };
       }
@@ -190,18 +190,10 @@ export function registerOrchestrationTools(
         createInlineSettlementListener(onUpdate),
       );
       const readable = completedRunDetails(completedRun);
-      return {
-        content: [
-          {
-            type: "text",
-            text: readableDetails(
-              `Completed inline run ${readable.run_id}.`,
-              readable,
-            ),
-          },
-        ],
-        details: readable,
-      };
+      return readableToolResult(
+        `Completed inline run ${readable.run_id}.`,
+        readable,
+      );
     },
   });
 
@@ -226,15 +218,10 @@ export function registerOrchestrationTools(
       const catalog = deps.getCatalog(ctx);
       const snapshot = await deps.runtime.snapshot(ownerSessionId);
       const readable = statusDetails(catalog, snapshot);
-      return {
-        content: [
-          {
-            type: "text",
-            text: readableDetails("Worker diagnostics and recovery snapshot.", readable),
-          },
-        ],
-        details: readable,
-      };
+      return readableToolResult(
+        "Worker diagnostics and recovery snapshot.",
+        readable,
+      );
     },
   });
 
@@ -268,13 +255,7 @@ export function registerOrchestrationTools(
         );
         const readable = acceptedRunDetails(acceptedRun);
         return {
-          content: [
-            {
-              type: "text",
-              text: readableDetails(`Accepted async run ${readable.run_id}.`, readable),
-            },
-          ],
-          details: readable,
+          ...readableToolResult(`Accepted async run ${readable.run_id}.`, readable),
           terminate: true,
         };
       }
@@ -288,18 +269,10 @@ export function registerOrchestrationTools(
         createInlineSettlementListener(onUpdate),
       );
       const readable = completedRunDetails(completedRun);
-      return {
-        content: [
-          {
-            type: "text",
-            text: readableDetails(
-              `Completed inline run ${readable.run_id}.`,
-              readable,
-            ),
-          },
-        ],
-        details: readable,
-      };
+      return readableToolResult(
+        `Completed inline run ${readable.run_id}.`,
+        readable,
+      );
     },
   });
 
@@ -331,15 +304,7 @@ export function registerOrchestrationTools(
           ? { worker_ids: params.worker_ids }
           : { all: params.all },
       };
-      return {
-        content: [
-          {
-            type: "text",
-            text: readableDetails("Abort request completed.", readable),
-          },
-        ],
-        details: readable,
-      };
+      return readableToolResult("Abort request completed.", readable);
     },
   });
 
@@ -363,15 +328,7 @@ export function registerOrchestrationTools(
       const workerId = params.worker_id;
       await deps.runtime.closeInteractive(ownerSessionId, workerId);
       const readable = { worker_id: workerId };
-      return {
-        content: [
-          {
-            type: "text",
-            text: readableDetails(`Closed worker ${workerId}.`, readable),
-          },
-        ],
-        details: readable,
-      };
+      return readableToolResult(`Closed worker ${workerId}.`, readable);
     },
   });
 }
@@ -559,6 +516,13 @@ function outcomeDetails(outcome: WorkerOutcome) {
   }
 }
 
+function readableToolResult<T>(title: string, details: T) {
+  return {
+    content: [{ type: "text" as const, text: readableDetails(title, details) }],
+    details,
+  };
+}
+
 function readableDetails(title: string, details: unknown): string {
   const content = `${title}\n\n${JSON.stringify(details, null, 2)}`;
   const truncation = truncateHead(content);
@@ -636,18 +600,6 @@ function renderInteractiveMessageCall(
     container.addChild(new Text(theme.fg("dim", keyHint("app.tools.expand", "to inspect full message")), 0, 0));
   }
   return new WidthBoundComponent(container);
-}
-
-class WidthBoundComponent implements Component {
-  constructor(private readonly child: Component, private readonly maxLines?: number) {}
-  render(width: number): string[] {
-    const bounded = Math.max(1, Math.floor(width));
-    const lines = this.child.render(bounded);
-    return (this.maxLines === undefined ? lines : lines.slice(0, this.maxLines))
-      .map((line) => truncateToWidth(line, bounded, "…"));
-  }
-  invalidate(): void { this.child.invalidate(); }
-  dispose(): void { (this.child as Component & { dispose?: () => void }).dispose?.(); }
 }
 
 function safeTerminalText(value: unknown): string {
@@ -733,16 +685,16 @@ class InlineResultComponent implements Component {
   }
   render(width: number): string[] { return new WidthBoundComponent(this.child).render(width); }
   invalidate(): void { this.rebuild(); }
-  dispose(): void { (this.child as Component & { dispose?: () => void }).dispose?.(); }
+  dispose(): void { disposeComponent(this.child); }
   private rebuild(): void {
-    (this.child as Component & { dispose?: () => void }).dispose?.();
+    disposeComponent(this.child);
     const container = new Container();
     const result = this.result;
     if (!result) {
       this.child = container;
       return;
     }
-    const appearance = inlineResultAppearance(result.status);
+    const appearance = resultAppearance(result.status, "ready for follow-up");
     const suffix = [appearance.qualifier, result.elapsed].filter(Boolean).join(" · ");
     const title = this.theme.bold(result.title);
     const workerName = this.theme.fg("muted", this.theme.italic(result.worker));
@@ -782,26 +734,6 @@ function readInlineResult(details: unknown): RenderedInlineSettlement | undefine
     response,
     elapsed: formatElapsed(settlement.settledAt - settlement.startedAt),
   };
-}
-
-function inlineResultAppearance(status: RenderedInlineSettlement["status"]): {
-  readonly color: "success" | "error" | "warning";
-  readonly icon: "✓" | "✗" | "■";
-  readonly qualifier?: string;
-} {
-  if (status === "failed") return { color: "error", icon: "✗", qualifier: "failed" };
-  if (status === "aborted") return { color: "warning", icon: "■", qualifier: "aborted" };
-  if (status === "ready") {
-    return { color: "success", icon: "✓", qualifier: "ready for follow-up" };
-  }
-  return { color: "success", icon: "✓" };
-}
-
-function formatElapsed(milliseconds: number): string {
-  const seconds = Math.floor(milliseconds / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  return seconds % 60 === 0 ? `${minutes}m` : `${minutes}m ${seconds % 60}s`;
 }
 
 function renderDiagnosticsResult(result: AgentToolResult<unknown>, isPartial: boolean, theme: Theme): Text {

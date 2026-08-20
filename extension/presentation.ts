@@ -19,6 +19,12 @@ import type { WorkerDeliveryDetails } from "./delivery.js";
 import type { WorkerOutcome, WorkerRecord, WorkerStatus } from "./domain.js";
 import type { RuntimeSnapshot } from "./runtime.js";
 import {
+  disposeComponent,
+  formatElapsed,
+  resultAppearance,
+  WidthBoundComponent,
+} from "./tui.js";
+import {
   decodePersistedWorkerSettlementDetails,
   type WorkerSettlementDetails,
 } from "./worker-settlement.js";
@@ -51,8 +57,6 @@ export interface PresentationRuntime {
     listener: (snapshot: RuntimeSnapshot) => void,
   ): () => void;
 }
-
-type DecodedSettlement = WorkerSettlementDetails;
 
 interface StatusBinding {
   readonly ownerSessionId: string;
@@ -224,18 +228,6 @@ export class WorkerStatusComponent implements Component {
   }
 }
 
-class WidthBoundComponent implements Component {
-  constructor(private readonly child: Component, private readonly maxLines?: number) {}
-  render(width: number): string[] {
-    const bounded = Math.max(1, Math.floor(width));
-    const lines = this.child.render(bounded);
-    const selected = this.maxLines === undefined ? lines : lines.slice(0, this.maxLines);
-    return selected.map((line) => truncateToWidth(line, bounded, "…"));
-  }
-  invalidate(): void { this.child.invalidate(); }
-  dispose(): void { (this.child as Component & { dispose?: () => void }).dispose?.(); }
-}
-
 export class WorkerResultComponent implements Component {
   private child: Component;
 
@@ -250,10 +242,10 @@ export class WorkerResultComponent implements Component {
 
   render(width: number): string[] { return new WidthBoundComponent(this.child).render(width); }
   invalidate(): void {
-    (this.child as Component & { dispose?: () => void }).dispose?.();
+    disposeComponent(this.child);
     this.child = this.build();
   }
-  dispose(): void { (this.child as Component & { dispose?: () => void }).dispose?.(); }
+  dispose(): void { disposeComponent(this.child); }
 
   private build(): Component {
     const details = readSettlement(this.rawDetails);
@@ -265,16 +257,19 @@ export class WorkerResultComponent implements Component {
       return box;
     }
 
-    const color = resultColor(details.status);
-    const elapsed = elapsedBetween(details.startedAt, details.settledAt);
-    const qualifier = resultQualifier(details);
+    const appearance = resultAppearance(
+      details.status,
+      "interactive ready",
+      details.failureStage === "startup" ? "could not start" : "failed",
+    );
+    const elapsed = formatElapsed(details.settledAt - details.startedAt);
     const title = this.theme.bold(details.title);
     const workerName = this.theme.fg("muted", this.theme.italic(details.worker));
-    const suffix = [qualifier, elapsed].filter(Boolean).join(" · ");
+    const suffix = [appearance.qualifier, elapsed].filter(Boolean).join(" · ");
     const header = [
-      this.theme.fg(color, `${statusIcon(details)} ${title}`),
+      this.theme.fg(appearance.color, `${appearance.icon} ${title}`),
       workerName,
-      ...(suffix ? [this.theme.fg(color, suffix)] : []),
+      ...(suffix ? [this.theme.fg(appearance.color, suffix)] : []),
     ].join(" · ");
     const outcome = presentedOutcome(details);
     box.addChild(new Text(header, 0, 0));
@@ -297,7 +292,7 @@ export class WorkerResultComponent implements Component {
   }
 }
 
-function readSettlement(value: unknown): DecodedSettlement | undefined {
+function readSettlement(value: unknown): WorkerSettlementDetails | undefined {
   const decoded = decodePersistedWorkerSettlementDetails(value);
   return Result.isSuccess(decoded) ? decoded.success : undefined;
 }
@@ -308,28 +303,6 @@ function workerAnimation(status: WorkerStatus) {
   return WORKER_ANIMATIONS.running;
 }
 
-function resultColor(status: DecodedSettlement["status"]): "success" | "error" | "warning" {
-  if (status === "failed") return "error";
-  if (status === "aborted") return "warning";
-  return "success";
-}
-
-function resultQualifier(result: DecodedSettlement): string | undefined {
-  if (result.status === "aborted") return "aborted";
-  if (result.status === "failed" && result.failureStage === "startup") {
-    return "could not start";
-  }
-  if (result.status === "failed") return "failed";
-  if (result.status === "ready") return "interactive ready";
-  return undefined;
-}
-
-function statusIcon(result: DecodedSettlement): string {
-  if (result.status === "failed") return "✗";
-  if (result.status === "aborted") return "■";
-  return "✓";
-}
-
 function outcomeText(outcome: WorkerOutcome): string {
   if (outcome.status === "completed" || outcome.status === "ready") return outcome.assistantText;
   if (outcome.status === "failed") return outcome.assistantText ? `${outcome.message}\n\n${outcome.assistantText}` : outcome.message;
@@ -337,7 +310,7 @@ function outcomeText(outcome: WorkerOutcome): string {
   return "Worker session closed.";
 }
 
-function presentedOutcome(result: DecodedSettlement): string {
+function presentedOutcome(result: WorkerSettlementDetails): string {
   const body = outcomeText(result.outcome);
   if (result.status !== "completed" && result.status !== "ready") return body;
 
@@ -352,12 +325,12 @@ function presentedOutcome(result: DecodedSettlement): string {
   return lines.join("\n").trimEnd();
 }
 
-function settlementMetadata(result: DecodedSettlement): string[] {
+function settlementMetadata(result: WorkerSettlementDetails): string[] {
   return [
     `worker ID ${result.workerId} · run ID ${result.runId}`,
     `status ${result.status} · generation ${result.generation}`,
-    `turns ${numberOrZero(result.usage.turns)} · current context ${formatCompactNumber(numberOrZero(result.usage.contextTokens))}`,
-    `input ${numberOrZero(result.usage.input)} · output ${numberOrZero(result.usage.output)} · cache read ${numberOrZero(result.usage.cacheRead)} · cache write ${numberOrZero(result.usage.cacheWrite)} · cost $${numberOrZero(result.usage.cost).toFixed(4)}`,
+    `turns ${result.usage.turns} · current context ${formatCompactNumber(result.usage.contextTokens)}`,
+    `input ${result.usage.input} · output ${result.usage.output} · cache read ${result.usage.cacheRead} · cache write ${result.usage.cacheWrite} · cost $${result.usage.cost.toFixed(4)}`,
     `session ${result.sessionFile ?? "unavailable"}`,
   ];
 }
@@ -375,15 +348,6 @@ function activeWorkers(snapshot: RuntimeSnapshot): WorkerRecord[] {
 function formatTurnMarker(worker: Pick<WorkerRecord, "messageDirection" | "usage">): string {
   const direction = worker.messageDirection === "from-model" ? "↓" : "↑";
   return `${numberOrZero(worker.usage?.turns)}${direction}`;
-}
-function elapsedBetween(start?: number, end?: number): string | undefined {
-  return start !== undefined && end !== undefined && end >= start ? formatElapsed(end - start) : undefined;
-}
-function formatElapsed(milliseconds: number): string {
-  const seconds = Math.floor(milliseconds / 1000);
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  return seconds % 60 === 0 ? `${minutes}m` : `${minutes}m ${seconds % 60}s`;
 }
 function numberOrZero(value: unknown): number { return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0; }
 function formatContextTokens(value: number): string {

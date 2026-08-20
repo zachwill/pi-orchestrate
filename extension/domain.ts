@@ -205,32 +205,20 @@ export const WorkerCompletedOutcome = Schema.Struct({
   status: Schema.Literal("completed"),
   assistantText: Schema.String,
 });
-export interface WorkerCompletedOutcome
-  extends Schema.Schema.Type<typeof WorkerCompletedOutcome> {}
-
 export const WorkerReadyOutcome = Schema.Struct({
   status: Schema.Literal("ready"),
   assistantText: Schema.String,
 });
-export interface WorkerReadyOutcome
-  extends Schema.Schema.Type<typeof WorkerReadyOutcome> {}
-
 export const WorkerFailedOutcome = Schema.Struct({
   status: Schema.Literal("failed"),
   message: Schema.String,
   assistantText: Schema.optionalKey(Schema.String),
 });
-export interface WorkerFailedOutcome
-  extends Schema.Schema.Type<typeof WorkerFailedOutcome> {}
-
 export const WorkerAbortedOutcome = Schema.Struct({
   status: Schema.Literal("aborted"),
   message: Schema.optionalKey(Schema.String),
   assistantText: Schema.optionalKey(Schema.String),
 });
-export interface WorkerAbortedOutcome
-  extends Schema.Schema.Type<typeof WorkerAbortedOutcome> {}
-
 /** Outcomes emitted in response to a worker generation. */
 export const WorkerResponseOutcome = Schema.Union([
   WorkerCompletedOutcome,
@@ -240,16 +228,10 @@ export const WorkerResponseOutcome = Schema.Union([
 ]);
 export type WorkerResponseOutcome = typeof WorkerResponseOutcome.Type;
 
-export const WorkerClosedOutcome = Schema.Struct({
-  status: Schema.Literal("closed"),
-});
-export interface WorkerClosedOutcome
-  extends Schema.Schema.Type<typeof WorkerClosedOutcome> {}
-
 /** Domain outcomes include closure, which is not a generation response. */
 export const WorkerOutcome = Schema.Union([
   WorkerResponseOutcome,
-  WorkerClosedOutcome,
+  Schema.Struct({ status: Schema.Literal("closed") }),
 ]);
 export type WorkerOutcome = typeof WorkerOutcome.Type;
 export type WorkerStatus =

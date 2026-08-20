@@ -6,11 +6,11 @@ import {
   Context,
   Deferred,
   Effect,
+  Exit,
   Fiber,
   FiberMap,
   FiberSet,
   Layer,
-  Ref,
   Schema,
 } from "effect";
 import {
@@ -218,89 +218,28 @@ interface RunningRuntimeRun {
   readonly settlementListener?: SettlementListener;
 }
 
-interface CompletedRuntimeRunRecord {
-  readonly run: RunRecord;
-  readonly completion: CompletedRun;
-}
-
-interface CompletedRuntimeRun {
-  readonly _tag: "completed";
-  readonly record: CompletedRuntimeRunRecord;
-}
-
-type RuntimeRun = RunningRuntimeRun | CompletedRuntimeRun;
-
-type RuntimeLifecycle =
-  | {
-      readonly _tag: "open";
-      readonly completion: Deferred.Deferred<void>;
-    }
-  | {
-      readonly _tag: "shutting-down";
-      readonly completion: Deferred.Deferred<void>;
-    }
-  | {
-      readonly _tag: "shutdown";
-      readonly completion: Deferred.Deferred<void>;
-    };
+type RuntimeRun = RunningRuntimeRun | RunRecord;
+type RuntimeLifecycle = "open" | "shutting-down" | "shutdown";
 
 interface RuntimeState {
-  readonly workers: ReadonlyMap<WorkerId, RuntimeWorker>;
-  readonly runs: ReadonlyMap<RunId, RuntimeRun>;
-  readonly terminalWorkerOrder: readonly WorkerId[];
-  readonly completedRunOrder: readonly RunId[];
-  readonly settlementListeners: ReadonlySet<SettlementListener>;
-  readonly stateListeners: ReadonlyMap<string, ReadonlySet<StateListener>>;
-  readonly settlementSequence: number;
-  readonly lifecycle: RuntimeLifecycle;
-}
-
-interface RuntimeDraft {
   workers: Map<WorkerId, RuntimeWorker>;
   runs: Map<RunId, RuntimeRun>;
   terminalWorkerOrder: WorkerId[];
   completedRunOrder: RunId[];
-  settlementListeners: Set<SettlementListener>;
-  stateListeners: Map<string, Set<StateListener>>;
   settlementSequence: number;
   lifecycle: RuntimeLifecycle;
 }
 
-type ActionRequest =
-  | {
-      readonly _tag: "publish-state";
-      readonly ownerSessionId: string;
-    }
-  | {
-      readonly _tag: "publish-state-to";
-      readonly ownerSessionId: string;
-      readonly listener: StateListener;
-    }
-  | {
-      readonly _tag: "publish-settlement";
-      readonly settlement: WorkerSettlement;
-      readonly localListener?: SettlementListener;
-    }
-  | {
-      readonly _tag: "complete-run";
-      readonly deferred: Deferred.Deferred<CompletedRun>;
-      readonly completed: CompletedRun;
-    }
-  | {
-      readonly _tag: "run";
-      readonly run: () => void;
-    };
-
 type CommittedAction = () => void;
+type PostCommitAction = (
+  state: RuntimeState,
+  settlementListeners: ReadonlySet<SettlementListener>,
+  stateListeners: ReadonlyMap<string, ReadonlySet<StateListener>>,
+) => CommittedAction;
 
 interface TransactionMutation<A> {
   readonly value: A;
-  readonly actions?: readonly ActionRequest[];
-}
-
-interface TransactionResult<A> {
-  readonly value: A;
-  readonly actions: readonly CommittedAction[];
+  readonly actions?: readonly PostCommitAction[];
 }
 
 type Decision<A> =
@@ -315,7 +254,10 @@ type Decision<A> =
 
 class StatefulOrchestration implements OrchestrationService {
   private readonly actionQueue: CommittedAction[] = [];
+  private readonly settlementListeners = new Set<SettlementListener>();
+  private readonly stateListeners = new Map<string, Set<StateListener>>();
   private drainingActions = false;
+  private state: RuntimeState;
 
   constructor(
     private readonly childSessions: ChildSessionsService,
@@ -334,8 +276,10 @@ class StatefulOrchestration implements OrchestrationService {
     ) => Fiber.Fiber<void, never>,
     private readonly clock: Clock.Clock,
     private readonly idFactories: OrchestrateIdFactories,
-    private readonly state: Ref.Ref<RuntimeState>,
-  ) {}
+    private readonly shutdownCompletion: Deferred.Deferred<void>,
+  ) {
+    this.state = initialState();
+  }
 
   orchestrate(
     context: OrchestrationContext,
@@ -361,10 +305,15 @@ class StatefulOrchestration implements OrchestrationService {
     mode: RunMode,
     onSettlement?: SettlementListener,
   ): Effect.Effect<AcceptedRun | CompletedRun, OrchestrationActionRejected> {
-    return Effect.gen({ self: this }, function* () {
+    return Effect.fn("Orchestration.orchestrate")(function* (
+      this: StatefulOrchestration,
+    ) {
       const validated = yield* this.validateTask(context, task, mode);
       const preflight = this.preflightOpen("orchestrate");
       if (preflight._tag === "rejected") yield* Effect.fail(preflight.error);
+      // Keep user-supplied ID factories outside the transaction: a reentrant
+      // factory cannot commit an outer stale draft. Admission rechecks all
+      // authority below, so a race may burn an ID but cannot create a run.
       const runId = this.idFactories.runId();
       const workerId = this.idFactories.workerId();
       const completion = yield* Deferred.make<CompletedRun>();
@@ -414,7 +363,7 @@ class StatefulOrchestration implements OrchestrationService {
         return yield* this.awaitInlineRun(runRecord, completion);
       }
       return freezeAcceptedRun(runId, workerId);
-    });
+    }).call(this);
   }
 
   sendInteractive(
@@ -445,7 +394,9 @@ class StatefulOrchestration implements OrchestrationService {
     mode: RunMode,
     onSettlement?: SettlementListener,
   ): Effect.Effect<AcceptedRun | CompletedRun, OrchestrationActionRejected> {
-    return Effect.gen({ self: this }, function* () {
+    return Effect.fn("Orchestration.sendInteractive")(function* (
+      this: StatefulOrchestration,
+    ) {
       yield* validateContextOwner("sendInteractive", context.ownerSessionId);
       yield* validateMode("sendInteractive", mode);
       yield* validateText(
@@ -463,6 +414,8 @@ class StatefulOrchestration implements OrchestrationService {
         validatedWorkerId,
       );
       if (preflight._tag === "rejected") yield* Effect.fail(preflight.error);
+      // See orchestrate: allocation remains outside copy-on-write reducers so
+      // reentrant factories cannot invalidate transaction atomicity.
       const runId = this.idFactories.runId();
       const completion = yield* Deferred.make<CompletedRun>();
       const now = this.clock.currentTimeMillisUnsafe();
@@ -552,14 +505,16 @@ class StatefulOrchestration implements OrchestrationService {
         return yield* this.awaitInlineRun(runRecord, completion);
       }
       return freezeAcceptedRun(runId, validatedWorkerId);
-    });
+    }).call(this);
   }
 
   abort(
     ownerSessionId: string,
     target: AbortTarget,
   ): Effect.Effect<void, OrchestrationActionRejected> {
-    return Effect.gen({ self: this }, function* () {
+    return Effect.fn("Orchestration.abort")(function* (
+      this: StatefulOrchestration,
+    ) {
       yield* validateContextOwner("abort", ownerSessionId);
       const validatedTarget = yield* validateAbortTarget(target);
       const candidateIds = validatedTarget._tag === "ids"
@@ -576,14 +531,16 @@ class StatefulOrchestration implements OrchestrationService {
         return yield* Effect.fail(cancellation.error);
       }
       yield* awaitAll(cancellation.value);
-    });
+    }).call(this);
   }
 
   closeInteractive(
     ownerSessionId: string,
     workerId: string,
   ): Effect.Effect<void, OrchestrationActionRejected> {
-    return Effect.gen({ self: this }, function* () {
+    return Effect.fn("Orchestration.closeInteractive")(function* (
+      this: StatefulOrchestration,
+    ) {
       yield* validateContextOwner("closeInteractive", ownerSessionId);
       const id = yield* validateWorkerId("closeInteractive", workerId);
       const now = this.clock.currentTimeMillisUnsafe();
@@ -617,7 +574,7 @@ class StatefulOrchestration implements OrchestrationService {
         };
       });
       if (decision._tag === "rejected") yield* Effect.fail(decision.error);
-    });
+    }).call(this);
   }
 
   snapshot(
@@ -632,21 +589,14 @@ class StatefulOrchestration implements OrchestrationService {
     if (typeof listener !== "function") {
       throw new Error("Settlement listener must be a function");
     }
-    const subscribed = this.transact((draft) => {
-      if (draft.lifecycle._tag !== "open") return { value: false };
-      draft.settlementListeners.add(listener);
-      return { value: true };
-    });
-    if (!subscribed) return noOp;
+    if (this.state.lifecycle !== "open") return noOp;
+    this.settlementListeners.add(listener);
 
     let active = true;
     return () => {
       if (!active) return;
       active = false;
-      this.transact((draft) => {
-        draft.settlementListeners.delete(listener);
-        return { value: undefined };
-      });
+      this.settlementListeners.delete(listener);
     };
   }
 
@@ -658,81 +608,64 @@ class StatefulOrchestration implements OrchestrationService {
       throw new Error("State listener must be a function");
     }
 
-    const subscribed = this.transact((draft) => {
-      if (draft.lifecycle._tag !== "open") return { value: false };
-      const ownerListeners = draft.stateListeners.get(ownerSessionId) ?? new Set();
-      ownerListeners.add(listener);
-      draft.stateListeners.set(ownerSessionId, ownerListeners);
-      return {
-        value: true,
-        actions: [publishStateTo(ownerSessionId, listener)],
-      };
-    });
-    if (!subscribed) return noOp;
+    if (this.state.lifecycle !== "open") return noOp;
+    const ownerListeners = this.stateListeners.get(ownerSessionId) ?? new Set();
+    ownerListeners.add(listener);
+    this.stateListeners.set(ownerSessionId, ownerListeners);
+    this.enqueueActions([
+      publishStateTo(ownerSessionId, listener)(
+        this.state,
+        this.settlementListeners,
+        this.stateListeners,
+      ),
+    ]);
 
     let active = true;
     return () => {
       if (!active) return;
       active = false;
-      this.transact((draft) => {
-        const ownerListeners = draft.stateListeners.get(ownerSessionId);
-        if (!ownerListeners) return { value: undefined };
-        ownerListeners.delete(listener);
-        if (ownerListeners.size === 0) draft.stateListeners.delete(ownerSessionId);
-        return { value: undefined };
-      });
+      ownerListeners.delete(listener);
+      if (ownerListeners.size === 0) this.stateListeners.delete(ownerSessionId);
     };
   }
 
   /** Calling shutdown closes admission synchronously, before the returned Effect runs. */
   shutdown(): Effect.Effect<void> {
-    const start = this.transact((draft) => {
-      if (draft.lifecycle._tag !== "open") {
-        return {
-          value: {
-            first: false,
-            completion: draft.lifecycle.completion,
-          },
-        };
-      }
-      const completion = draft.lifecycle.completion;
-      draft.lifecycle = { _tag: "shutting-down", completion };
-      return { value: { first: true, completion } };
+    const first = this.transact((draft) => {
+      if (draft.lifecycle !== "open") return { value: false };
+      draft.lifecycle = "shutting-down";
+      return { value: true };
     });
-    if (!start.first) return Deferred.await(start.completion);
+    if (!first) return Deferred.await(this.shutdownCompletion);
 
     return this.performShutdown().pipe(
       Effect.ensuring(
-        Effect.gen({ self: this }, function* () {
+        Effect.sync(() => {
           this.transact((draft) => {
-            draft.lifecycle = {
-              _tag: "shutdown",
-              completion: start.completion,
-            };
-            draft.settlementListeners.clear();
-            draft.stateListeners.clear();
+            draft.lifecycle = "shutdown";
             for (const [runId, run] of draft.runs) {
-              if (run._tag === "running" && run.settlementListener) {
-                draft.runs.set(runId, {
-                  ...run,
-                  settlementListener: undefined,
-                });
+              if (isRunningRuntimeRun(run) && run.settlementListener) {
+                draft.runs.set(runId, { ...run, settlementListener: undefined });
               }
             }
             return { value: undefined };
           });
-          yield* Deferred.succeed(start.completion, undefined);
+          this.settlementListeners.clear();
+          this.stateListeners.clear();
+          Deferred.doneUnsafe(this.shutdownCompletion, Effect.void);
         }),
       ),
     );
   }
 
   private performShutdown(): Effect.Effect<void> {
-    return Effect.gen({ self: this }, function* () {
+    return Effect.fn("Orchestration.shutdown")(function* (
+      this: StatefulOrchestration,
+    ) {
       const now = this.clock.currentTimeMillisUnsafe();
       this.transact((draft) => {
         const owners = new Set<string>();
-        const actions: ActionRequest[] = [];
+        const actions: PostCommitAction[] = [];
         for (const worker of draft.workers.values()) {
           if (
             worker.record.lifecycle === "interactive" &&
@@ -756,7 +689,7 @@ class StatefulOrchestration implements OrchestrationService {
         Effect.timeoutOption(SHUTDOWN_CLEANUP_GRACE_MS),
         Effect.ignore,
       );
-    });
+    }).call(this);
   }
 
   private validateTask(
@@ -820,19 +753,12 @@ class StatefulOrchestration implements OrchestrationService {
         task.instructions,
         MAX_WORKER_INSTRUCTIONS_LENGTH,
       );
-      const decoded = yield* Schema.decodeUnknownEffect(OrchestrateTaskInput)(task).pipe(
-        Effect.mapError(() => actionRejection(
-          "orchestrate",
-          "validation",
-          "orchestrate requires one task object",
-        )),
-      );
-      const definition = findWorkerByName(context.catalog, decoded.worker);
+      const definition = findWorkerByName(context.catalog, task.worker);
       if (!definition) {
         return yield* rejectAction(
           "orchestrate",
           "unknown-worker",
-          `Unknown worker: ${decoded.worker}`,
+          `Unknown worker: ${task.worker}`,
         );
       }
       const configured = definition.model;
@@ -853,7 +779,7 @@ class StatefulOrchestration implements OrchestrationService {
           `Worker "${definition.name}" configured model "${configured.provider}/${configured.modelId}" was not found`,
         );
       }
-      return { definition, task: decoded };
+      return { definition, task };
     });
   }
 
@@ -884,7 +810,7 @@ class StatefulOrchestration implements OrchestrationService {
     workflow: Effect.Effect<void, never>,
   ): void {
     try {
-      this.runGeneration(
+      const fiber = this.runGeneration(
         workerId,
         workflow.pipe(
           Effect.catchCause((cause) => {
@@ -895,9 +821,31 @@ class StatefulOrchestration implements OrchestrationService {
           }),
         ),
       );
+      const exit = fiber.pollUnsafe();
+      if (exit && Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) {
+        this.settleGenerationLaunchFailure(workerId, generation);
+      }
     } catch (error) {
       this.settleWorkflowDefect(workerId, generation, error);
     }
+  }
+
+  private settleGenerationLaunchFailure(
+    workerId: WorkerId,
+    generation: number,
+  ): void {
+    this.settleActiveWorker(
+      workerId,
+      generation,
+      ["starting", "running"],
+      "failed",
+      {
+        status: "failed",
+        message: "Worker generation could not start because orchestration is closed",
+      },
+      "workflow",
+      true,
+    );
   }
 
   private bootstrapAndPrompt(
@@ -968,7 +916,7 @@ class StatefulOrchestration implements OrchestrationService {
     const adopted = this.transact((draft) => {
       const worker = draft.workers.get(workerId);
       if (
-        draft.lifecycle._tag !== "open" ||
+        draft.lifecycle !== "open" ||
         !worker ||
         worker.generation !== generation ||
         worker.record.status !== "starting"
@@ -1172,7 +1120,7 @@ class StatefulOrchestration implements OrchestrationService {
         outcome: copyOutcome(outcome),
         settledAt,
       };
-      const actions: ActionRequest[] = [];
+      const actions: PostCommitAction[] = [];
       let settledWorker: RuntimeWorker = { ...worker, record: settledRecord };
       if (dispose) {
         actions.push(...this.releaseWorkerResources(settledWorker));
@@ -1314,15 +1262,15 @@ class StatefulOrchestration implements OrchestrationService {
   }
 
   private markWorkersStopping(
-    draft: RuntimeDraft,
+    draft: RuntimeState,
     workers: readonly RuntimeWorker[],
     candidates: ReadonlyMap<WorkerId, Deferred.Deferred<void>>,
   ): {
     readonly completions: readonly Deferred.Deferred<void>[];
-    readonly actions: readonly ActionRequest[];
+    readonly actions: readonly PostCommitAction[];
   } {
     const completions: Deferred.Deferred<void>[] = [];
-    const actions: ActionRequest[] = [];
+    const actions: PostCommitAction[] = [];
     for (const worker of workers) {
       if (worker.cancellation) {
         completions.push(worker.cancellation);
@@ -1345,10 +1293,33 @@ class StatefulOrchestration implements OrchestrationService {
       });
       completions.push(completion);
       actions.push(runAction(() => {
-        this.runCancellation(this.cancelWorker(worker.record.id, completion));
+        this.launchCancellationOrSettleAfterClosure(worker.record.id, completion);
       }));
     }
     return { completions, actions };
+  }
+
+  private launchCancellationOrSettleAfterClosure(
+    workerId: WorkerId,
+    completion: Deferred.Deferred<void>,
+  ): void {
+    const fiber = this.runCancellation(this.cancelWorker(workerId, completion));
+    const exit = fiber.pollUnsafe();
+    if (!exit || Exit.isSuccess(exit) || !Cause.hasInterruptsOnly(exit.cause)) return;
+
+    const worker = this.current().workers.get(workerId);
+    if (worker?.record.status === "stopping") {
+      this.settleActiveWorker(
+        workerId,
+        worker.generation,
+        ["stopping"],
+        "aborted",
+        { status: "aborted" },
+        "cancellation",
+        true,
+      );
+    }
+    this.completeCancellation(workerId, completion);
   }
 
   private cancelWorker(
@@ -1407,21 +1378,23 @@ class StatefulOrchestration implements OrchestrationService {
         );
       })),
       Effect.ensuring(
-        Effect.gen({ self: this }, function* () {
-          this.transact((draft) => {
-            const worker = draft.workers.get(workerId);
-            if (worker?.cancellation === completion) {
-              draft.workers.set(workerId, {
-                ...worker,
-                cancellation: undefined,
-              });
-            }
-            return { value: undefined };
-          });
-          yield* Deferred.succeed(completion, undefined);
-        }),
+        Effect.sync(() => this.completeCancellation(workerId, completion)),
       ),
     );
+  }
+
+  private completeCancellation(
+    workerId: WorkerId,
+    completion: Deferred.Deferred<void>,
+  ): void {
+    this.transact((draft) => {
+      const worker = draft.workers.get(workerId);
+      if (worker?.cancellation === completion) {
+        draft.workers.set(workerId, { ...worker, cancellation: undefined });
+      }
+      return { value: undefined };
+    });
+    Deferred.doneUnsafe(completion, Effect.void);
   }
 
   private awaitInlineRun(
@@ -1458,11 +1431,11 @@ class StatefulOrchestration implements OrchestrationService {
   }
 
   private closeReadyWorker(
-    draft: RuntimeDraft,
+    draft: RuntimeState,
     worker: RuntimeWorker,
     settledAt: number,
-    actions: ActionRequest[] = [],
-  ): ActionRequest[] {
+    actions: PostCommitAction[] = [],
+  ): PostCommitAction[] {
     const closedRecord: WorkerRecord = {
       ...transitionWorkerStatus(worker.record, "closed"),
       activity: undefined,
@@ -1480,20 +1453,38 @@ class StatefulOrchestration implements OrchestrationService {
     return actions;
   }
 
-  private releaseWorkerResources(worker: RuntimeWorker): ActionRequest[] {
-    const actions: ActionRequest[] = [];
+  private releaseWorkerResources(worker: RuntimeWorker): PostCommitAction[] {
+    const actions: PostCommitAction[] = [];
     if (worker.observationRelease) {
       actions.push(runAction(() => safelyCall(worker.observationRelease)));
     }
     const session = worker.session;
     if (session) {
       actions.push(runAction(() => {
-        this.runCleanup(
-          session.dispose().pipe(Effect.catchCause(() => Effect.void)),
+        this.launchCleanupOrJoinAfterClosure(
+          Effect.suspend(() => session.dispose()).pipe(
+            Effect.catchCause(() => Effect.void),
+            Effect.uninterruptible,
+          ),
         );
       }));
     }
     return actions;
+  }
+
+  private launchCleanupOrJoinAfterClosure(cleanup: Effect.Effect<void>): void {
+    if (this.cleanups.state._tag === "Closed") {
+      Effect.runFork(cleanup);
+      return;
+    }
+    const fiber = this.runCleanup(cleanup);
+    const exit = fiber.pollUnsafe();
+    if (exit && Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) {
+      // FiberSet.runtime returns an already-interrupted sentinel when closure
+      // wins admission. If admission won and closure interrupted the real fiber,
+      // repeating the cached uninterruptible disposal only joins that cleanup.
+      Effect.runFork(cleanup);
+    }
   }
 
   private preflightOpen(
@@ -1537,26 +1528,21 @@ class StatefulOrchestration implements OrchestrationService {
   }
 
   private current(): RuntimeState {
-    return Ref.getUnsafe(this.state);
+    return this.state;
   }
 
   private transact<A>(
-    reducer: (draft: RuntimeDraft) => TransactionMutation<A>,
+    reducer: (draft: RuntimeState) => TransactionMutation<A>,
   ): A {
-    const transaction = Effect.runSync(
-      Ref.modify(this.state, (state) => {
-        const draft = makeDraft(state);
-        const mutation = reducer(draft);
-        const next = freezeState(draft);
-        const result: TransactionResult<A> = {
-          value: mutation.value,
-          actions: materializeActions(next, mutation.actions ?? []),
-        };
-        return [result, next];
-      }),
-    );
-    this.enqueueActions(transaction.actions);
-    return transaction.value;
+    const draft = makeDraft(this.state);
+    const mutation = reducer(draft);
+    this.state = Object.freeze(draft);
+    this.enqueueActions((mutation.actions ?? []).map((action) => action(
+      this.state,
+      this.settlementListeners,
+      this.stateListeners,
+    )));
+    return mutation.value;
   }
 
   private enqueueActions(actions: readonly CommittedAction[]): void {
@@ -1601,7 +1587,6 @@ export function orchestrationLayer(
       const runGeneration = yield* FiberMap.runtime(generations)<never>();
       const clock = yield* Clock.Clock;
       const shutdownCompletion = yield* Deferred.make<void>();
-      const state = yield* Ref.make(initialState(shutdownCompletion));
       return Orchestration.of(new StatefulOrchestration(
         childSessions,
         generations,
@@ -1612,129 +1597,58 @@ export function orchestrationLayer(
         runCleanup,
         clock,
         options.idFactories ?? createRandomIdFactories(),
-        state,
+        shutdownCompletion,
       ));
     }),
   );
 }
 
-function initialState(completion: Deferred.Deferred<void>): RuntimeState {
-  const lifecycle: RuntimeLifecycle = { _tag: "open", completion };
+function initialState(): RuntimeState {
   return Object.freeze({
     workers: new Map<WorkerId, RuntimeWorker>(),
     runs: new Map<RunId, RuntimeRun>(),
     terminalWorkerOrder: [],
     completedRunOrder: [],
-    settlementListeners: new Set<SettlementListener>(),
-    stateListeners: new Map<string, ReadonlySet<StateListener>>(),
     settlementSequence: 0,
-    lifecycle,
+    lifecycle: "open",
   });
 }
 
-function makeDraft(state: RuntimeState): RuntimeDraft {
+function makeDraft(state: RuntimeState): RuntimeState {
   return {
+    ...state,
     workers: new Map(state.workers),
     runs: new Map(state.runs),
     terminalWorkerOrder: [...state.terminalWorkerOrder],
     completedRunOrder: [...state.completedRunOrder],
-    settlementListeners: new Set(state.settlementListeners),
-    stateListeners: new Map(
-      [...state.stateListeners].map(([owner, listeners]) => [
-        owner,
-        new Set(listeners),
-      ]),
-    ),
-    settlementSequence: state.settlementSequence,
-    lifecycle: state.lifecycle,
   };
 }
 
-function freezeState(draft: RuntimeDraft): RuntimeState {
-  return Object.freeze({
-    workers: draft.workers,
-    runs: draft.runs,
-    terminalWorkerOrder: draft.terminalWorkerOrder,
-    completedRunOrder: draft.completedRunOrder,
-    settlementListeners: draft.settlementListeners,
-    stateListeners: draft.stateListeners,
-    settlementSequence: draft.settlementSequence,
-    lifecycle: draft.lifecycle,
-  });
-}
-
-function materializeActions(
-  state: RuntimeState,
-  requests: readonly ActionRequest[],
-): CommittedAction[] {
-  return requests.map((request) => {
-    switch (request._tag) {
-      case "publish-state": {
-        const snapshot = snapshotFor(state, request.ownerSessionId);
-        const listeners = [...(state.stateListeners.get(request.ownerSessionId) ?? [])];
-        return () => {
-          for (const listener of listeners) safelyNotify(() => listener(snapshot));
-        };
-      }
-      case "publish-state-to": {
-        const snapshot = snapshotFor(state, request.ownerSessionId);
-        return () => safelyNotify(() => request.listener(snapshot));
-      }
-      case "publish-settlement": {
-        const listeners = [...state.settlementListeners];
-        return () => {
-          if (request.localListener) {
-            safelyNotify(() => request.localListener?.(request.settlement));
-          }
-          for (const listener of listeners) {
-            safelyNotify(() => listener(request.settlement));
-          }
-        };
-      }
-      case "complete-run":
-        return () => {
-          Effect.runSync(Deferred.succeed(request.deferred, request.completed));
-        };
-      case "run":
-        return request.run;
-    }
-  });
-}
-
 function completeRun(
-  draft: RuntimeDraft,
+  state: RuntimeState,
   workerId: WorkerId,
-): ActionRequest[] {
-  const worker = draft.workers.get(workerId);
+): PostCommitAction[] {
+  const worker = state.workers.get(workerId);
   if (!worker) return [];
-  const run = draft.runs.get(worker.record.runId);
-  if (!run || run._tag !== "running" || !isCompletedRunWorker(worker.record)) {
+  const run = state.runs.get(worker.record.runId);
+  if (!run || !isRunningRuntimeRun(run) || !isCompletedRunWorker(worker.record)) {
     return [];
   }
 
   const completed = freezeCompletedRun(run.record, worker.record);
-  const completedRecord: CompletedRuntimeRunRecord = {
-    run: { ...run.record, state: "complete" },
-    completion: completed,
-  };
-  draft.runs.set(run.record.id, {
-    _tag: "completed",
-    record: completedRecord,
-  });
-  draft.completedRunOrder.push(run.record.id);
-  return [{
-    _tag: "complete-run",
-    deferred: run.completion,
-    completed,
-  }];
+  state.runs.set(run.record.id, { ...run.record, state: "complete" });
+  state.completedRunOrder.push(run.record.id);
+  return [runAction(() => {
+    Deferred.doneUnsafe(run.completion, Effect.succeed(completed));
+  })];
 }
 
 function makeSettlement(
-  draft: RuntimeDraft,
+  draft: RuntimeState,
   worker: RuntimeWorker,
   settledAt: number,
   failureStage: SettlementFailureStage | undefined,
-): ActionRequest | undefined {
+): PostCommitAction | undefined {
   const run = draft.runs.get(worker.record.runId);
   if (!run || !isCompletedRunWorker(worker.record)) {
     return undefined;
@@ -1769,25 +1683,22 @@ function makeSettlement(
       ? { sessionFile: worker.record.sessionFile }
       : {}),
   });
-  return {
-    _tag: "publish-settlement",
+  return publishSettlement(
     settlement,
-    ...(run._tag === "running" && run.settlementListener
-      ? { localListener: run.settlementListener }
-      : {}),
-  };
+    isRunningRuntimeRun(run) ? run.settlementListener : undefined,
+  );
 }
 
 function stateActionsAfterPrune(
-  draft: RuntimeDraft,
+  draft: RuntimeState,
   ownerSessionId: string,
-): ActionRequest[] {
+): PostCommitAction[] {
   const owners = pruneHistory(draft);
   owners.add(ownerSessionId);
   return publishOwners(owners);
 }
 
-function pruneHistory(draft: RuntimeDraft): Set<string> {
+function pruneHistory(draft: RuntimeState): Set<string> {
   const owners = new Set<string>();
   while (draft.completedRunOrder.length > MAX_COMPLETED_RUN_HISTORY) {
     const runId = draft.completedRunOrder.shift();
@@ -1812,7 +1723,7 @@ function pruneHistory(draft: RuntimeDraft): Set<string> {
 }
 
 function rememberTerminalWorker(
-  draft: RuntimeDraft,
+  draft: RuntimeState,
   workerId: WorkerId,
 ): void {
   if (!draft.terminalWorkerOrder.includes(workerId)) {
@@ -1841,7 +1752,11 @@ function snapshotFor(
 }
 
 function runtimeRunRecord(run: RuntimeRun): RunRecord {
-  return run._tag === "running" ? run.record : run.record.run;
+  return isRunningRuntimeRun(run) ? run.record : run;
+}
+
+function isRunningRuntimeRun(run: RuntimeRun): run is RunningRuntimeRun {
+  return "_tag" in run;
 }
 
 function makeRunRecord(
@@ -1890,34 +1805,52 @@ function makeWorkerRecord(
   };
 }
 
-function publishState(ownerSessionId: string): ActionRequest {
-  return { _tag: "publish-state", ownerSessionId };
+function publishState(ownerSessionId: string): PostCommitAction {
+  return (state, _settlementListeners, stateListeners) => {
+    const snapshot = snapshotFor(state, ownerSessionId);
+    const listeners = [...(stateListeners.get(ownerSessionId) ?? [])];
+    return () => {
+      for (const listener of listeners) safelyNotify(() => listener(snapshot));
+    };
+  };
 }
 
 function publishStateTo(
   ownerSessionId: string,
   listener: StateListener,
-): ActionRequest {
-  return {
-    _tag: "publish-state-to",
-    ownerSessionId,
-    listener,
+): PostCommitAction {
+  return (state) => {
+    const snapshot = snapshotFor(state, ownerSessionId);
+    return () => safelyNotify(() => listener(snapshot));
   };
 }
 
-function publishOwners(owners: ReadonlySet<string>): ActionRequest[] {
+function publishSettlement(
+  settlement: WorkerSettlement,
+  localListener: SettlementListener | undefined,
+): PostCommitAction {
+  return (_state, settlementListeners) => {
+    const listeners = [...settlementListeners];
+    return () => {
+      if (localListener) safelyNotify(() => localListener(settlement));
+      for (const listener of listeners) safelyNotify(() => listener(settlement));
+    };
+  };
+}
+
+function publishOwners(owners: ReadonlySet<string>): PostCommitAction[] {
   return [...owners].map(publishState);
 }
 
-function runAction(run: () => void): ActionRequest {
-  return { _tag: "run", run };
+function runAction(run: () => void): PostCommitAction {
+  return () => run;
 }
 
 function openDecision(
-  draft: RuntimeDraft,
+  draft: RuntimeState,
   operation: OrchestrationOperation,
 ): Decision<void> {
-  return draft.lifecycle._tag === "open"
+  return draft.lifecycle === "open"
     ? accepted(undefined)
     : rejected(
         operation,
@@ -1927,7 +1860,7 @@ function openDecision(
 }
 
 function ownedWorkerDecision(
-  draft: RuntimeDraft,
+  draft: RuntimeState,
   operation: OrchestrationOperation,
   ownerSessionId: string,
   workerId: WorkerId,

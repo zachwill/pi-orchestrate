@@ -91,6 +91,21 @@ function createBinding(
   };
 }
 
+function flushQueuedSettlements(
+  count: number,
+  overridesFor: (index: number) => Partial<WorkerSettlement>,
+) {
+  const coordinator = new DeliveryCoordinator();
+  const parent = createBinding("owner-a", 1, false);
+  coordinator.bind(parent.binding);
+  for (let index = 0; index < count; index += 1) {
+    coordinator.accept(settlement(overridesFor(index)));
+  }
+  parent.setIdle(true);
+  coordinator.markAgentSettled("owner-a", 1);
+  return parent.sent;
+}
+
 describe("Delivery Layer ownership", () => {
   test("owns the settlement subscription and clears state after unsubscribing", async () => {
     let listener: SettlementListener | undefined;
@@ -290,59 +305,44 @@ describe("DeliveryCoordinator worker settlements", () => {
   });
 
   test("fairly caps twelve queued results while preserving identity and excerpts", () => {
-    const coordinator = new DeliveryCoordinator();
-    const parent = createBinding("owner-a", 1, false);
-    coordinator.bind(parent.binding);
-    for (let index = 0; index < 12; index += 1) {
-      coordinator.accept(settlement({
-        eventId: `fair-${index}`,
-        sequence: 100 + index,
-        runId: createSequentialIdFactories(500 + index).runId(),
-        workerId: `worker-fair-${index}` as WorkerSettlement["workerId"],
-        title: `Fair worker ${index}`,
-        outcome: { status: "completed", assistantText: `${index}:` + "x".repeat(30_000) },
-      }));
-    }
+    const sent = flushQueuedSettlements(12, (index) => ({
+      eventId: `fair-${index}`,
+      sequence: 100 + index,
+      runId: createSequentialIdFactories(500 + index).runId(),
+      workerId: `worker-fair-${index}` as WorkerSettlement["workerId"],
+      title: `Fair worker ${index}`,
+      outcome: { status: "completed", assistantText: `${index}:` + "x".repeat(30_000) },
+    }));
 
-    parent.setIdle(true);
-    coordinator.markAgentSettled("owner-a", 1);
-
-    expect(parent.sent).toHaveLength(12);
-    expect(parent.sent.reduce(
+    expect(sent).toHaveLength(12);
+    expect(sent.reduce(
       (total, item) => total + Buffer.byteLength(item.message.content, "utf8"),
       0,
     )).toBeLessThanOrEqual(MAX_DELIVERY_MARKDOWN_BYTES);
     for (let index = 0; index < 12; index += 1) {
-      const content = parent.sent[index]!.message.content;
+      const content = sent[index]!.message.content;
       expect(content).toContain(`worker-fair-${index}`);
       expect(content).toContain(`${index}:`);
     }
-    expect(parent.sent.at(-1)?.message.content).toEndWith(DELIVERY_PARENT_INSTRUCTIONS);
+    expect(sent.at(-1)?.message.content).toEndWith(DELIVERY_PARENT_INSTRUCTIONS);
   });
 
-  test("caps a busy owner's queued completed runs", () => {
-    const coordinator = new DeliveryCoordinator();
-    const parent = createBinding("owner-a", 1, false);
-    coordinator.bind(parent.binding);
-    for (let index = 0; index < 24; index += 1) {
-      coordinator.accept(settlement({
-        eventId: `queued-${index}`,
-        sequence: 200 + index,
-        workerId: `worker-queued-${index}` as WorkerSettlement["workerId"],
-        title: `Queued ${index}`,
-        outcome: { status: "completed", assistantText: `${index}:` + "z".repeat(20_000) },
-      }));
-    }
+  test("caps a busy owner's large backlog with one final triggering turn", () => {
+    const sent = flushQueuedSettlements(24, (index) => ({
+      eventId: `queued-${index}`,
+      sequence: 200 + index,
+      workerId: `worker-queued-${index}` as WorkerSettlement["workerId"],
+      title: `Queued ${index}`,
+      outcome: { status: "completed", assistantText: `${index}:` + "z".repeat(20_000) },
+    }));
 
-    parent.setIdle(true);
-    coordinator.markAgentSettled("owner-a", 1);
-    expect(parent.sent).toHaveLength(24);
-    expect(parent.sent.reduce(
+    expect(sent).toHaveLength(24);
+    expect(sent.reduce(
       (total, item) => total + Buffer.byteLength(item.message.content, "utf8"),
       0,
     )).toBeLessThanOrEqual(MAX_DELIVERY_MARKDOWN_BYTES);
-    expect(parent.sent.map((item) => item.options.triggerTurn).filter(Boolean)).toHaveLength(1);
-    expect(parent.sent.at(-1)?.message.content).toEndWith(DELIVERY_PARENT_INSTRUCTIONS);
+    expect(sent.map((item) => item.options.triggerTurn).filter(Boolean)).toHaveLength(1);
+    expect(sent.at(-1)?.message.content).toEndWith(DELIVERY_PARENT_INSTRUCTIONS);
   });
 
   test("does not reenter a flush when sendMessage synchronously accepts another final", () => {

@@ -146,6 +146,19 @@ function adapterHarness() {
   return { adapter, effectRuntime, orchestration };
 }
 
+function destructionHost(
+  shutdown: () => Promise<void>,
+  dispose: () => Promise<void> = async () => {},
+): ProcessHost {
+  return Object.assign(
+    {
+      runtime: { shutdown } as unknown as ProcessHost["runtime"],
+      delivery: new DeliveryCoordinator(),
+    } satisfies ProcessHost,
+    { effectRuntime: { dispose } },
+  );
+}
+
 describe("ProcessHost AbortSignal adapter", () => {
   test("squashes typed failures to the same tagged Error object and message", async () => {
     const { adapter, effectRuntime, orchestration } = adapterHarness();
@@ -362,23 +375,14 @@ describe("ProcessHost destruction", () => {
     let shutdownCalls = 0;
     let disposalCalls = 0;
     let host!: ProcessHost;
-    host = Object.assign(
-      {
-        runtime: {
-          shutdown: () => {
-            shutdownCalls += 1;
-            reentrantDestruction = destroyProcessHost(host);
-            return Promise.reject(shutdownFailure);
-          },
-        } as unknown as ProcessHost["runtime"],
-        delivery: new DeliveryCoordinator(),
-      } satisfies ProcessHost,
-      {
-        effectRuntime: {
-          dispose: async () => {
-            disposalCalls += 1;
-          },
-        },
+    host = destructionHost(
+      () => {
+        shutdownCalls += 1;
+        reentrantDestruction = destroyProcessHost(host);
+        return Promise.reject(shutdownFailure);
+      },
+      async () => {
+        disposalCalls += 1;
       },
     );
 
@@ -396,17 +400,10 @@ describe("ProcessHost destruction", () => {
       rejectShutdown = reject;
     });
     let disposalCalls = 0;
-    const host = Object.assign(
-      {
-        runtime: { shutdown: () => shutdown } as unknown as ProcessHost["runtime"],
-        delivery: new DeliveryCoordinator(),
-      } satisfies ProcessHost,
-      {
-        effectRuntime: {
-          dispose: async () => {
-            disposalCalls += 1;
-          },
-        },
+    const host = destructionHost(
+      () => shutdown,
+      async () => {
+        disposalCalls += 1;
       },
     );
     const deadline = deferred();
@@ -442,18 +439,11 @@ describe("ProcessHost destruction", () => {
   test("bounds root disposal and shares repeated destruction after logical teardown", async () => {
     const disposalGate = deferred();
     let disposalCalls = 0;
-    const host = Object.assign(
-      {
-        runtime: { shutdown: async () => {} } as unknown as ProcessHost["runtime"],
-        delivery: new DeliveryCoordinator(),
-      } satisfies ProcessHost,
-      {
-        effectRuntime: {
-          dispose: () => {
-            disposalCalls += 1;
-            return disposalGate.promise;
-          },
-        },
+    const host = destructionHost(
+      async () => {},
+      () => {
+        disposalCalls += 1;
+        return disposalGate.promise;
       },
     );
     let observedGrace: number | undefined;
@@ -477,12 +467,9 @@ describe("ProcessHost destruction", () => {
 
   test("awaits an in-grace root rejection and observes a rejection after timeout", async () => {
     const immediateFailure = new Error("root disposal failed");
-    const immediateHost = Object.assign(
-      {
-        runtime: { shutdown: async () => {} } as unknown as ProcessHost["runtime"],
-        delivery: new DeliveryCoordinator(),
-      } satisfies ProcessHost,
-      { effectRuntime: { dispose: () => Promise.reject(immediateFailure) } },
+    const immediateHost = destructionHost(
+      async () => {},
+      () => Promise.reject(immediateFailure),
     );
     await expect(
       destroyProcessHost(immediateHost, {
@@ -494,13 +481,7 @@ describe("ProcessHost destruction", () => {
     const lateDisposal = new Promise<void>((_resolve, reject) => {
       rejectLate = reject;
     });
-    const lateHost = Object.assign(
-      {
-        runtime: { shutdown: async () => {} } as unknown as ProcessHost["runtime"],
-        delivery: new DeliveryCoordinator(),
-      } satisfies ProcessHost,
-      { effectRuntime: { dispose: () => lateDisposal } },
-    );
+    const lateHost = destructionHost(async () => {}, () => lateDisposal);
     const lateFailure = new Error("late root disposal failed");
     const unhandled: unknown[] = [];
     const onUnhandled = (error: unknown) => unhandled.push(error);

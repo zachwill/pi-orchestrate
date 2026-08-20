@@ -18,6 +18,7 @@ const extensionModules = [
   "presentation.ts",
   "runtime.ts",
   "tools.ts",
+  "tui.ts",
   "worker-session.ts",
   "worker-settlement.ts",
 ] as const;

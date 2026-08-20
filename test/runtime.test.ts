@@ -118,6 +118,7 @@ class FakeHandle implements WorkerSessionHandle {
   promptFinalizerGate: Deferred | undefined;
   abortCalls = 0;
   disposeCalls = 0;
+  disposeInvocations = 0;
   disposeFailure: Error | undefined;
   disposeInvocationFailure: Error | undefined;
   disposeGate: Deferred | undefined;
@@ -178,6 +179,7 @@ class FakeHandle implements WorkerSessionHandle {
   }
 
   dispose(): Effect.Effect<void, never> {
+    this.disposeInvocations += 1;
     if (this.disposeInvocationFailure) throw this.disposeInvocationFailure;
     return Effect.suspend(() => {
       if (this.disposeStarted) {
@@ -646,6 +648,110 @@ describe("orchestration admission and concurrency", () => {
     prompt.gate.resolve(undefined);
     await effectRuntime.runPromise(orchestration.shutdown());
     await effectRuntime.dispose();
+  });
+
+  test("rechecks shutdown and worker state after deliberately reentrant ID factories", async () => {
+    let shutdownRunIds = 0;
+    let shutdownWorkerIds = 0;
+    let shutdownEffect: Effect.Effect<void> | undefined;
+    let shutdownService: OrchestrationService | undefined;
+    const shutdownSessions = new FakeChildSessions([]);
+    const shutdownRuntime = directRuntime(shutdownSessions, {
+      idFactories: {
+        runId: () => {
+          shutdownRunIds += 1;
+          if (!shutdownService) throw new Error("Missing shutdown race service");
+          shutdownEffect = shutdownService.shutdown();
+          return "run-race" as RunId;
+        },
+        workerId: () => {
+          shutdownWorkerIds += 1;
+          return "worker-race" as WorkerId;
+        },
+      },
+    });
+    shutdownService = shutdownRuntime.orchestration;
+
+    const shutdownExit = await shutdownRuntime.effectRuntime.runPromiseExit(
+      shutdownService.orchestrate(
+        context("owner", [definition("worker")]),
+        task("worker"),
+        "async",
+      ),
+    );
+    if (!Exit.isFailure(shutdownExit)) throw new Error("Expected shutdown race rejection");
+    expect(Cause.squash(shutdownExit.cause)).toMatchObject({
+      operation: "orchestrate",
+      reason: "shutdown",
+    });
+    expect({ shutdownRunIds, shutdownWorkerIds }).toEqual({
+      shutdownRunIds: 1,
+      shutdownWorkerIds: 1,
+    });
+    expect(shutdownSessions.creates.value).toBe(0);
+    expect(await Effect.runPromise(shutdownService.snapshot("owner"))).toEqual({
+      runs: [],
+      workers: [],
+    });
+    if (!shutdownEffect) throw new Error("Shutdown race did not start shutdown");
+    await shutdownRuntime.effectRuntime.runPromise(shutdownEffect);
+    await shutdownRuntime.effectRuntime.dispose();
+
+    const tracker = new PromptTracker();
+    const handle = new FakeHandle(
+      "id-worker-state-race",
+      [promptPlan({ status: "ready", assistantText: "ready" }, true)],
+      tracker,
+    );
+    const sessions = new FakeChildSessions([{ handle }]);
+    let runIds = 0;
+    let workerIds = 0;
+    let closeDuringRunId = false;
+    let interactiveService: OrchestrationService | undefined;
+    let readyWorkerId: WorkerId | undefined;
+    const interactiveRuntime = directRuntime(sessions, {
+      idFactories: {
+        runId: () => {
+          runIds += 1;
+          if (closeDuringRunId) {
+            if (!interactiveService || !readyWorkerId) {
+              throw new Error("Missing interactive race target");
+            }
+            Effect.runSync(
+              interactiveService.closeInteractive("owner", readyWorkerId),
+            );
+          }
+          return `run-${runIds}` as RunId;
+        },
+        workerId: () => {
+          workerIds += 1;
+          return `worker-${workerIds}` as WorkerId;
+        },
+      },
+    });
+    interactiveService = interactiveRuntime.orchestration;
+    const owner = context("owner", [definition("interactive", "interactive")]);
+    const initial = await interactiveRuntime.effectRuntime.runPromise(
+      interactiveService.orchestrate(owner, task("interactive"), "inline"),
+    );
+    const initialWorkerId = initial.result.workerId;
+    readyWorkerId = initialWorkerId;
+    closeDuringRunId = true;
+
+    const sendExit = await interactiveRuntime.effectRuntime.runPromiseExit(
+      interactiveService.sendInteractive(owner, initialWorkerId, "Follow up", "async"),
+    );
+    if (!Exit.isFailure(sendExit)) throw new Error("Expected worker-state race rejection");
+    expect(Cause.squash(sendExit.cause)).toMatchObject({
+      operation: "sendInteractive",
+      reason: "worker-state",
+    });
+    expect({ runIds, workerIds }).toEqual({ runIds: 2, workerIds: 1 });
+    expect(sessions.creates.value).toBe(1);
+    expect(handle.prompts).toEqual(["Instructions for interactive"]);
+    expect(handle.disposeCalls).toBe(1);
+    await interactiveRuntime.effectRuntime.runPromise(interactiveService.shutdown());
+    await interactiveRuntime.effectRuntime.dispose();
   });
 
   test("keeps model registry and generated-ID invariant failures as defects", async () => {
@@ -1965,6 +2071,143 @@ describe("Effect-owned generation and cleanup supervision", () => {
     await effectRuntime.dispose();
   });
 
+  test("settles an admitted generation when root closure closes its FiberMap before launch", async () => {
+    const sessions = new FakeChildSessions([]);
+    const { effectRuntime, orchestration } = directRuntime(sessions);
+    let closed = false;
+    orchestration.subscribeState("owner", (snapshot) => {
+      if (closed || snapshot.workers[0]?.status !== "starting") return;
+      closed = true;
+      Effect.runSync(effectRuntime.disposeEffect);
+    });
+
+    const completed = await Effect.runPromise(
+      orchestration.orchestrate(
+        context("owner", [definition("worker")]),
+        task("worker"),
+        "inline",
+      ),
+    );
+
+    expect(closed).toBe(true);
+    expect(sessions.creates.value).toBe(0);
+    expect(completed.result).toMatchObject({
+      status: "failed",
+      outcome: {
+        status: "failed",
+        message: "Worker generation could not start because orchestration is closed",
+      },
+    });
+    expect(await Effect.runPromise(orchestration.snapshot("owner"))).toMatchObject({
+      runs: [{ state: "complete" }],
+      workers: [{ status: "failed" }],
+    });
+  });
+
+  test("settles cancellation when root closure closes its supervisor before queued launch", async () => {
+    const tracker = new PromptTracker();
+    const handle = new FakeHandle(
+      "closed-cancellation",
+      [promptPlan({ status: "completed", assistantText: "late" })],
+      tracker,
+    );
+    const { effectRuntime, orchestration } = directRuntime(
+      new FakeChildSessions([{ handle }]),
+    );
+    const accepted = await effectRuntime.runPromise(
+      orchestration.orchestrate(
+        context("owner", [definition("worker")]),
+        task("worker"),
+        "async",
+      ),
+    );
+    await tracker.starts.waitFor(1);
+
+    let abort: Promise<void> | undefined;
+    let rootClosed = false;
+    orchestration.subscribeState("owner", (snapshot) => {
+      if (rootClosed || snapshot.workers[0]?.status !== "running") return;
+      rootClosed = true;
+      abort = Effect.runPromise(
+        orchestration.abort("owner", { workerIds: [accepted.workerId] }),
+      );
+      Effect.runSync(effectRuntime.disposeEffect);
+    });
+
+    expect(rootClosed).toBe(true);
+    await abort;
+    await handle.disposed.promise;
+    expect(handle.abortCalls).toBe(0);
+    expect(handle.disposeCalls).toBe(1);
+    expect(await Effect.runPromise(orchestration.snapshot("owner"))).toMatchObject({
+      runs: [{ state: "complete" }],
+      workers: [{ status: "aborted", outcome: { status: "aborted" } }],
+    });
+  });
+
+  test("disposes a retained session when root closure closes generation and cleanup supervisors before launch", async () => {
+    const tracker = new PromptTracker();
+    const handle = new FakeHandle(
+      "closed-interactive-generation",
+      [promptPlan({ status: "ready", assistantText: "ready" }, true)],
+      tracker,
+    );
+    const { effectRuntime, orchestration } = directRuntime(
+      new FakeChildSessions([{ handle }]),
+    );
+    const owner = context("owner", [definition("interactive", "interactive")]);
+    let closeDuringSend = false;
+    let rootClosed = false;
+    orchestration.subscribeState("owner", (snapshot) => {
+      if (
+        !closeDuringSend ||
+        rootClosed ||
+        snapshot.workers[0]?.status !== "running"
+      ) return;
+      rootClosed = true;
+      Effect.runSync(effectRuntime.disposeEffect);
+    });
+
+    const initial = await effectRuntime.runPromise(
+      orchestration.orchestrate(owner, task("interactive"), "inline"),
+    );
+    closeDuringSend = true;
+    const followUp = await Effect.runPromise(
+      orchestration.sendInteractive(
+        owner,
+        initial.result.workerId,
+        "Follow up",
+        "inline",
+      ),
+    );
+    await handle.disposed.promise;
+
+    expect(rootClosed).toBe(true);
+    expect(followUp.result).toMatchObject({
+      status: "failed",
+      outcome: {
+        status: "failed",
+        message: "Worker generation could not start because orchestration is closed",
+      },
+    });
+    expect(handle.prompts).toEqual(["Instructions for interactive"]);
+    expect(handle.disposeInvocations).toBe(1);
+    expect(handle.disposeCalls).toBe(1);
+
+    handle.emitStaleActivity("late stale activity");
+    expect(await Effect.runPromise(orchestration.snapshot("owner"))).toMatchObject({
+      runs: [{ state: "complete" }, { state: "complete" }],
+      workers: [{
+        status: "failed",
+        activity: undefined,
+        outcome: {
+          status: "failed",
+          message: "Worker generation could not start because orchestration is closed",
+        },
+      }],
+    });
+  });
+
   test("a real FiberMap generation defect fails the current worker and completes its run", async () => {
     const tracker = new PromptTracker();
     const handle = new FakeHandle("workflow-defect", [], tracker);
@@ -2010,6 +2253,7 @@ describe("Effect-owned generation and cleanup supervision", () => {
 
     expect(completed.result.status).toBe("completed");
     expect(states.at(-1)).toBe("completed");
+    expect(handle.disposeInvocations).toBe(1);
     expect(handle.disposeCalls).toBe(0);
     expect((await effectRuntime.runPromise(orchestration.snapshot("owner"))).workers[0])
       .toMatchObject({ status: "completed" });
@@ -2017,7 +2261,7 @@ describe("Effect-owned generation and cleanup supervision", () => {
     await effectRuntime.dispose();
   });
 
-  test("surfaces a committed close defect after draining its current FIFO", async () => {
+  test("contains a synchronous close disposal defect as best-effort cleanup", async () => {
     const tracker = new PromptTracker();
     const handle = new FakeHandle(
       "close-dispose-defect",
@@ -2038,12 +2282,12 @@ describe("Effect-owned generation and cleanup supervision", () => {
     });
     handle.disposeInvocationFailure = new Error("close dispose invocation failed");
 
-    const exit = await effectRuntime.runPromiseExit(
+    await effectRuntime.runPromise(
       orchestration.closeInteractive("owner", completed.result.workerId),
     );
-    if (!Exit.isFailure(exit)) throw new Error("Expected committed close defect");
-    expect(Cause.squash(exit.cause)).toBe(handle.disposeInvocationFailure);
     expect(states).toEqual(["ready", "closed"]);
+    expect(handle.disposeInvocations).toBe(1);
+    expect(handle.disposeCalls).toBe(0);
     expect((await effectRuntime.runPromise(orchestration.snapshot("owner"))).workers[0])
       .toMatchObject({ status: "closed" });
 

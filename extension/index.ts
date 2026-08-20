@@ -61,12 +61,15 @@ export function createOrchestrationExtension(
     let activeBinding: OwnerBinding | undefined;
     let cachedCatalog: WorkerCatalog | undefined;
 
-    const catalogFor = (ctx: ExtensionContext): WorkerCatalog => {
-      if (cachedCatalog) return cachedCatalog;
-      cachedCatalog = discoverCatalog({
+    const discoverCatalogFor = (ctx: ExtensionContext): WorkerCatalog =>
+      discoverCatalog({
         cwd: ctx.cwd,
         projectTrusted: ctx.isProjectTrusted(),
       });
+
+    const catalogFor = (ctx: ExtensionContext): WorkerCatalog => {
+      if (cachedCatalog) return cachedCatalog;
+      cachedCatalog = discoverCatalogFor(ctx);
       return cachedCatalog;
     };
 
@@ -113,10 +116,7 @@ export function createOrchestrationExtension(
     });
 
     pi.on("before_agent_start", (event, ctx) => {
-      cachedCatalog = discoverCatalog({
-        cwd: ctx.cwd,
-        projectTrusted: ctx.isProjectTrusted(),
-      });
+      cachedCatalog = discoverCatalogFor(ctx);
       return {
         systemPrompt: appendOrchestratorContract(
           event.systemPrompt,

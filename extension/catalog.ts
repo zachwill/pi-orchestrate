@@ -173,105 +173,100 @@ function fieldValue(frontmatter: unknown, field: string): unknown {
   return field in frontmatter ? frontmatter[field] : undefined;
 }
 
+function hasIssuePath(issuePaths: readonly IssuePath[], ...path: readonly PropertyKey[]): boolean {
+  return issuePaths.some((entry) => path.every((key, index) => entry.path[index] === key));
+}
+
+function unexpectedFieldsAt(
+  issuePaths: readonly IssuePath[],
+  parentPath: readonly PropertyKey[],
+): string[] {
+  return issuePaths
+    .filter(({ path, issue }) =>
+      issue._tag === "UnexpectedKey" &&
+      path.length === parentPath.length + 1 &&
+      parentPath.every((key, index) => path[index] === key) &&
+      typeof path[parentPath.length] === "string"
+    )
+    .map(({ path }) => String(path[parentPath.length]))
+    .sort(compareText);
+}
+
+function unknownFieldsDiagnostic(scope: string, fields: readonly string[]): string {
+  return `unknown ${scope} field${fields.length === 1 ? "" : "s"}: ${fields.join(", ")}`;
+}
+
 function listItems(value: unknown): readonly unknown[] {
   if (typeof value === "string") return value.split(",").map((item) => item.trim());
   return Array.isArray(value) ? value : [];
 }
 
+const ORDERED_FRONTMATTER_FIELDS = [
+  "name", "description", "model", "thinking", "tools", "skills", "compaction", "lifecycle",
+] as const;
+
+const FIXED_FIELD_DIAGNOSTICS: Partial<Record<(typeof ORDERED_FRONTMATTER_FIELDS)[number], string>> = {
+  name: "frontmatter field 'name' must be a non-empty string",
+  description: "frontmatter field 'description' must be a non-empty string",
+  skills: "frontmatter field 'skills' must be a comma string or string array",
+  lifecycle: "frontmatter field 'lifecycle' must be 'one-shot' or 'interactive'",
+};
+
+const COMPACTION_FIELD_DIAGNOSTICS = [
+  ["enabled", "frontmatter field 'compaction.enabled' must be a boolean"],
+  ["reserveTokens", "frontmatter field 'compaction.reserveTokens' must be a non-negative integer"],
+  ["keepRecentTokens", "frontmatter field 'compaction.keepRecentTokens' must be a non-negative integer"],
+] as const;
+
 function schemaDiagnostic(issue: SchemaIssue.Issue, frontmatter: unknown): string {
   const issuePaths = collectIssuePaths(issue);
-  const unexpected = issuePaths.filter(({ issue }) => issue._tag === "UnexpectedKey");
-  const frontmatterFields = unexpected
-    .filter(({ path }) => path.length === 1 && typeof path[0] === "string")
-    .map(({ path }) => String(path[0]))
-    .sort(compareText);
+  const frontmatterFields = unexpectedFieldsAt(issuePaths, []);
   if (frontmatterFields.length > 0) {
-    return `unknown frontmatter field${frontmatterFields.length === 1 ? "" : "s"}: ${frontmatterFields.join(", ")}`;
+    return unknownFieldsDiagnostic("frontmatter", frontmatterFields);
   }
+  if (!isUnknownRecord(frontmatter)) return "frontmatter must be a mapping";
 
-  const compactionFields = unexpected
-    .filter(
-      ({ path }) => path.length === 2 && path[0] === "compaction" && typeof path[1] === "string",
-    )
-    .map(({ path }) => String(path[1]))
-    .sort(compareText);
-
-  if (typeof frontmatter !== "object" || frontmatter === null || Array.isArray(frontmatter)) {
-    return "frontmatter must be a mapping";
-  }
-
-  const orderedFields = [
-    "name",
-    "description",
-    "model",
-    "thinking",
-    "tools",
-    "skills",
-    "compaction",
-    "lifecycle",
-  ];
-  const field = orderedFields.find((candidate) =>
-    issuePaths.some(({ path }) => path[0] === candidate)
+  const field = ORDERED_FRONTMATTER_FIELDS.find((candidate) =>
+    hasIssuePath(issuePaths, candidate)
   );
-  const value = field === undefined ? undefined : fieldValue(frontmatter, field);
+  if (field === undefined) return "invalid worker definition";
 
-  if (field === "name" || field === "description") {
-    return `frontmatter field '${field}' must be a non-empty string`;
-  }
+  const fixedDiagnostic = FIXED_FIELD_DIAGNOSTICS[field];
+  if (fixedDiagnostic !== undefined) return fixedDiagnostic;
+
+  const value = fieldValue(frontmatter, field);
   if (field === "model") {
-    if (typeof value !== "string" || value.trim() === "") {
-      return "frontmatter field 'model' must be a non-empty string";
-    }
-    return "frontmatter field 'model' must use provider/model format";
+    return typeof value !== "string" || value.trim() === ""
+      ? "frontmatter field 'model' must be a non-empty string"
+      : "frontmatter field 'model' must use provider/model format";
   }
   if (field === "thinking") {
-    if (typeof value !== "string" || value.trim() === "") {
-      return "frontmatter field 'thinking' must be a non-empty string";
-    }
-    return `unsupported thinking level '${value.trim()}'`;
+    return typeof value !== "string" || value.trim() === ""
+      ? "frontmatter field 'thinking' must be a non-empty string"
+      : `unsupported thinking level '${value.trim()}'`;
   }
   if (field === "tools") {
     const items = listItems(value);
     const validList = items.length > 0 && items.every(
       (item) => typeof item === "string" && item !== "",
     );
-    const unsupported = validList ? items.find(
-      (item) => typeof item === "string" && !isSupportedToolName(item),
-    ) : undefined;
+    const unsupported = validList
+      ? items.find((item) => typeof item === "string" && !isSupportedToolName(item))
+      : undefined;
     if (typeof unsupported === "string") return `unsupported tool '${unsupported}'`;
-    if (value === undefined) return "frontmatter field 'tools' is required";
-    return "frontmatter field 'tools' must be a non-empty comma string or string array";
+    return value === undefined
+      ? "frontmatter field 'tools' is required"
+      : "frontmatter field 'tools' must be a non-empty comma string or string array";
   }
-  if (field === "skills") {
-    return "frontmatter field 'skills' must be a comma string or string array";
+
+  const compactionFields = unexpectedFieldsAt(issuePaths, ["compaction"]);
+  if (compactionFields.length > 0) {
+    return unknownFieldsDiagnostic("compaction", compactionFields);
   }
-  if (field === "compaction") {
-    if (compactionFields.length > 0) {
-      return `unknown compaction field${compactionFields.length === 1 ? "" : "s"}: ${compactionFields.join(", ")}`;
-    }
-    if (issuePaths.some(({ path }) => path[0] === "compaction" && path[1] === "enabled")) {
-      return "frontmatter field 'compaction.enabled' must be a boolean";
-    }
-    if (
-      issuePaths.some(({ path }) =>
-        path[0] === "compaction" && path[1] === "reserveTokens"
-      )
-    ) {
-      return "frontmatter field 'compaction.reserveTokens' must be a non-negative integer";
-    }
-    if (
-      issuePaths.some(({ path }) =>
-        path[0] === "compaction" && path[1] === "keepRecentTokens"
-      )
-    ) {
-      return "frontmatter field 'compaction.keepRecentTokens' must be a non-negative integer";
-    }
-    return "frontmatter field 'compaction' must be a mapping";
-  }
-  if (field === "lifecycle") {
-    return "frontmatter field 'lifecycle' must be 'one-shot' or 'interactive'";
-  }
-  return "invalid worker definition";
+  const nestedDiagnostic = COMPACTION_FIELD_DIAGNOSTICS.find(([nestedField]) =>
+    hasIssuePath(issuePaths, "compaction", nestedField)
+  );
+  return nestedDiagnostic?.[1] ?? "frontmatter field 'compaction' must be a mapping";
 }
 
 function parseWorker(

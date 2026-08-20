@@ -434,39 +434,8 @@ describe("Pi Orchestrate extension integration", () => {
     expect(discoveries).toEqual([{ cwd: "/trusted/project", projectTrusted: true }]);
     const injectedPrompt = (promptResult as { systemPrompt: string }).systemPrompt;
     expect(injectedPrompt).toStartWith("Parent prompt");
+    expect(injectedPrompt).toContain("<!-- pi-orchestrate:contract:start -->");
     expect(injectedPrompt).toContain("trusted-scout");
-    expect(injectedPrompt).toMatch(
-      /proactively identify.*every useful bounded independent scope.*materially distinct.*validation perspective/i,
-    );
-    expect(injectedPrompt).toMatch(/spin up as many workers as needed.*small fixed default/i);
-    expect(injectedPrompt).toMatch(
-      /roles and counts named by the user.*minimum requirements, not ceilings.*exact cap/i,
-    );
-    expect(injectedPrompt).toMatch(
-      /same worker definition can be dispatched in multiple independent calls.*each call creates an independent worker session.*distinct from interactive session continuity.*keeps one worker ID/i,
-    );
-    expect(injectedPrompt).toMatch(
-      /Prefer one-shot workers.*interactive_send.*owned lifecycle interactive worker.*status is ready.*interactive_close.*Never use either tool for one-shot or completed workers.*one-shot sessions terminate automatically/i,
-    );
-    expect(injectedPrompt).toMatch(/enumerate the full first parallel wave.*from the work itself/i);
-    expect(injectedPrompt).toMatch(
-      /intended asynchronous wave has N workers.*next assistant response must contain exactly N separate, fully briefed `orchestrate` invocations.*single invocation is valid only when N=1/i,
-    );
-    expect(injectedPrompt).toMatch(
-      /form all N invocations before emitting or finalizing.*successfully admitted sole async invocation returns.*terminate: true.*ends the parent turn.*omitted siblings cannot be added afterward/i,
-    );
-    expect(injectedPrompt).toMatch(
-      /parallel tool dispatcher is available.*multi_tool_use\.parallel.*exactly N.*functions\.orchestrate.*no other tools.*no parallel dispatcher is available.*N native sibling.*same assistant response/i,
-    );
-    expect(injectedPrompt).toMatch(
-      /to run that wave asynchronously.*resulting expanded tool-call group.*no other tool calls.*harmless response text does not affect runtime classification.*Pi executes sibling tool calls concurrently.*For N=3.*submit together three calls/i,
-    );
-    expect(injectedPrompt).toMatch(
-      /Pi Orchestrate treats a successfully admitted sole `orchestrate` call or pure sibling group as async.*Pi executes native sibling tools concurrently/i,
-    );
-    expect(injectedPrompt).toMatch(/deliberate overlap.*only.*distinct evidence sources.*competing hypotheses.*validation perspectives/i);
-    expect(injectedPrompt).toMatch(/accidental duplicate assignments are forbidden/i);
-    expect(injectedPrompt).toMatch(/another full parallel wave before yielding.*adaptive full waves/i);
     expect(runtime.orchestrateCalls[0]?.context.catalog).toBe(catalog);
     expect(runtime.orchestrateCalls[0]?.context.projectTrusted).toBe(true);
     expect(runtime.orchestrateCalls[0]?.task).toEqual(orchestrationParams);

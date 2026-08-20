@@ -40,6 +40,7 @@ interface BoundParent {
 interface SynthesisGroupState {
   expected: number;
   readonly acceptedEventIds: string[];
+  finalEventId?: string;
 }
 
 export interface DeliveryService {
@@ -66,7 +67,6 @@ export class DeliveryCoordinator implements DeliveryService {
   private readonly pendingSettlements: WorkerSettlement[] = [];
   private readonly flushingOwners = new Set<string>();
   private readonly synthesisGroups = new Map<string, SynthesisGroupState>();
-  private readonly finalSynthesisGroupEventIds = new Set<string>();
   private highestAcceptedSequence = 0;
 
   bind(binding: ParentBinding): void {
@@ -136,7 +136,6 @@ export class DeliveryCoordinator implements DeliveryService {
     this.pendingSettlements.length = 0;
     this.flushingOwners.clear();
     this.synthesisGroups.clear();
-    this.finalSynthesisGroupEventIds.clear();
     this.highestAcceptedSequence = 0;
   }
 
@@ -261,12 +260,15 @@ export class DeliveryCoordinator implements DeliveryService {
     }
     if (state.acceptedEventIds.length !== state.expected) return;
     const finalEventId = state.acceptedEventIds.at(-1);
-    if (finalEventId) this.finalSynthesisGroupEventIds.add(finalEventId);
+    if (finalEventId) state.finalEventId = finalEventId;
   }
 
   private isFinalBoundary(settlement: WorkerSettlement): boolean {
     if (!settlement.synthesisGroupId) return true;
-    return this.finalSynthesisGroupEventIds.has(settlement.eventId);
+    const state = this.synthesisGroups.get(
+      synthesisGroupKey(settlement.ownerSessionId, settlement.synthesisGroupId),
+    );
+    return state?.finalEventId === settlement.eventId;
   }
 
   private finishSynthesisGroup(settlement: WorkerSettlement): void {
@@ -274,7 +276,6 @@ export class DeliveryCoordinator implements DeliveryService {
     this.synthesisGroups.delete(
       synthesisGroupKey(settlement.ownerSessionId, settlement.synthesisGroupId),
     );
-    this.finalSynthesisGroupEventIds.delete(settlement.eventId);
   }
 }
 

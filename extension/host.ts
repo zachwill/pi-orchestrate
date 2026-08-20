@@ -22,52 +22,26 @@ import type { OrchestrateTaskInput, RunMode } from "./domain.js";
 
 const PROCESS_HOST_KEY = Symbol.for("@zachwill/pi-orchestrate/process-host/v3");
 
+type RunResult<M extends RunMode> = M extends "async"
+  ? AcceptedRun
+  : CompletedRun;
+
 export interface OrchestratorRuntime {
-  orchestrate(
+  orchestrate<M extends RunMode>(
     context: OrchestrationContext,
     task: OrchestrateTaskInput,
-    mode: "async",
+    mode: M,
     signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun>;
-  orchestrate(
-    context: OrchestrationContext,
-    task: OrchestrateTaskInput,
-    mode: "inline",
-    signal?: AbortSignal,
-    onSettlement?: SettlementListener,
-  ): Promise<CompletedRun>;
-  orchestrate(
-    context: OrchestrationContext,
-    task: OrchestrateTaskInput,
-    mode: RunMode,
-    signal?: AbortSignal,
-    onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun | CompletedRun>;
-  sendInteractive(
+  ): Promise<RunResult<M>>;
+  sendInteractive<M extends RunMode>(
     context: OrchestrationContext,
     workerId: string,
     instructions: string,
-    mode: "async",
+    mode: M,
     signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun>;
-  sendInteractive(
-    context: OrchestrationContext,
-    workerId: string,
-    instructions: string,
-    mode: "inline",
-    signal?: AbortSignal,
-    onSettlement?: SettlementListener,
-  ): Promise<CompletedRun>;
-  sendInteractive(
-    context: OrchestrationContext,
-    workerId: string,
-    instructions: string,
-    mode: RunMode,
-    signal?: AbortSignal,
-    onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun | CompletedRun>;
+  ): Promise<RunResult<M>>;
   abort(ownerSessionId: string, target: AbortTarget): Promise<void>;
   closeInteractive(ownerSessionId: string, workerId: string): Promise<void>;
   snapshot(ownerSessionId: string): Promise<RuntimeSnapshot>;

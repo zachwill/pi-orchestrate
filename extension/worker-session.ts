@@ -11,7 +11,6 @@ import {
   ModelRuntime,
   type ModelRegistry,
   type PromptOptions,
-  type ResourceLoader,
   SessionManager,
   SettingsManager,
   type AgentSessionEvent,
@@ -244,8 +243,10 @@ export interface WorkerSessionDependencies {
   createAgentSession(input: AgentSessionInput): Promise<{ session: WorkerAgentSession }>;
   createRuntime(input: RuntimeInput): OwnedWorkerRuntime;
   reportCleanupFailure(failure: WorkerSessionCleanupFailure): void;
+  /** Deterministic boundary before an offered session reserves adopter ownership. */
+  beforeAdoptionReservation(): Effect.Effect<void>;
   /** Deterministic boundary for verifying reclamation admission during root closure. */
-  onReclamationOpenObserved(): void;
+  onReclamationOpenObserved(): Effect.Effect<void>;
 }
 
 const defaultDependencies: WorkerSessionDependencies = {
@@ -278,30 +279,9 @@ const defaultDependencies: WorkerSessionDependencies = {
       detail: `Operation: ${operation}`,
     });
   },
-  onReclamationOpenObserved: () => {},
+  beforeAdoptionReservation: () => Effect.void,
+  onReclamationOpenObserved: () => Effect.void,
 };
-
-export function resolveWorkerModel(
-  definition: WorkerDefinition,
-  parentModel: Model<Api> | undefined,
-  modelRegistry: ModelRegistry,
-): Model<Api> {
-  const configured = definition.model;
-  if (!configured) {
-    if (parentModel) return parentModel;
-    throw new Error(
-      `Worker "${definition.name}" has no configured model and no parent model is available`,
-    );
-  }
-
-  const model = modelRegistry.find(configured.provider, configured.modelId);
-  if (!model) {
-    throw new Error(
-      `Worker "${definition.name}" configured model "${configured.provider}/${configured.modelId}" was not found`,
-    );
-  }
-  return model;
-}
 
 function canonicalPath(path: string): string {
   try {
@@ -338,23 +318,16 @@ function bestEffortCleanup(
   reporter: WorkerSessionCleanupReporter,
   operation: WorkerSessionCleanupOperation,
   cleanup: () => void | Promise<void>,
+  afterFailure: Effect.Effect<void> = Effect.void,
 ): Effect.Effect<void> {
   return Effect.tryPromise({
-    try: async () => cleanup(),
+    try: () => Promise.resolve(cleanup()),
     catch: (cause) => cause,
   }).pipe(
-    Effect.catch((cause) => reportCleanupFailure(reporter, operation, cause)),
+    Effect.catch((cause) =>
+      reportCleanupFailure(reporter, operation, cause).pipe(Effect.andThen(afterFailure))
+    ),
   );
-}
-
-function resourceLoaderFinalizer(
-  resourceLoader: ResourceLoader,
-  reporter: WorkerSessionCleanupReporter,
-): Effect.Effect<void> {
-  return bestEffortCleanup(reporter, "resource-loader", () => {
-    if (!("dispose" in resourceLoader) || typeof resourceLoader.dispose !== "function") return;
-    resourceLoader.dispose();
-  });
 }
 
 function describeError(error: unknown, fallback: string): string {
@@ -631,36 +604,30 @@ function selectedModelCoordinates(
   throw new Error(`Worker "${definition.name}" has no configured model and no parent model is available`);
 }
 
-function modelAcquisitionError(
-  operation: WorkerModelAcquisitionOperation,
-  fallback: string,
-): (cause: unknown) => WorkerModelAcquisitionError {
-  return (cause) => new WorkerModelAcquisitionError({
-    operation,
-    message: describeError(cause, fallback),
-    cause,
-  });
+function acquisitionErrorFactory<Operation, AcquisitionError>(
+  ErrorClass: new (fields: {
+    operation: Operation;
+    message: string;
+    cause: unknown;
+  }) => AcquisitionError,
+  defaultMessage: string,
+) {
+  return (operation: Operation, fallback = defaultMessage) => (cause: unknown) =>
+    new ErrorClass({ operation, message: describeError(cause, fallback), cause });
 }
 
-function resourceAcquisitionError(
-  operation: WorkerResourceAcquisitionOperation,
-): (cause: unknown) => WorkerResourceAcquisitionError {
-  return (cause) => new WorkerResourceAcquisitionError({
-    operation,
-    message: describeError(cause, "Worker resource acquisition failed"),
-    cause,
-  });
-}
-
-function agentSessionAcquisitionError(
-  operation: WorkerAgentSessionAcquisitionOperation,
-): (cause: unknown) => WorkerAgentSessionAcquisitionError {
-  return (cause) => new WorkerAgentSessionAcquisitionError({
-    operation,
-    message: describeError(cause, "Worker agent session acquisition failed"),
-    cause,
-  });
-}
+const modelAcquisitionError = acquisitionErrorFactory(
+  WorkerModelAcquisitionError,
+  "Worker model acquisition failed",
+);
+const resourceAcquisitionError = acquisitionErrorFactory(
+  WorkerResourceAcquisitionError,
+  "Worker resource acquisition failed",
+);
+const agentSessionAcquisitionError = acquisitionErrorFactory(
+  WorkerAgentSessionAcquisitionError,
+  "Worker agent session acquisition failed",
+);
 
 const refreshModelRuntime = Effect.fn("WorkerSession.refreshModelRuntime")(function* (
   modelRuntime: ModelRuntime,
@@ -771,8 +738,9 @@ function contextLoaderOptions(
 const disposeWorkerSession = Effect.fn("WorkerSession.dispose")(function* (
   scope: Scope.Closeable,
   reporter: WorkerSessionCleanupReporter,
+  exit: Exit.Exit<void, unknown> = Exit.void,
 ) {
-  yield* Scope.close(scope, Exit.void).pipe(
+  yield* Scope.close(scope, exit).pipe(
     Effect.catchCause((cause) =>
       reportCleanupFailure(reporter, "scope-close", Cause.squash(cause))
     ),
@@ -824,9 +792,14 @@ const acquireWorkerServices = Effect.fn("WorkerSession.acquireServices")(functio
       }),
       catch: resourceAcquisitionError("create-services"),
     }),
-    (services) => resourceLoaderFinalizer(
-      services.resourceLoader,
+    (services) => bestEffortCleanup(
       dependencies.reportCleanupFailure,
+      "resource-loader",
+      () => {
+        const loader = services.resourceLoader;
+        if (!("dispose" in loader) || typeof loader.dispose !== "function") return;
+        loader.dispose();
+      },
     ),
   );
 });
@@ -836,29 +809,19 @@ interface AgentSessionOwnership {
   runtime: OwnedWorkerRuntime | undefined;
 }
 
-function rawSessionFinalizer(
-  session: WorkerAgentSession,
-  reporter: WorkerSessionCleanupReporter,
-): Effect.Effect<void> {
-  return bestEffortCleanup(reporter, "raw-session", () => session.dispose());
-}
-
 function agentSessionFinalizer(
   ownership: AgentSessionOwnership,
   reporter: WorkerSessionCleanupReporter,
 ): Effect.Effect<void> {
-  const runtime = ownership.runtime;
-  if (!runtime) return rawSessionFinalizer(ownership.session, reporter);
-  return Effect.tryPromise({
-    try: () => runtime.dispose(),
-    catch: (cause) => cause,
-  }).pipe(
-    Effect.catch((cause) =>
-      reportCleanupFailure(reporter, "runtime", cause).pipe(
-        Effect.andThen(rawSessionFinalizer(ownership.session, reporter)),
-      )
-    ),
+  const disposeRawSession = bestEffortCleanup(
+    reporter,
+    "raw-session",
+    () => ownership.session.dispose(),
   );
+  const runtime = ownership.runtime;
+  return runtime
+    ? bestEffortCleanup(reporter, "runtime", () => runtime.dispose(), disposeRawSession)
+    : disposeRawSession;
 }
 
 const acquireAgentSession = Effect.fn("WorkerSession.acquireAgentSession")(function* (
@@ -996,14 +959,10 @@ const createWorkerSession = Effect.fn("WorkerSession.create")(function* (
   return yield* acquisition.pipe(
     Effect.catchCause((cause) =>
       Effect.gen(function* () {
-        yield* Scope.close(scope, Exit.failCause(cause)).pipe(
-          Effect.catchCause((cleanupCause) =>
-            reportCleanupFailure(
-              dependencies.reportCleanupFailure,
-              "scope-close",
-              Cause.squash(cleanupCause),
-            )
-          ),
+        yield* disposeWorkerSession(
+          scope,
+          dependencies.reportCleanupFailure,
+          Exit.failCause(cause),
         );
         return yield* Effect.failCause(cause);
       })
@@ -1040,12 +999,12 @@ function disposeLateSession(session: WorkerSessionHandle): Effect.Effect<void> {
 function admitReclamationOrJoinAfterClosure(
   fibers: FiberSet.FiberSet<void, never>,
   reclamation: Effect.Effect<void>,
-  onOpenObserved: () => void,
+  onOpenObserved: () => Effect.Effect<void>,
 ): Effect.Effect<void> {
   return Effect.suspend(() => {
     if (fibers.state._tag === "Closed") return reclamation;
-    safelyNotify(onOpenObserved);
     return Effect.gen(function* () {
+      yield* onOpenObserved().pipe(Effect.catchCause(() => Effect.void));
       yield* FiberSet.run(fibers, reclamation, { startImmediately: true });
       if (fibers.state._tag === "Closed") {
         // FiberSet.run returns an interrupted sentinel when closure wins admission.
@@ -1112,39 +1071,41 @@ export function createChildSessionsLayer(
         if (session) yield* runReclamation(session);
       });
 
-      const shutdown = Effect.fn("ChildSessions.shutdown")(function* () {
-        const closed = yield* SynchronizedRef.modifyEffect(serviceState, (state) => {
-          if (state._tag === "Closed") return Effect.succeed([undefined, state] as const);
-          const error = new WorkerSessionAcquisitionClosedError({
-            message: "Child sessions are shutting down",
+      const shutdown = Effect.fn("ChildSessions.shutdown")(() =>
+        Effect.gen(function* () {
+          const closed = yield* SynchronizedRef.modifyEffect(serviceState, (state) => {
+            if (state._tag === "Closed") return Effect.succeed([undefined, state] as const);
+            const error = new WorkerSessionAcquisitionClosedError({
+              message: "Child sessions are shutting down",
+            });
+            return Effect.gen(function* () {
+              const sessions: WorkerSessionHandle[] = [];
+              for (const handoff of state.handoffs) {
+                const session = yield* SynchronizedRef.modifyEffect(handoff.state, (handoffState) => {
+                  if (handoffState._tag === "Pending") {
+                    return Deferred.fail(handoff.result, error).pipe(
+                      Effect.as([undefined, { _tag: "Abandoned", error }] as const),
+                    );
+                  }
+                  if (handoffState._tag === "Offered") {
+                    return Effect.succeed([
+                      handoffState.session,
+                      { _tag: "Abandoned", error },
+                    ] as const);
+                  }
+                  // Failed already settled its Deferred. Adopting is an ownership
+                  // reservation whose synchronous winner must be allowed to commit.
+                  return Effect.succeed([undefined, handoffState] as const);
+                });
+                if (session) sessions.push(session);
+              }
+              return [{ sessions }, { _tag: "Closed", error }] as const;
+            });
           });
-          return Effect.gen(function* () {
-            const sessions: WorkerSessionHandle[] = [];
-            for (const handoff of state.handoffs) {
-              const session = yield* SynchronizedRef.modifyEffect(handoff.state, (handoffState) => {
-                if (handoffState._tag === "Pending") {
-                  return Deferred.fail(handoff.result, error).pipe(
-                    Effect.as([undefined, { _tag: "Abandoned", error }] as const),
-                  );
-                }
-                if (handoffState._tag === "Offered") {
-                  return Effect.succeed([
-                    handoffState.session,
-                    { _tag: "Abandoned", error },
-                  ] as const);
-                }
-                // Failed already settled its Deferred. Adopting is an ownership
-                // reservation whose synchronous winner must be allowed to commit.
-                return Effect.succeed([undefined, handoffState] as const);
-              });
-              if (session) sessions.push(session);
-            }
-            return [{ sessions }, { _tag: "Closed", error }] as const;
-          });
-        });
-        if (!closed) return;
-        for (const session of closed.sessions) yield* runReclamation(session);
-      });
+          if (!closed) return;
+          for (const session of closed.sessions) yield* runReclamation(session);
+        }).pipe(Effect.uninterruptible)
+      );
 
       yield* Effect.addFinalizer(() => shutdown());
 
@@ -1194,9 +1155,11 @@ export function createChildSessionsLayer(
           );
           yield* FiberSet.run(fibers, producer, { startImmediately: true });
 
-          const session = yield* restore(Deferred.await(handoff.result)).pipe(
-            Effect.onInterrupt(() => abandonHandoff(handoff)),
-          );
+          const session = yield* restore(
+            Deferred.await(handoff.result).pipe(
+              Effect.tap(() => dependencies.beforeAdoptionReservation()),
+            ),
+          ).pipe(Effect.onInterrupt(() => abandonHandoff(handoff)));
           const reservation = yield* SynchronizedRef.modifyEffect(serviceState, (service) => {
             if (service._tag === "Closed") {
               return Effect.succeed([

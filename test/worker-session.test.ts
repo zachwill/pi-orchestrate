@@ -507,6 +507,48 @@ describe("child session acquisition handoff", () => {
     expect(h.session.dispose).toHaveBeenCalledTimes(1);
   });
 
+  test("interrupted shutdown transfers offered cleanup ownership before committing interruption", async () => {
+    const h = harness();
+    const reservationReached = new PromiseGate();
+    const releaseReservation = new PromiseGate();
+    const reclamationObserved = new PromiseGate();
+    const releaseReclamation = new PromiseGate();
+    h.dependencies.beforeAdoptionReservation = () => Effect.yieldNow.pipe(
+      Effect.andThen(Effect.promise(() => {
+        reservationReached.resolve(undefined);
+        return releaseReservation.promise;
+      })),
+    );
+    h.dependencies.onReclamationOpenObserved = mock(() => Effect.promise(() => {
+      reclamationObserved.resolve(undefined);
+      return releaseReclamation.promise;
+    }));
+    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
+    const sessions = effectRuntime.runSync(ChildSessions);
+    const acquisition = effectRuntime.runFork(
+      sessions.acquire(options(), (session) => session),
+    );
+    await reservationReached.promise;
+
+    const shutdownFiber = effectRuntime.runFork(sessions.shutdown());
+    await reclamationObserved.promise;
+    shutdownFiber.interruptUnsafe();
+    releaseReclamation.resolve(undefined);
+    expect((await effectRuntime.runPromise(Fiber.await(shutdownFiber)))._tag).toBe("Failure");
+    releaseReservation.resolve(undefined);
+    await expect(effectRuntime.runPromise(Fiber.join(acquisition))).rejects.toMatchObject({
+      _tag: "WorkerSession.AcquisitionClosedError",
+    });
+
+    await effectRuntime.runPromise(sessions.shutdown());
+    await effectRuntime.runPromise(sessions.shutdown());
+    await effectRuntime.dispose();
+
+    expect(h.dependencies.onReclamationOpenObserved).toHaveBeenCalledTimes(1);
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+    expect(h.loaderDispose).toHaveBeenCalledTimes(1);
+  });
+
   test("falls back when root closes between observing open and reclamation admission", async () => {
     const h = harness();
     const runtimeDispose = mock(async () => h.session.dispose());
@@ -518,7 +560,7 @@ describe("child session acquisition handoff", () => {
     let closeRoot: () => void = () => {
       throw new Error("Runtime root was not installed");
     };
-    h.dependencies.onReclamationOpenObserved = mock(() => closeRoot());
+    h.dependencies.onReclamationOpenObserved = mock(() => Effect.sync(() => closeRoot()));
     const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
     const sessions = effectRuntime.runSync(ChildSessions);
     closeRoot = () => {
