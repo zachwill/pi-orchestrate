@@ -1,5 +1,9 @@
 import { Cause, Effect, Exit, Layer, ManagedRuntime } from "effect";
-import { DeliveryCoordinator } from "./delivery.js";
+import {
+  Delivery,
+  deliveryLayer,
+  type DeliveryService,
+} from "./delivery.js";
 import {
   Orchestration,
   orchestrationLayer,
@@ -12,9 +16,7 @@ import {
   type RuntimeSnapshot,
   type SettlementListener,
   type UnsubscribeSettlement,
-  type StateListener,
 } from "./runtime.js";
-import { processSupervisorLayer } from "./scheduler.js";
 import { createChildSessionsLayer } from "./worker-session.js";
 import type { OrchestrateTaskInput, RunMode } from "./domain.js";
 
@@ -70,13 +72,16 @@ export interface OrchestratorRuntime {
   closeInteractive(ownerSessionId: string, workerId: string): Promise<void>;
   snapshot(ownerSessionId: string): Promise<RuntimeSnapshot>;
   subscribeSettlement(listener: SettlementListener): UnsubscribeSettlement;
-  subscribeState(listener: StateListener): () => void;
+  subscribeState(
+    ownerSessionId: string,
+    listener: (snapshot: RuntimeSnapshot) => void,
+  ): () => void;
   shutdown(): Promise<void>;
 }
 
 export interface ProcessHost {
   readonly runtime: OrchestratorRuntime;
-  readonly delivery: DeliveryCoordinator;
+  readonly delivery: DeliveryService;
 }
 
 export interface ProcessHostAttachment {
@@ -103,8 +108,7 @@ interface AttachmentAwareProcessHost extends ProcessHost {
 type ProcessHostLifecycle = "active" | "destroying" | "destroyed";
 
 interface OwnedProcessHost extends AttachmentAwareProcessHost {
-  readonly effectRuntime?: ManagedRuntime.ManagedRuntime<Orchestration, never>;
-  readonly unsubscribeSettlement?: () => void;
+  readonly effectRuntime?: ManagedRuntime.ManagedRuntime<Orchestration | Delivery, never>;
   lifecycle?: ProcessHostLifecycle;
   destroyPromise?: Promise<void>;
 }
@@ -224,8 +228,11 @@ export class ProcessHostRuntimeAdapter<R = never> implements OrchestratorRuntime
     return this.orchestration.subscribeSettlement(listener);
   }
 
-  subscribeState(listener: StateListener): () => void {
-    return this.orchestration.subscribeState(listener);
+  subscribeState(
+    ownerSessionId: string,
+    listener: (snapshot: RuntimeSnapshot) => void,
+  ): () => void {
+    return this.orchestration.subscribeState(ownerSessionId, listener);
   }
 
   shutdown(): Promise<void> {
@@ -259,6 +266,13 @@ export function createProcessHostRuntimeAdapter<R>(
   return new ProcessHostRuntimeAdapter(effectRuntime, orchestration);
 }
 
+export function createProcessApplicationLayer(): Layer.Layer<Orchestration | Delivery> {
+  const orchestration = orchestrationLayer().pipe(
+    Layer.provide(createChildSessionsLayer()),
+  );
+  return deliveryLayer.pipe(Layer.provideMerge(orchestration));
+}
+
 export function createProcessHost(): ProcessHost {
   const global = processGlobal();
   const existing = global[PROCESS_HOST_KEY];
@@ -272,23 +286,15 @@ export function createProcessHost(): ProcessHost {
     return existing;
   }
 
-  const infrastructureLayer = Layer.merge(
-    processSupervisorLayer,
-    createChildSessionsLayer(),
-  );
-  const rootLayer = orchestrationLayer().pipe(Layer.provide(infrastructureLayer));
-  const effectRuntime = ManagedRuntime.make(rootLayer);
+  const effectRuntime = ManagedRuntime.make(createProcessApplicationLayer());
   const runtime = createProcessHostRuntimeAdapter(effectRuntime);
-  const delivery = new DeliveryCoordinator();
+  const delivery = effectRuntime.runSync(Delivery);
   const host: OwnedProcessHost = {
     runtime,
     delivery,
     effectRuntime,
     attachments: new Set(),
     lifecycle: "active",
-    unsubscribeSettlement: runtime.subscribeSettlement((settlement) => {
-      delivery.accept(settlement);
-    }),
   };
   global[PROCESS_HOST_KEY] = host;
   return host;
@@ -366,8 +372,6 @@ export function destroyProcessHost(
         // After either deadline the host is logically destroyed and detached even
         // though abandoned physical finalizers may still settle. A replacement may
         // overlap only that cleanup; identity guards keep stale completion harmless.
-        ownedHost.delivery.clear();
-        ownedHost.unsubscribeSettlement?.();
         ownedHost.lifecycle = "destroyed";
         const global = processGlobal();
         if (global[PROCESS_HOST_KEY] === ownedHost) {

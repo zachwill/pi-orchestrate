@@ -41,8 +41,8 @@ function snapshot(workers: readonly WorkerRecord[]): RuntimeSnapshot {
 }
 function settlement(status: "completed" | "ready" | "failed" | "aborted" = "completed", text = "A useful worker response.") {
   return {
-    eventId: "event", sequence: 1, ownerSessionId: "owner", runId: "run", workerId: "worker-1", generation: 2,
-    mode: "async", worker: "scout", title: "Inspect code", lifecycle: status === "ready" ? "interactive" : "one-shot", status,
+    eventId: "event", sequence: 1, ownerSessionId: "owner", runId: "run-1", workerId: "worker-1", generation: 2,
+    mode: "async" as const, worker: "scout", title: "Inspect code", lifecycle: status === "ready" ? "interactive" : "one-shot", status,
     outcome: status === "completed" || status === "ready" ? { status, assistantText: text } : { status, message: text, assistantText: "Partial evidence." },
     usage, startedAt: 1000, settledAt: 6200, sessionFile: "/sessions/worker.jsonl",
   };
@@ -95,7 +95,7 @@ describe("per-worker result messages", () => {
     const text = `# Full response\n\n${"detail ".repeat(200)}TAIL`;
     const output = Bun.stripANSI(renderResult(settlement("completed", text), true, 50, "capped").join("\n"));
     expect(output).toContain("TAIL");
-    expect(output).toContain("worker ID worker-1 · run ID run");
+    expect(output).toContain("worker ID worker-1 · run ID run-1");
     expect(output).toContain("status completed · generation 2");
     expect(output).toContain("turns 2 · current context 12.3k");
     expect(output).toContain("session /sessions/worker.jsonl");
@@ -117,14 +117,16 @@ describe("per-worker result messages", () => {
     const long = "word ".repeat(1000);
     const collapsed = renderResult(settlement("completed", long), false, 32);
     expect(collapsed.length).toBeLessThanOrEqual(MAX_RESULT_PREVIEW_LINES + 7);
-    const malformed = Bun.stripANSI(renderResult({ bad: true }, false, 32, long).join("\n"));
+    const malformedDetails = JSON.parse(JSON.stringify({ bad: true }));
+    const malformed = Bun.stripANSI(renderResult(malformedDetails, false, 32, long).join("\n"));
     expect(malformed).toContain("Worker result");
     expect(malformed).toContain("to expand");
   });
 
   test("expanded malformed fallback never silently omits content", () => {
     const content = Array.from({ length: 150 }, (_, index) => `fallback line ${index}`).join("\n");
-    const output = Bun.stripANSI(renderResult({ bad: true }, true, 40, content).join("\n"));
+    const details = JSON.parse(JSON.stringify({ bad: true }));
+    const output = Bun.stripANSI(renderResult(details, true, 40, content).join("\n"));
     expect(output).toContain("fallback line 0");
     expect(output).toContain("fallback line 149");
   });
@@ -143,6 +145,70 @@ describe("per-worker result messages", () => {
       const output = Bun.stripANSI(renderResult(details, false, 80).join("\n"));
       expect(output).toContain("details unavailable");
       expect(output).not.toContain("✓ Inspect code · scout");
+    }
+  });
+
+  test("round-trips every persisted outcome and usage field through the canonical schema", () => {
+    const outcomes = [
+      { status: "completed", assistantText: "Complete." },
+      { status: "ready", assistantText: "Ready." },
+      { status: "failed", message: "Failed." },
+      { status: "aborted" },
+    ] as const;
+
+    for (const outcome of outcomes) {
+      const lifecycle: "interactive" | "one-shot" =
+        outcome.status === "ready" ? "interactive" : "one-shot";
+      const { sessionFile: _sessionFile, ...withoutSessionFile } = settlement(
+        outcome.status,
+      );
+      const input = {
+        ...withoutSessionFile,
+        lifecycle,
+        outcome,
+        usage,
+        ...(outcome.status === "failed"
+          ? {
+              synthesisGroupId: "synthesis-1",
+              synthesisGroupSize: 2,
+              failureStage: "workflow" as const,
+            }
+          : {}),
+      };
+      const decoded = decodePersistedWorkerSettlementDetails(input);
+      expect(Result.isSuccess(decoded)).toBe(true);
+      if (!Result.isSuccess(decoded)) throw new Error("Expected settlement to decode");
+      const encoded = Schema.encodeSync(WorkerSettlementDetails)(decoded.success);
+      const persisted = JSON.parse(JSON.stringify(encoded));
+      expect(persisted).toEqual(input);
+      expect(persisted).not.toHaveProperty("sessionFile");
+      if (outcome.status === "failed" || outcome.status === "aborted") {
+        expect(persisted.outcome).not.toHaveProperty("assistantText");
+      }
+      if (outcome.status === "aborted") {
+        expect(persisted.outcome).not.toHaveProperty("message");
+      }
+      const roundTrip = decodePersistedWorkerSettlementDetails(persisted);
+      expect(Result.isSuccess(roundTrip)).toBe(true);
+      if (Result.isSuccess(roundTrip)) expect(roundTrip.success).toEqual(decoded.success);
+    }
+  });
+
+  test("rejects every invalid persisted usage field and missing required field", () => {
+    for (const field of Object.keys(usage)) {
+      for (const invalid of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
+        expect(Result.isFailure(decodePersistedWorkerSettlementDetails({
+          ...settlement(),
+          usage: { ...usage, [field]: invalid },
+        }))).toBe(true);
+      }
+    }
+
+    for (const field of Object.keys(settlement())) {
+      if (field === "sessionFile") continue;
+      const missing = { ...settlement() };
+      Reflect.deleteProperty(missing, field);
+      expect(Result.isFailure(decodePersistedWorkerSettlementDetails(missing))).toBe(true);
     }
   });
 
@@ -387,47 +453,88 @@ describe("active widget", () => {
   });
 });
 
+type StateListener = (snapshot: RuntimeSnapshot) => void;
+
 class RuntimeHarness implements PresentationRuntime {
-  listeners = new Set<(owner: string) => void>();
-  value = snapshot([]);
-  snapshot(): Promise<RuntimeSnapshot> { return Promise.resolve(this.value); }
-  subscribeState(listener: (owner: string) => void): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
-  emit(): void { for (const listener of this.listeners) listener("owner"); }
+  listeners = new Map<string, Set<StateListener>>();
+  initialSnapshots = new Map<string, RuntimeSnapshot>();
+  subscribeCalls = 0;
+  unsubscribeCalls = 0;
+
+  subscribeState(ownerSessionId: string, listener: StateListener): () => void {
+    this.subscribeCalls += 1;
+    const listeners = this.listeners.get(ownerSessionId) ?? new Set<StateListener>();
+    listeners.add(listener);
+    this.listeners.set(ownerSessionId, listeners);
+    listener(this.initialSnapshots.get(ownerSessionId) ?? snapshot([]));
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      this.unsubscribeCalls += 1;
+      listeners.delete(listener);
+      if (listeners.size === 0) this.listeners.delete(ownerSessionId);
+    };
+  }
+
+  emit(value: RuntimeSnapshot, ownerSessionId = "owner"): void {
+    for (const listener of this.listeners.get(ownerSessionId) ?? []) listener(value);
+  }
+
+  listenerCount(): number {
+    return [...this.listeners.values()].reduce((total, listeners) => total + listeners.size, 0);
+  }
 }
 
-test("controller ignores stale owner and out-of-order same-owner snapshots", async () => {
-  let listeners = new Set<(owner: string) => void>();
-  const requests: Array<{ owner: string; resolve: (value: RuntimeSnapshot) => void }> = [];
-  const runtime: PresentationRuntime = {
-    snapshot(owner) { return new Promise((resolve) => requests.push({ owner, resolve })); },
-    subscribeState(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
-  };
+test("controller restores the synchronous initial owner snapshot and applies updates in order", () => {
+  const runtime = new RuntimeHarness();
   const statuses: unknown[] = [];
   const context = { mode: "non-interactive", ui: {
     setStatus(_key: string, value: unknown) { statuses.push(value); },
     setWidget() { throw new Error("non-TUI must not install widgets"); },
   } } as unknown as ExtensionContext;
+  runtime.initialSnapshots.set("new", snapshot([worker("retained", "ready")]));
   const controller = new StatusController(runtime);
-  controller.bind("old", context);
   controller.bind("new", context);
-  expect(listeners.size).toBe(1);
-  requests[0]!.resolve(snapshot([worker("stale", "ready")]));
-  await Promise.resolve(); await Promise.resolve();
-  expect(statuses).not.toContain("1 interactive ready");
-  requests[1]!.resolve(snapshot([]));
-  await Promise.resolve(); await Promise.resolve();
-  const listener = [...listeners][0]!;
-  listener("new"); listener("new");
-  requests[3]!.resolve(snapshot([worker("latest", "ready")]));
-  requests[2]!.resolve(snapshot([]));
-  await Promise.resolve(); await Promise.resolve();
+  expect(runtime.listenerCount()).toBe(1);
   expect(statuses.at(-1)).toBe("1 interactive ready");
+
+  runtime.emit(snapshot([worker("stale", "ready")]), "old");
+  runtime.emit(snapshot([]), "new");
+  runtime.emit(snapshot([worker("latest", "ready")]), "new");
+  runtime.emit(snapshot([]), "new");
+
+  expect(statuses.slice(-3)).toEqual([undefined, "1 interactive ready", undefined]);
   controller.dispose();
   controller.dispose();
-  expect(listeners.size).toBe(0);
+  expect(runtime.listenerCount()).toBe(0);
 });
 
-test("controller bind, unbind, and rebind subscriptions are isolated", async () => {
+test("controller rebind synchronously replaces an active widget with retained ready status", () => {
+  const runtime = new RuntimeHarness();
+  runtime.initialSnapshots.set("active-owner", snapshot([worker("active", "running")]));
+  runtime.initialSnapshots.set("ready-owner", snapshot([worker("ready", "ready")]));
+  const widgets: unknown[] = [];
+  const statuses: unknown[] = [];
+  const ctx = { mode: "tui", ui: {
+    setStatus(_key: string, value: unknown) { statuses.push(value); },
+    setWidget(_key: string, value: unknown) { widgets.push(value); },
+  } } as unknown as ExtensionContext;
+  const controller = new StatusController(runtime);
+
+  controller.bind("active-owner", ctx);
+  expect(typeof widgets.at(-1)).toBe("function");
+  controller.bind("ready-owner", ctx);
+
+  expect(runtime.listeners.has("active-owner")).toBe(false);
+  expect(runtime.listeners.has("ready-owner")).toBe(true);
+  expect(runtime.unsubscribeCalls).toBe(1);
+  expect(widgets.at(-1)).toBeUndefined();
+  expect(statuses.at(-1)).toBe("1 interactive ready");
+  controller.dispose();
+});
+
+test("controller bind, unbind, and rebind subscriptions are isolated", () => {
   const runtime = new RuntimeHarness();
   const statusValues: unknown[] = [];
   const ctx = { mode: "non-interactive", ui: {
@@ -436,23 +543,24 @@ test("controller bind, unbind, and rebind subscriptions are isolated", async () 
   } } as unknown as ExtensionContext;
   const controller = new StatusController(runtime);
   controller.bind("owner", ctx);
-  await Promise.resolve(); await Promise.resolve();
-  expect(runtime.listeners.size).toBe(1);
+  expect(runtime.listenerCount()).toBe(1);
   controller.unbind("different");
-  expect(runtime.listeners.size).toBe(1);
+  expect(runtime.listenerCount()).toBe(1);
   controller.unbind("owner");
-  expect(runtime.listeners.size).toBe(0);
+  expect(runtime.listenerCount()).toBe(0);
   controller.bind("owner", ctx);
-  expect(runtime.listeners.size).toBe(1);
+  expect(runtime.listenerCount()).toBe(1);
+  expect(runtime.subscribeCalls).toBe(2);
+  expect(runtime.unsubscribeCalls).toBe(1);
   controller.dispose();
   controller.dispose();
-  expect(runtime.listeners.size).toBe(0);
+  expect(runtime.listenerCount()).toBe(0);
+  expect(runtime.unsubscribeCalls).toBe(2);
   expect(statusValues.at(-1)).toBeUndefined();
 });
 
-test("lets Pi dispose installed widgets exactly once", async () => {
+test("lets Pi dispose installed widgets exactly once", () => {
   const runtime = new RuntimeHarness();
-  runtime.value = snapshot([worker("active", "running")]);
   let installed: Component | undefined;
   let disposals = 0;
   const ctx = { mode: "tui", ui: {
@@ -470,17 +578,14 @@ test("lets Pi dispose installed widgets exactly once", async () => {
   } } as unknown as ExtensionContext;
   const controller = new StatusController(runtime);
   controller.bind("owner", ctx);
-  await Promise.resolve(); await Promise.resolve();
-  runtime.value = snapshot([]);
-  runtime.emit();
-  await Promise.resolve(); await Promise.resolve();
+  runtime.emit(snapshot([worker("active", "running")]));
+  runtime.emit(snapshot([]));
   controller.dispose();
   expect(disposals).toBe(1);
 });
 
-test("controller updates one widget instance, removes terminal rows, and clears at zero", async () => {
+test("controller updates one widget instance, removes terminal rows, and clears at zero", () => {
   const runtime = new RuntimeHarness();
-  runtime.value = snapshot([worker("a", "running"), worker("b", "running")]);
   const widgets: unknown[] = [];
   const statuses: unknown[] = [];
   const ctx = { mode: "tui", ui: {
@@ -489,15 +594,13 @@ test("controller updates one widget instance, removes terminal rows, and clears 
   } } as unknown as ExtensionContext;
   const controller = new StatusController(runtime);
   controller.bind("owner", ctx);
-  await Promise.resolve(); await Promise.resolve();
+  runtime.emit(snapshot([worker("a", "running"), worker("b", "running")]));
   expect(widgets).toHaveLength(1);
   const component = (widgets[0] as (tui: unknown, theme: Theme) => Component)({ requestRender() {} }, theme);
-  runtime.value = snapshot([worker("a", "completed"), worker("b", "running")]);
-  runtime.emit(); await Promise.resolve(); await Promise.resolve();
+  runtime.emit(snapshot([worker("a", "completed"), worker("b", "running")]));
   expect(widgets).toHaveLength(1);
   expect(Bun.stripANSI(component.render(80).join("\n"))).not.toContain("Task a");
-  runtime.value = snapshot([worker("a", "completed"), worker("b", "ready")]);
-  runtime.emit(); await Promise.resolve(); await Promise.resolve();
+  runtime.emit(snapshot([worker("a", "completed"), worker("b", "ready")]));
   expect(widgets.at(-1)).toBeUndefined();
   expect(statuses.at(-1)).toBe("1 interactive ready");
   controller.dispose();

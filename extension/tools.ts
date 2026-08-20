@@ -20,8 +20,11 @@ import {
   keyHint,
   truncateHead,
 } from "@earendil-works/pi-coding-agent";
+import { Result, Schema } from "effect";
 import { Type } from "typebox";
 import {
+  MAX_WORKER_INSTRUCTIONS_LENGTH,
+  MAX_WORKER_TITLE_LENGTH,
   type CatalogDiagnostic,
   type RunRecord,
   type WorkerCatalog,
@@ -40,16 +43,42 @@ import type {
   SettlementListener,
 } from "./runtime.js";
 import type { OrchestratorRuntime } from "./host.js";
-import type { WorkerSettlement } from "./worker-settlement.js";
+import {
+  decodeInlineWorkerToolDetails,
+  encodeInlineWorkerToolDetails,
+  type InlineWorkerSettlementDetails,
+  WorkerSettlementDetails,
+  type WorkerSettlement,
+} from "./worker-settlement.js";
 
 const STRICT_OBJECT = { additionalProperties: false } as const;
+const WORKER_ID_OPTIONS = { pattern: "^worker-\\S+$" } as const;
 const MAX_INSTRUCTION_PREVIEW_LINES = 2;
+
+const AcceptedRunRenderDetails = Schema.Struct({
+  mode: Schema.Literal("async"),
+  run_id: WorkerSettlementDetails.fields.runId,
+  worker_id: WorkerSettlementDetails.fields.workerId,
+});
+const UnavailableWorkerRenderDetails = Schema.Union([
+  Schema.Struct({ result: Schema.Unknown }),
+  Schema.Struct({ worker_id: Schema.Unknown }),
+]);
+const decodeAcceptedRunRenderDetails = Schema.decodeUnknownResult(
+  AcceptedRunRenderDetails,
+);
+const decodeUnavailableWorkerRenderDetails = Schema.decodeUnknownResult(
+  UnavailableWorkerRenderDetails,
+);
 
 const taskSchema = Type.Object(
   {
-    worker: Type.String(),
-    title: Type.String(),
-    instructions: Type.String(),
+    worker: Type.String({ pattern: "\\S", maxLength: MAX_WORKER_TITLE_LENGTH }),
+    title: Type.String({ pattern: "\\S", maxLength: MAX_WORKER_TITLE_LENGTH }),
+    instructions: Type.String({
+      pattern: "\\S",
+      maxLength: MAX_WORKER_INSTRUCTIONS_LENGTH,
+    }),
   },
   STRICT_OBJECT,
 );
@@ -60,8 +89,11 @@ const statusSchema = Type.Object({}, STRICT_OBJECT);
 
 const interactiveSendSchema = Type.Object(
   {
-    worker_id: Type.String({ minLength: 1 }),
-    instructions: Type.String(),
+    worker_id: Type.String(WORKER_ID_OPTIONS),
+    instructions: Type.String({
+      pattern: "\\S",
+      maxLength: MAX_WORKER_INSTRUCTIONS_LENGTH,
+    }),
   },
   STRICT_OBJECT,
 );
@@ -69,7 +101,7 @@ const interactiveSendSchema = Type.Object(
 const workerAbortSchema = Type.Union([
   Type.Object(
     {
-      worker_ids: Type.Array(Type.String({ minLength: 1 }), { minItems: 1 }),
+      worker_ids: Type.Array(Type.String(WORKER_ID_OPTIONS), { minItems: 1 }),
     },
     STRICT_OBJECT,
   ),
@@ -83,7 +115,7 @@ const workerAbortSchema = Type.Union([
 
 const interactiveCloseSchema = Type.Object(
   {
-    worker_id: Type.String({ minLength: 1 }),
+    worker_id: Type.String(WORKER_ID_OPTIONS),
   },
   STRICT_OBJECT,
 );
@@ -368,10 +400,10 @@ function createInlineSettlementListener(
   return (settlement) => {
     onUpdate?.({
       content: [{ type: "text", text: "Worker response received." }],
-      details: {
+      details: encodeInlineWorkerToolDetails({
         mode: "inline",
-        result: inlineResultDetails(settlement),
-      },
+        result: inlineResultValue(settlement),
+      }),
     });
   };
 }
@@ -395,39 +427,29 @@ function acceptedRunDetails(run: AcceptedRun) {
 }
 
 function completedRunDetails(run: CompletedRun) {
-  return {
-    mode: run.mode,
-    run_id: run.id,
-    owner_session_id: run.ownerSessionId,
-    result: completedResultDetails(run.result),
-  };
+  return encodeInlineWorkerToolDetails({
+    mode: "inline",
+    runId: run.id,
+    ownerSessionId: run.ownerSessionId,
+    result: inlineResultValue(run.result),
+  });
 }
 
-function completedResultDetails(result: RunResult) {
+function inlineResultValue(
+  result: RunResult | WorkerSettlement,
+): InlineWorkerSettlementDetails {
   return {
-    worker_id: result.workerId,
+    workerId: result.workerId,
     worker: result.worker,
     title: result.title,
     status: result.status,
-    outcome: outcomeDetails(result.outcome),
-    usage: usageDetails(result.usage),
-    started_at: result.startedAt,
-    settled_at: result.settledAt,
-    session_file: result.sessionFile,
-  };
-}
-
-function inlineResultDetails(settlement: WorkerSettlement) {
-  return {
-    worker_id: settlement.workerId,
-    worker: settlement.worker,
-    title: settlement.title,
-    status: settlement.status,
-    outcome: outcomeDetails(settlement.outcome),
-    usage: usageDetails(settlement.usage),
-    started_at: settlement.startedAt,
-    settled_at: settlement.settledAt,
-    session_file: settlement.sessionFile,
+    outcome: result.outcome,
+    usage: result.usage,
+    startedAt: result.startedAt,
+    settledAt: result.settledAt,
+    ...(result.sessionFile === undefined
+      ? {}
+      : { sessionFile: result.sessionFile }),
   };
 }
 
@@ -671,7 +693,7 @@ function renderOrchestrationResult(
   lastComponent: unknown,
 ): Component {
   const details = result.details;
-  if (isRecord(details) && typeof details.run_id === "string" && typeof details.worker_id === "string" && details.mode === "async") {
+  if (Result.isSuccess(decodeAcceptedRunRenderDetails(details))) {
     return new WidthBoundComponent(new Text(theme.fg("success", "Sent to worker") + theme.fg("dim", " · response arrives when complete"), 0, 0));
   }
   const inlineResult = readInlineResult(details);
@@ -682,28 +704,28 @@ function renderOrchestrationResult(
     component.update(inlineResult, isPartial, expanded);
     return component;
   }
-  if (isRecord(details) && ("result" in details || "worker_id" in details)) {
+  if (Result.isSuccess(decodeUnavailableWorkerRenderDetails(details))) {
     return new WidthBoundComponent(new Text(theme.fg("warning", "Worker result details unavailable"), 0, 0));
   }
   if (isPartial) return new WidthBoundComponent(new Text(theme.fg("warning", "Sending work…"), 0, 0));
   return new WidthBoundComponent(renderSimpleResult(result, firstResultLine(result) || "Work sent", theme, "warning"));
 }
 
-interface InlineSettlement {
+interface RenderedInlineSettlement {
   worker: string;
   title: string;
-  status: "completed" | "ready" | "failed" | "aborted";
+  status: InlineWorkerSettlementDetails["status"];
   response: string;
   elapsed?: string;
 }
 
 class InlineResultComponent implements Component {
-  private result: InlineSettlement | undefined;
+  private result: RenderedInlineSettlement | undefined;
   private partial = false;
   private expanded = false;
   private child: Component = new Container();
   constructor(private readonly theme: Theme) {}
-  update(result: InlineSettlement, partial: boolean, expanded: boolean): void {
+  update(result: RenderedInlineSettlement, partial: boolean, expanded: boolean): void {
     this.result = result;
     this.partial = partial;
     this.expanded = expanded;
@@ -741,39 +763,28 @@ class InlineResultComponent implements Component {
   }
 }
 
-function readInlineResult(details: unknown): InlineSettlement | undefined {
-  if (!isRecord(details)) return undefined;
-  return readInlineSettlement(details.result);
-}
-
-function readInlineSettlement(value: unknown): InlineSettlement | undefined {
-  if (!isRecord(value) || typeof value.worker !== "string" || typeof value.title !== "string" || !isRecord(value.outcome)) return undefined;
-  const outcome = value.outcome;
-  const statuses = ["completed", "ready", "failed", "aborted"] as const;
-  const status = statuses.find((item) => item === value.status);
-  const outcomeStatus = statuses.find((item) => item === outcome.status);
-  if (!status || outcomeStatus !== status) return undefined;
-  const message = outcome.message;
-  const assistantText = outcome.assistant_text;
-  if (message !== undefined && typeof message !== "string") return undefined;
-  if (assistantText !== undefined && typeof assistantText !== "string") return undefined;
-  if ((status === "completed" || status === "ready") && typeof assistantText !== "string") return undefined;
-  if (status === "failed" && typeof message !== "string") return undefined;
-  const startedAt = value.started_at;
-  const settledAt = value.settled_at;
-  const elapsed = typeof startedAt === "number" && typeof settledAt === "number" && settledAt >= startedAt
-    ? formatElapsed(settledAt - startedAt)
+function readInlineResult(details: unknown): RenderedInlineSettlement | undefined {
+  const decoded = decodeInlineWorkerToolDetails(details);
+  if (Result.isFailure(decoded)) return undefined;
+  const settlement = decoded.success.result;
+  const outcome = settlement.outcome;
+  const message = outcome.status === "failed" || outcome.status === "aborted"
+    ? outcome.message
     : undefined;
+  const assistantText = outcome.assistantText;
+  const response = [message, assistantText]
+    .filter((item): item is string => typeof item === "string" && item.length > 0)
+    .join("\n\n");
   return {
-    worker: value.worker,
-    title: value.title,
-    status,
-    response: [message, assistantText].filter((item): item is string => typeof item === "string" && item.length > 0).join("\n\n"),
-    ...(elapsed ? { elapsed } : {}),
+    worker: settlement.worker,
+    title: settlement.title,
+    status: settlement.status,
+    response,
+    elapsed: formatElapsed(settlement.settledAt - settlement.startedAt),
   };
 }
 
-function inlineResultAppearance(status: InlineSettlement["status"]): {
+function inlineResultAppearance(status: RenderedInlineSettlement["status"]): {
   readonly color: "success" | "error" | "warning";
   readonly icon: "✓" | "✗" | "■";
   readonly qualifier?: string;

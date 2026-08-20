@@ -52,13 +52,12 @@ export function createOrchestrationExtension(
   dependencies: OrchestrationExtensionDependencies = {},
 ): ExtensionFactory {
   return (pi) => {
-    const host = dependencies.getHost?.() ?? createProcessHost();
     const discoverCatalog = dependencies.discoverCatalog ?? discoverWorkerCatalog;
-    const statusController =
-      dependencies.createStatusController?.(host.runtime) ??
-      createStatusController(host.runtime);
     const dispatchDecisions = new Map<string, StoredDispatchDecision>();
+    let host: ProcessHost | undefined;
     let hostAttachment: ProcessHostAttachment | undefined;
+    let statusController: StatusController | undefined;
+    let toolsRegistered = false;
     let activeBinding: OwnerBinding | undefined;
     let cachedCatalog: WorkerCatalog | undefined;
 
@@ -71,23 +70,31 @@ export function createOrchestrationExtension(
       return cachedCatalog;
     };
 
-    registerOrchestrationTools(pi, {
-      runtime: host.runtime,
-      getCatalog: catalogFor,
-      getDispatchDecision: (toolCallId) =>
-        dispatchDecisions.get(toolCallId) ?? { mode: "inline" },
-    });
     registerOrchestrationPresentation(pi);
 
     pi.on("session_start", (_event, ctx) => {
-      hostAttachment ??= attachProcessHost(host);
-      if (activeBinding) {
+      if (activeBinding && host && statusController) {
         host.delivery.unbind(
           activeBinding.ownerSessionId,
           activeBinding.generation,
         );
         statusController.unbind(activeBinding.ownerSessionId);
       }
+
+      host ??= dependencies.getHost?.() ?? createProcessHost();
+      statusController ??=
+        dependencies.createStatusController?.(host.runtime) ??
+        createStatusController(host.runtime);
+      if (!toolsRegistered) {
+        registerOrchestrationTools(pi, {
+          runtime: host.runtime,
+          getCatalog: catalogFor,
+          getDispatchDecision: (toolCallId) =>
+            dispatchDecisions.get(toolCallId) ?? { mode: "inline" },
+        });
+        toolsRegistered = true;
+      }
+      hostAttachment ??= attachProcessHost(host);
 
       dispatchDecisions.clear();
       cachedCatalog = undefined;
@@ -151,7 +158,7 @@ export function createOrchestrationExtension(
       const decision = dispatchDecisions.get(event.toolCallId);
       dispatchDecisions.delete(event.toolCallId);
       if (!event.isError || !decision?.synthesisGroup) return;
-      host.delivery.skipSynthesisGroupMember(
+      host?.delivery.skipSynthesisGroupMember(
         decision.ownerSessionId,
         decision.synthesisGroup.id,
         decision.synthesisGroup.size,
@@ -161,7 +168,7 @@ export function createOrchestrationExtension(
     pi.on("agent_start", () => {
       const binding = activeBinding;
       if (!binding) return;
-      host.delivery.markAgentStarted(
+      host?.delivery.markAgentStarted(
         binding.ownerSessionId,
         binding.generation,
       );
@@ -170,7 +177,7 @@ export function createOrchestrationExtension(
     pi.on("agent_settled", () => {
       const binding = activeBinding;
       if (!binding) return;
-      host.delivery.markAgentSettled(
+      host?.delivery.markAgentSettled(
         binding.ownerSessionId,
         binding.generation,
       );
@@ -182,17 +189,17 @@ export function createOrchestrationExtension(
       cachedCatalog = undefined;
       dispatchDecisions.clear();
 
-      if (binding) {
+      if (binding && host) {
         host.delivery.unbind(binding.ownerSessionId, binding.generation);
       }
-      statusController.dispose();
+      statusController?.dispose();
 
       const attachment = hostAttachment;
       hostAttachment = undefined;
-      const wasLastAttachment = attachment
+      const wasLastAttachment = host && attachment
         ? detachProcessHost(host, attachment)
         : false;
-      if (event.reason === "quit" && wasLastAttachment) {
+      if (event.reason === "quit" && wasLastAttachment && host) {
         await (dependencies.destroyHost ?? destroyProcessHost)(host);
       }
     });

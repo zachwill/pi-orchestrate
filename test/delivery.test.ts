@@ -1,9 +1,12 @@
 import { describe, expect, test } from "bun:test";
+import { Layer, ManagedRuntime } from "effect";
 import { createSequentialIdFactories, type WorkerOutcome } from "../extension/domain.ts";
 import {
   DELIVERY_PARENT_INSTRUCTIONS,
   DELIVERY_TRUNCATION_MARKER,
+  Delivery,
   DeliveryCoordinator,
+  deliveryLayer,
   MAX_DELIVERY_MARKDOWN_BYTES,
   MAX_WORKER_DELIVERY_MARKDOWN_BYTES,
   type ParentBinding,
@@ -11,6 +14,11 @@ import {
   type WorkerDeliveryMessage,
   type WorkerDeliveryOptions,
 } from "../extension/delivery.ts";
+import {
+  Orchestration,
+  type OrchestrationService,
+  type SettlementListener,
+} from "../extension/runtime.ts";
 import type { WorkerSettlement } from "../extension/worker-settlement.ts";
 
 const usage = {
@@ -82,6 +90,41 @@ function createBinding(
     failOnAttempt(attempt: number | undefined) { failedAttempt = attempt; },
   };
 }
+
+describe("Delivery Layer ownership", () => {
+  test("owns the settlement subscription and clears state after unsubscribing", async () => {
+    let listener: SettlementListener | undefined;
+    let unsubscribeCalls = 0;
+    let pendingAtUnsubscribe: number | undefined;
+    let delivery: DeliveryCoordinator | undefined;
+    const orchestration = {
+      subscribeSettlement(next: SettlementListener) {
+        listener = next;
+        return () => {
+          unsubscribeCalls += 1;
+          pendingAtUnsubscribe = delivery?.pendingCount("owner-a");
+          listener = undefined;
+        };
+      },
+    } as unknown as OrchestrationService;
+    const runtime = ManagedRuntime.make(
+      deliveryLayer.pipe(
+        Layer.provide(Layer.succeed(Orchestration, orchestration)),
+      ),
+    );
+    delivery = runtime.runSync(Delivery) as DeliveryCoordinator;
+
+    listener?.(settlement({ eventId: "layer-owned", sequence: 1 }));
+    expect(delivery.pendingCount("owner-a")).toBe(1);
+
+    await runtime.dispose();
+    await runtime.dispose();
+
+    expect(unsubscribeCalls).toBe(1);
+    expect(pendingAtUnsubscribe).toBe(1);
+    expect(delivery.pendingCount("owner-a")).toBe(0);
+  });
+});
 
 describe("DeliveryCoordinator worker settlements", () => {
   test("treats an ungrouped async settlement as final", () => {

@@ -27,7 +27,7 @@ Use this matrix when deciding where a scope or finalizer belongs. It describes o
 | Thing | Owner / product lifetime | Cancellation vs. close | Expected boundary |
 |---|---|---|---|
 | Process host | Pi process; survives extension reload attachment changes | Process shutdown closes host-held resources best-effort | Process-scoped host value; Promise lifecycle adapters |
-| Scheduler | One process-host/runtime-scoped scheduler shared across owner attachments; never one scheduler per owner attachment | Parent-turn cancellation affects that owner's inline operations; runtime shutdown settles admitted work across attachments | Process-scoped runtime boundary; internal Effect only where interruption/finalization adds value |
+| Runtime coordination | One process-host runtime coordination boundary shared across owner attachments; never one coordinator per owner attachment | Parent-turn cancellation affects that owner's inline operations; runtime shutdown settles admitted work across attachments | Runtime-owned FiberMap/FiberSet coordination for generations, cancellation, and cleanup |
 | Worker workflow | One admitted generation/wave result | Abort interrupts the active generation; settlement completes it | Scoped operation, surfaced as Promise to the tool |
 | Retained interactive session | Interactive worker identity across generations | `worker_abort` stops active work; `interactive_close` disposes the ready session | Explicit retained scope/close handle owned by runtime |
 | Prompt generation | One child creation or generation | Cancellation abandons generation; no independent durable resource | Plain value/effect computed under worker workflow |

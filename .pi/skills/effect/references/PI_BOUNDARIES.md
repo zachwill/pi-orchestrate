@@ -27,7 +27,7 @@ Effect interruption alone does not guarantee the rejection identity expected by 
 | Thing | Product owner and lifetime | Abort versus close | Boundary |
 |---|---|---|---|
 | Process host | Pi process; survives extension reload attachments | Process shutdown closes host-held resources best-effort | Process-scoped host value with Promise lifecycle adapters |
-| Scheduler | Process-host/runtime scheduler shared across owners | Parent-turn cancellation affects that owner's inline work; shutdown settles admitted work | Internal Effect only where interruption or finalization helps |
+| Runtime coordination | Process-host runtime coordination shared across owners | Parent-turn cancellation affects that owner's inline work; shutdown settles admitted work | Runtime-owned FiberMap/FiberSet coordination for generations, cancellation, and cleanup |
 | Worker workflow | One admitted generation or wave result | Abort interrupts active work; settlement completes it | Scoped operation surfaced as Promise to the tool |
 | Retained interactive session | Interactive worker identity across generations | `worker_abort` stops active work; `interactive_close` disposes the ready session | Explicit retained owner and close handle |
 | Prompt generation | One child creation or generation | Cancellation abandons the generation; no separate durable resource | Value or Effect under the worker workflow |

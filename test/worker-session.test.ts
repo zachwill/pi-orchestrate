@@ -123,12 +123,14 @@ class FakeSession {
   readonly bindExtensions = mock(async (_bindings: { mode: "print" }) => {});
 
   private readonly listeners = new Set<(event: AgentSessionEvent) => void>();
+  private readonly historicalListeners: Array<(event: AgentSessionEvent) => void> = [];
   readonly unsubscribe = mock(() => {});
 
   constructor(readonly sessionFile: string | undefined = "/sessions/child.jsonl") {}
 
   subscribe(listener: (event: AgentSessionEvent) => void): () => void {
     this.listeners.add(listener);
+    this.historicalListeners.push(listener);
     let active = true;
     return () => {
       if (!active) return;
@@ -169,6 +171,10 @@ class FakeSession {
       result: {},
       isError: false,
     });
+  }
+
+  replayToHistoricalListeners(event: AgentSessionEvent): void {
+    for (const listener of this.historicalListeners) listener(event);
   }
 
   private emit(event: AgentSessionEvent): void {
@@ -485,11 +491,49 @@ describe("child session acquisition handoff", () => {
     await expect(effectRuntime.runPromise(Fiber.join(acquisition))).rejects.toMatchObject({
       _tag: "WorkerSession.AcquisitionClosedError",
     });
-    await effectRuntime.dispose();
     expect(h.session.dispose).toHaveBeenCalledTimes(0);
+
+    // The process scope still owns physical acquisition and reclamation, but
+    // service shutdown does not wait for the uncancellable Pi Promise.
+    const disposingRuntime = effectRuntime.dispose();
+    let runtimeDisposed = false;
+    void disposingRuntime.then(() => (runtimeDisposed = true));
+    await Promise.resolve();
+    expect(runtimeDisposed).toBe(false);
+
     release.resolve(undefined);
     await disposed.promise;
+    await disposingRuntime;
     expect(h.session.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  test("falls back when root closes between observing open and reclamation admission", async () => {
+    const h = harness();
+    const runtimeDispose = mock(async () => h.session.dispose());
+    h.dependencies.createRuntime = (input) => ({
+      session: input.session,
+      dispose: runtimeDispose,
+    });
+    let disposeRoot: Promise<void> | undefined;
+    let closeRoot: () => void = () => {
+      throw new Error("Runtime root was not installed");
+    };
+    h.dependencies.onReclamationOpenObserved = mock(() => closeRoot());
+    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
+    const sessions = effectRuntime.runSync(ChildSessions);
+    closeRoot = () => {
+      disposeRoot ??= effectRuntime.dispose();
+    };
+
+    await expect(effectRuntime.runPromise(
+      sessions.acquire(options(), () => undefined),
+    )).rejects.toThrow("All fibers interrupted without error");
+    await disposeRoot;
+
+    expect(h.dependencies.onReclamationOpenObserved).toHaveBeenCalledTimes(1);
+    expect(runtimeDispose).toHaveBeenCalledTimes(1);
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+    expect(h.loaderDispose).toHaveBeenCalledTimes(1);
   });
 
   test("late acquisition failure after interruption remains typed and unobserved by the abandoned caller", async () => {
@@ -546,6 +590,106 @@ describe("child session acquisition handoff", () => {
     await effectRuntime.dispose();
   });
 
+  test("interruption requested during rejected adoption cannot skip reclamation", async () => {
+    const h = harness();
+    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
+    const sessions = effectRuntime.runSync(ChildSessions);
+    let interruptAcquisition: () => void = () => {
+      throw new Error("Acquisition fiber was not installed");
+    };
+
+    const acquisition = effectRuntime.runFork(
+      sessions.acquire(options(), () => {
+        interruptAcquisition();
+        return undefined;
+      }),
+    );
+    interruptAcquisition = () => acquisition.interruptUnsafe();
+
+    expect((await effectRuntime.runPromise(Fiber.await(acquisition)))._tag).toBe("Failure");
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+    await effectRuntime.dispose();
+  });
+
+  test("interruption requested during throwing adoption cannot skip reclamation", async () => {
+    const h = harness();
+    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
+    const sessions = effectRuntime.runSync(ChildSessions);
+    let interruptAcquisition: () => void = () => {
+      throw new Error("Acquisition fiber was not installed");
+    };
+
+    const acquisition = effectRuntime.runFork(
+      sessions.acquire(options(), () => {
+        interruptAcquisition();
+        throw new Error("adopter failed");
+      }),
+    );
+    interruptAcquisition = () => acquisition.interruptUnsafe();
+
+    expect((await effectRuntime.runPromise(Fiber.await(acquisition)))._tag).toBe("Failure");
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+    await effectRuntime.dispose();
+  });
+
+  test("shutdown during rejecting adoption preserves undefined and reclaims exactly once", async () => {
+    const h = harness();
+    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
+    const sessions = effectRuntime.runSync(ChildSessions);
+
+    expect(await effectRuntime.runPromise(
+      sessions.acquire(options(), () => {
+        effectRuntime.runSync(sessions.shutdown());
+        return undefined;
+      }),
+    )).toBeUndefined();
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+    expect(h.loaderDispose).toHaveBeenCalledTimes(1);
+    await effectRuntime.dispose();
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  test("shutdown during throwing adoption preserves the defect and reclaims exactly once", async () => {
+    const h = harness();
+    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
+    const sessions = effectRuntime.runSync(ChildSessions);
+    const adopterFailure = new Error("adopter failed during shutdown");
+
+    await expect(effectRuntime.runPromise(
+      sessions.acquire(options(), () => {
+        effectRuntime.runSync(sessions.shutdown());
+        throw adopterFailure;
+      }),
+    )).rejects.toBe(adopterFailure);
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+    expect(h.loaderDispose).toHaveBeenCalledTimes(1);
+    await effectRuntime.dispose();
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  test("a typed producer failure settled before shutdown remains the acquisition result", async () => {
+    const h = harness();
+    const producerFailure = new Error("model failed before shutdown");
+    h.dependencies.createModelRuntime = async () => {
+      throw producerFailure;
+    };
+    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
+    const sessions = effectRuntime.runSync(ChildSessions);
+    const acquisition = effectRuntime.runFork(
+      sessions.acquire(options(), (session) => session),
+    );
+    const exit = await effectRuntime.runPromise(Fiber.await(acquisition));
+
+    await effectRuntime.runPromise(sessions.shutdown());
+    expect(exit._tag).toBe("Failure");
+    await expect(effectRuntime.runPromise(Fiber.join(acquisition))).rejects.toMatchObject({
+      _tag: "WorkerSession.ModelAcquisitionError",
+      operation: "create-model-runtime",
+      cause: producerFailure,
+    });
+    await effectRuntime.dispose();
+  });
+
   test("adopted sessions transfer out of the process handoff and survive service shutdown", async () => {
     const h = harness();
     const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
@@ -558,6 +702,64 @@ describe("child session acquisition handoff", () => {
     await effectRuntime.runPromise(sessions.shutdown());
     expect(h.session.dispose).toHaveBeenCalledTimes(0);
     await Effect.runPromise(handle.dispose());
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+    await effectRuntime.dispose();
+  });
+
+  test("serializes shutdown behind a synchronous adopter and transfers ownership atomically", async () => {
+    const h = harness();
+    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
+    const sessions = effectRuntime.runSync(ChildSessions);
+    let shutdownFiber: ReturnType<typeof effectRuntime.runFork> | undefined;
+
+    const handle = await effectRuntime.runPromise(
+      sessions.acquire(options(), (session) => {
+        shutdownFiber = effectRuntime.runFork(sessions.shutdown());
+        return session;
+      }),
+    );
+    if (!handle || !shutdownFiber) throw new Error("Expected atomic session adoption");
+    await effectRuntime.runPromise(Fiber.join(shutdownFiber));
+
+    expect(h.session.dispose).toHaveBeenCalledTimes(0);
+    await Effect.runPromise(handle.dispose());
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+    await effectRuntime.dispose();
+  });
+
+  test("allows synchronous adopter reentrancy into shutdown without stealing ownership", async () => {
+    const h = harness();
+    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
+    const sessions = effectRuntime.runSync(ChildSessions);
+
+    const handle = await effectRuntime.runPromise(
+      sessions.acquire(options(), (session) => {
+        effectRuntime.runSync(sessions.shutdown());
+        return session;
+      }),
+    );
+
+    if (!handle) throw new Error("Expected session adoption");
+    expect(h.session.dispose).toHaveBeenCalledTimes(0);
+    await Effect.runPromise(handle.dispose());
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+    await effectRuntime.dispose();
+  });
+
+  test("rejected adoption schedules one process-owned reclamation", async () => {
+    const h = harness();
+    const disposed = new PromiseGate();
+    h.session.dispose.mockImplementation(() => disposed.resolve(undefined));
+    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
+    const sessions = effectRuntime.runSync(ChildSessions);
+
+    expect(await effectRuntime.runPromise(
+      sessions.acquire(options(), () => undefined),
+    )).toBeUndefined();
+    await disposed.promise;
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+
+    await effectRuntime.runPromise(sessions.shutdown());
     expect(h.session.dispose).toHaveBeenCalledTimes(1);
     await effectRuntime.dispose();
   });
@@ -1480,6 +1682,27 @@ describe("worker session handle", () => {
     });
   });
 
+  test("captures fallback assistant at physical settlement before a later prompt starts", async () => {
+    const h = harness();
+    const firstPrompt = new PromiseGate();
+    h.session.prompt.mockImplementationOnce(() => firstPrompt.promise);
+    h.session.prompt.mockImplementationOnce(async () => {
+      h.session.finishTurn(assistant("second prompt"));
+    });
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(
+      options({ definition: definition({ lifecycle: "interactive" }) }),
+    );
+
+    const first = Effect.runPromise(handle.prompt("first"));
+    firstPrompt.resolve(undefined);
+    await firstPrompt.promise;
+    await Promise.resolve();
+    const second = Effect.runPromise(handle.prompt("second"));
+
+    expect(await first).toEqual({ status: "ready", assistantText: "" });
+    expect(await second).toEqual({ status: "ready", assistantText: "second prompt\nsecond block" });
+  });
+
   test("tracks turn count and the latest message direction as messages cross the model boundary", async () => {
     const h = harness();
     const first = assistant("one");
@@ -1492,22 +1715,29 @@ describe("worker session handle", () => {
       h.session.finishTurn(second);
     });
     const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
-    const turns: number[] = [];
-    const directions: string[] = [];
-    handle.subscribeUsage((current) => turns.push(current.turns));
-    handle.subscribeMessageDirection((direction) => directions.push(direction));
+    const observations: Array<{ turns: number; direction: string | undefined }> = [];
+    handle.subscribeObservation((current) => observations.push({
+      turns: current.usage.turns,
+      direction: current.messageDirection,
+    }));
 
     await Effect.runPromise(handle.prompt("task"));
 
-    expect(turns).toEqual([1, 2]);
-    expect(directions).toEqual(["to-model", "from-model", "to-model", "from-model"]);
+    expect(observations).toEqual([
+      { turns: 0, direction: "to-model" },
+      { turns: 0, direction: "from-model" },
+      { turns: 1, direction: "from-model" },
+      { turns: 1, direction: "to-model" },
+      { turns: 1, direction: "from-model" },
+      { turns: 2, direction: "from-model" },
+    ]);
   });
 
   test("accumulates turn usage and removes usage subscriptions", async () => {
     const h = harness();
     const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
     const updates: unknown[] = [];
-    const unsubscribe = handle.subscribeUsage((usage) => updates.push(usage));
+    const unsubscribe = handle.subscribeObservation((observation) => updates.push(observation.usage));
 
     h.session.finishTurn(
       assistant("one", "stop", {
@@ -1557,36 +1787,34 @@ describe("worker session handle", () => {
     expect(updates).toHaveLength(2);
   });
 
-  test("isolates throwing usage and activity listeners", async () => {
+  test("isolates throwing observation listeners and emits immutable snapshots", async () => {
     const h = harness();
     const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
-    const usageUpdates: number[] = [];
-    const activityUpdates: Array<string | undefined> = [];
+    const updates: Array<{ turns: number; activity: string | undefined }> = [];
 
-    handle.subscribeUsage(() => {
-      throw new Error("usage listener failed");
+    handle.subscribeObservation(() => {
+      throw new Error("observation listener failed");
     });
-    handle.subscribeUsage((usage) => usageUpdates.push(usage.turns));
-    handle.subscribeActivity(() => {
-      throw new Error("activity listener failed");
-    });
-    handle.subscribeActivity((activity) => activityUpdates.push(activity));
-    handle.subscribeMessageDirection(() => {
-      throw new Error("message direction listener failed");
+    handle.subscribeObservation((observation) => {
+      expect(Object.isFrozen(observation)).toBe(true);
+      expect(Object.isFrozen(observation.usage)).toBe(true);
+      updates.push({ turns: observation.usage.turns, activity: observation.activity });
     });
 
     h.session.finishTurn(assistant("one"));
     h.session.startTool("call-1", "read");
 
-    expect(usageUpdates).toEqual([1]);
-    expect(activityUpdates).toEqual(["read"]);
+    expect(updates).toEqual([
+      { turns: 1, activity: undefined },
+      { turns: 1, activity: "read" },
+    ]);
   });
 
   test("tracks overlapping tools in start order and falls back to the latest active tool", async () => {
     const h = harness();
     const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
     const updates: Array<string | undefined> = [];
-    const unsubscribe = handle.subscribeActivity((activity) => updates.push(activity));
+    const unsubscribe = handle.subscribeObservation((observation) => updates.push(observation.activity));
 
     h.session.startTool("call-1", "read");
     h.session.startTool("call-2", "grep");
@@ -1610,7 +1838,7 @@ describe("worker session handle", () => {
     const h = harness();
     const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
     const updates: Array<string | undefined> = [];
-    handle.subscribeActivity((activity) => updates.push(activity));
+    handle.subscribeObservation((observation) => updates.push(observation.activity));
 
     h.session.startTool("read-1", "read");
     h.session.startTool("read-2", "read");
@@ -1629,6 +1857,27 @@ describe("worker session handle", () => {
     expect(h.session.unsubscribe).toHaveBeenCalledTimes(1);
     expect(h.session.dispose).toHaveBeenCalledTimes(1);
     expect(h.loaderDispose).toHaveBeenCalledTimes(1);
+  });
+
+  test("treats subscriptions and historical raw events after disposal as no-ops", async () => {
+    const h = harness();
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
+    await Effect.runPromise(handle.dispose());
+    const listener = mock(() => {});
+
+    const unsubscribe = handle.subscribeObservation(listener);
+    h.session.replayToHistoricalListeners({
+      type: "tool_execution_start",
+      toolCallId: "late-call",
+      toolName: "read",
+      args: {},
+    });
+    h.session.finishTurn(assistant("after dispose"));
+    unsubscribe();
+    unsubscribe();
+
+    expect(listener).toHaveBeenCalledTimes(0);
+    expect(h.session.unsubscribe).toHaveBeenCalledTimes(1);
   });
 
   test("runs finalizers in subscription, runtime, loader order", async () => {

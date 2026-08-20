@@ -1,3 +1,5 @@
+import { Context, Effect, Layer } from "effect";
+import { Orchestration } from "./runtime.js";
 import type { WorkerSettlement } from "./worker-settlement.js";
 
 export const MAX_DELIVERY_MARKDOWN_BYTES = 50 * 1024;
@@ -40,7 +42,26 @@ interface SynthesisGroupState {
   readonly acceptedEventIds: string[];
 }
 
-export class DeliveryCoordinator {
+export interface DeliveryService {
+  bind(binding: ParentBinding): void;
+  unbind(ownerSessionId: string, generation: ParentBindingGeneration): void;
+  markAgentStarted(ownerSessionId: string, generation: ParentBindingGeneration): void;
+  markAgentSettled(ownerSessionId: string, generation: ParentBindingGeneration): void;
+  accept(settlement: WorkerSettlement): boolean;
+  skipSynthesisGroupMember(
+    ownerSessionId: string,
+    synthesisGroupId: string,
+    synthesisGroupSize: number,
+  ): void;
+  pendingCount(ownerSessionId: string): number;
+  clear(): void;
+}
+
+export class Delivery extends Context.Service<Delivery, DeliveryService>()(
+  "@zachwill/pi-orchestrate/Delivery",
+) {}
+
+export class DeliveryCoordinator implements DeliveryService {
   private readonly boundParents = new Map<string, BoundParent>();
   private readonly pendingSettlements: WorkerSettlement[] = [];
   private readonly flushingOwners = new Set<string>();
@@ -256,6 +277,26 @@ export class DeliveryCoordinator {
     this.finalSynthesisGroupEventIds.delete(settlement.eventId);
   }
 }
+
+/** Process-scoped direct delivery state and its Orchestration settlement subscription. */
+export const deliveryLayer: Layer.Layer<Delivery, never, Orchestration> = Layer.effect(
+  Delivery,
+  Effect.gen(function* () {
+    const orchestration = yield* Orchestration;
+    const coordinator = new DeliveryCoordinator();
+
+    // Registered first so subscription release runs before delivery state is cleared.
+    yield* Effect.addFinalizer(() => Effect.sync(() => coordinator.clear()));
+    yield* Effect.acquireRelease(
+      Effect.sync(() => orchestration.subscribeSettlement((settlement) => {
+        coordinator.accept(settlement);
+      })),
+      (unsubscribe) => Effect.sync(unsubscribe),
+    );
+
+    return Delivery.of(coordinator);
+  }),
+);
 
 function synthesisGroupKey(ownerSessionId: string, synthesisGroupId: string): string {
   return `${ownerSessionId}\u0000${synthesisGroupId}`;

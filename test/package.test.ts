@@ -7,6 +7,20 @@ const root = join(import.meta.dir, "..");
 const manifestPath = join(root, "package.json");
 const readmePath = join(root, "README.md");
 const skillsPath = join(root, "skills");
+const extensionDirectory = join(root, "extension");
+const extensionModules = [
+  "catalog.ts",
+  "contract.ts",
+  "delivery.ts",
+  "domain.ts",
+  "host.ts",
+  "index.ts",
+  "presentation.ts",
+  "runtime.ts",
+  "tools.ts",
+  "worker-session.ts",
+  "worker-settlement.ts",
+] as const;
 const workerDirectory = join(root, "examples", "workers");
 const workerNames = ["investigator", "scout", "web", "worker"] as const;
 const workerPaths = workerNames.map((name) => join(workerDirectory, `${name}.md`));
@@ -127,6 +141,13 @@ describe("published package resources", () => {
       expect(manifest.devDependencies[packageName]).toBe("0.80.10");
     }
     expect(manifest.peerDependencies.typebox).toBe("*");
+  });
+
+  test("ships the exact current extension module inventory without the deleted scheduler", async () => {
+    const shippedModules = (await readdir(extensionDirectory)).sort();
+
+    expect(shippedModules).toEqual([...extensionModules].sort());
+    expect(shippedModules).not.toContain("scheduler.ts");
   });
 
   test("includes exactly four fallback worker definitions", async () => {

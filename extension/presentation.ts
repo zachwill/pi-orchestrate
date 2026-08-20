@@ -17,7 +17,6 @@ import {
 import { Result } from "effect";
 import type { WorkerDeliveryDetails } from "./delivery.js";
 import type { WorkerOutcome, WorkerRecord, WorkerStatus } from "./domain.js";
-import type { OrchestratorRuntime } from "./host.js";
 import type { RuntimeSnapshot } from "./runtime.js";
 import {
   decodePersistedWorkerSettlementDetails,
@@ -46,7 +45,12 @@ const ANIMATION_CYCLE_TICKS = 40;
 const SPINNER_INTERVAL_MS = 140;
 const ACTIVE_STATUSES: ReadonlySet<WorkerStatus> = new Set(["starting", "running", "stopping"]);
 
-export type PresentationRuntime = Pick<OrchestratorRuntime, "snapshot" | "subscribeState">;
+export interface PresentationRuntime {
+  subscribeState(
+    ownerSessionId: string,
+    listener: (snapshot: RuntimeSnapshot) => void,
+  ): () => void;
+}
 
 type DecodedSettlement = WorkerSettlementDetails;
 
@@ -72,8 +76,6 @@ export function formatFooterStatus(snapshot: RuntimeSnapshot): string | undefine
 
 export class StatusController {
   private binding: StatusBinding | undefined;
-  private bindingGeneration = 0;
-  private refreshGeneration = 0;
   private disposed = false;
   private unsubscribeState: (() => void) | undefined;
   private widget: WorkerStatusComponent | undefined;
@@ -85,38 +87,23 @@ export class StatusController {
   bind(ownerSessionId: string, ctx: ExtensionContext): void {
     if (this.disposed) return;
     this.clearBinding();
-    this.bindingGeneration += 1;
-    this.binding = { ownerSessionId, ctx };
-    this.unsubscribeState = this.runtime.subscribeState((changedOwner) => {
-      if (changedOwner === this.binding?.ownerSessionId) void this.refresh();
+    const binding = { ownerSessionId, ctx };
+    this.binding = binding;
+    this.unsubscribeState = this.runtime.subscribeState(ownerSessionId, (snapshot) => {
+      if (this.binding !== binding) return;
+      this.present(binding.ctx, snapshot);
     });
-    void this.refresh();
   }
 
   unbind(ownerSessionId?: string): void {
     if (ownerSessionId !== undefined && ownerSessionId !== this.binding?.ownerSessionId) return;
     this.clearBinding();
-    this.bindingGeneration += 1;
-    this.refreshGeneration += 1;
-  }
-
-  async refresh(): Promise<void> {
-    const binding = this.binding;
-    if (!binding || this.disposed) return;
-    const bindingGeneration = this.bindingGeneration;
-    const refreshGeneration = ++this.refreshGeneration;
-    let snapshot: RuntimeSnapshot;
-    try { snapshot = await this.runtime.snapshot(binding.ownerSessionId); } catch { return; }
-    if (this.disposed || this.binding !== binding || this.bindingGeneration !== bindingGeneration || this.refreshGeneration !== refreshGeneration) return;
-    this.present(binding.ctx, snapshot);
   }
 
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
     this.clearBinding();
-    this.bindingGeneration += 1;
-    this.refreshGeneration += 1;
   }
 
   private present(ctx: ExtensionContext, snapshot: RuntimeSnapshot): void {
@@ -143,8 +130,9 @@ export class StatusController {
   }
 
   private clearBinding(): void {
-    this.unsubscribeState?.();
+    const unsubscribeState = this.unsubscribeState;
     this.unsubscribeState = undefined;
+    unsubscribeState?.();
     this.widget = undefined;
     this.pendingSnapshot = undefined;
     const current = this.binding;

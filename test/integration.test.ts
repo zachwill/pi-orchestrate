@@ -87,7 +87,8 @@ class FakeRuntime {
     mode: string;
   }> = [];
   readonly interactiveSendCalls: Array<{ context: OrchestrationContext; mode: string }> = [];
-  readonly stateListeners = new Set<(ownerSessionId: string) => void>();
+  readonly stateListeners = new Map<string, Set<(snapshot: RuntimeSnapshot) => void>>();
+  readonly snapshots = new Map<string, RuntimeSnapshot>();
   readonly snapshotOwners: string[] = [];
   shutdownCalls = 0;
   unsubscribeStateCalls = 0;
@@ -130,13 +131,20 @@ class FakeRuntime {
     return { runs: [], workers: [] };
   }
 
-  subscribeState(listener: (ownerSessionId: string) => void): () => void {
-    this.stateListeners.add(listener);
+  subscribeState(
+    ownerSessionId: string,
+    listener: (snapshot: RuntimeSnapshot) => void,
+  ): () => void {
+    const listeners = this.stateListeners.get(ownerSessionId) ?? new Set();
+    listeners.add(listener);
+    this.stateListeners.set(ownerSessionId, listeners);
+    listener(this.snapshots.get(ownerSessionId) ?? { runs: [], workers: [] });
     let active = true;
     return () => {
       if (!active) return;
       active = false;
-      this.stateListeners.delete(listener);
+      listeners.delete(listener);
+      if (listeners.size === 0) this.stateListeners.delete(ownerSessionId);
       this.unsubscribeStateCalls += 1;
     };
   }
@@ -171,6 +179,8 @@ function inlineCompletedRun(ownerSessionId: string) {
       status: settlement.status,
       outcome: settlement.outcome,
       usage: settlement.usage,
+      startedAt: settlement.startedAt,
+      settledAt: settlement.settledAt,
       sessionFile: settlement.sessionFile,
     },
   };
@@ -302,16 +312,97 @@ const orchestrationParams = {
 };
 
 describe("Pi Orchestrate extension integration", () => {
-  test("registers exactly five public tools without subscribing before session start", () => {
+  test("a factory that never starts a session acquires no lifecycle resources", async () => {
+    const pi = new FakePi();
+    const shared = fakeHost();
+    let getHostCalls = 0;
+    let createControllerCalls = 0;
+    let destroyCalls = 0;
+    createOrchestrationExtension({
+      getHost() {
+        getHostCalls += 1;
+        return shared.host;
+      },
+      createStatusController() {
+        createControllerCalls += 1;
+        throw new Error("status controller must not be created");
+      },
+      async destroyHost() {
+        destroyCalls += 1;
+      },
+    })(pi as unknown as ExtensionAPI);
+    const { ctx } = createContext();
+
+    expect(pi.renderers).toEqual(["pi-orchestrate-worker-result"]);
+    expect(pi.tools).toEqual([]);
+    await pi.emit("session_shutdown", { reason: "quit" }, ctx);
+
+    expect(getHostCalls).toBe(0);
+    expect(createControllerCalls).toBe(0);
+    expect(destroyCalls).toBe(0);
+  });
+
+  test("registers exactly five public tools on session start", async () => {
     const pi = new FakePi();
     const shared = fakeHost();
     install(pi, shared.host);
+    const { ctx } = createContext();
+
+    expect(pi.tools).toEqual([]);
+    expect(pi.renderers).toEqual(["pi-orchestrate-worker-result"]);
+    expect(shared.runtime.stateListeners.size).toBe(0);
+
+    await pi.emit("session_start", { reason: "startup" }, ctx);
 
     expect(pi.tools.map((tool) => tool.name)).toEqual([...TOOL_NAMES]);
-    expect(pi.renderers).toEqual(["pi-orchestrate-worker-result"]);
     expect(pi.tools.map((tool) => tool.name)).not.toContain("orchestration_status");
     expect(pi.tools.map((tool) => tool.name)).not.toContain("worker_respond");
-    expect(shared.runtime.stateListeners.size).toBe(0);
+    expect(shared.runtime.stateListeners.size).toBe(1);
+  });
+
+  test("rebinds repeated session starts without duplicating tools or subscriptions", async () => {
+    const pi = new FakePi();
+    const { host, runtime } = fakeHost();
+    install(pi, host);
+    const first = createContext("owner-first");
+    const second = createContext("owner-second");
+
+    await pi.emit("session_start", { reason: "startup" }, first.ctx);
+    await pi.emit("session_start", { reason: "resume" }, second.ctx);
+
+    expect(pi.tools.map((tool) => tool.name)).toEqual([...TOOL_NAMES]);
+    expect(runtime.unsubscribeStateCalls).toBe(1);
+    expect(runtime.stateListeners.has("owner-first")).toBe(false);
+    expect(runtime.stateListeners.has("owner-second")).toBe(true);
+    expect(host.delivery.accept(workerSettlement("owner-first"))).toBe(true);
+    expect(host.delivery.accept(workerSettlement("owner-second", { sequence: 2 }))).toBe(true);
+    expect(pi.sent).toHaveLength(1);
+    expect(pi.sent[0]).toMatchObject({
+      message: { details: { ownerSessionId: "owner-second" } },
+    });
+  });
+
+  test("repeated session shutdown detaches, disposes, and destroys a started session once", async () => {
+    const pi = new FakePi();
+    const { host, runtime } = fakeHost();
+    let destroyCalls = 0;
+    install(pi, host, {
+      async destroyHost(destroyedHost) {
+        expect(destroyedHost).toBe(host);
+        destroyCalls += 1;
+        await destroyedHost.runtime.shutdown();
+      },
+    });
+    const { ctx } = createContext("owner-shutdown");
+
+    await pi.emit("session_start", { reason: "startup" }, ctx);
+    await pi.emit("session_shutdown", { reason: "quit" }, ctx);
+    await pi.emit("session_shutdown", { reason: "quit" }, ctx);
+
+    expect(runtime.unsubscribeStateCalls).toBe(1);
+    expect(runtime.stateListeners.size).toBe(0);
+    expect(destroyCalls).toBe(1);
+    expect(runtime.shutdownCalls).toBe(1);
   });
 
   test("discovers the trusted parent catalog before each run, appends the contract, and reuses that exact catalog in tools", async () => {

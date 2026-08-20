@@ -1,8 +1,15 @@
 import { describe, expect, test } from "bun:test";
+import { Schema } from "effect";
 import {
   EMPTY_WORKER_USAGE,
+  OrchestrateTaskInput,
+  RunId,
   InvalidTransitionError,
   SUPPORTED_TOOL_NAMES,
+  WorkerId,
+  WorkerOutcome,
+  WorkerResponseOutcome,
+  WorkerUsage,
   canTransitionWorkerStatus,
   createRandomIdFactories,
   createSequentialIdFactories,
@@ -11,9 +18,7 @@ import {
   isSupportedToolName,
   isTerminalWorkerStatus,
   transitionWorkerStatus,
-  type RunId,
   type WorkerDefinition,
-  type WorkerId,
   type WorkerLifecycle,
   type WorkerRecord,
   type WorkerStatus,
@@ -66,6 +71,60 @@ describe("supported tools and worker catalog", () => {
     expect(input.map((worker) => worker.name)).toEqual(["worker", "investigator", "scout"]);
     expect(findWorkerByName(catalog, "scout")?.description).toBe("scout worker");
     expect(findWorkerByName(catalog, "missing")).toBeUndefined();
+  });
+});
+
+describe("validated orchestration ingress", () => {
+  test("Effect Schema decodes task input and brands operational IDs", () => {
+    expect(Schema.decodeUnknownSync(OrchestrateTaskInput)({
+      worker: "scout",
+      title: "Inspect",
+      instructions: "Read the implementation.",
+    })).toEqual({
+      worker: "scout",
+      title: "Inspect",
+      instructions: "Read the implementation.",
+    });
+    expect(String(Schema.decodeUnknownSync(WorkerId)("worker-1"))).toBe("worker-1");
+    expect(String(Schema.decodeUnknownSync(RunId)("run-1"))).toBe("run-1");
+    expect(() => Schema.decodeUnknownSync(OrchestrateTaskInput)({
+      worker: "scout",
+      title: "Inspect",
+    })).toThrow();
+    expect(() => Schema.decodeUnknownSync(OrchestrateTaskInput)({
+      worker: "   ",
+      title: "Inspect",
+      instructions: "Read the implementation.",
+    })).toThrow();
+    expect(() => Schema.decodeUnknownSync(WorkerId)("run-1")).toThrow();
+    expect(() => Schema.decodeUnknownSync(WorkerId)("worker- ")).toThrow();
+    expect(() => Schema.decodeUnknownSync(RunId)("worker-1")).toThrow();
+    expect(() => Schema.decodeUnknownSync(RunId)("run- ")).toThrow();
+  });
+});
+
+describe("canonical worker result schemas", () => {
+  test("round-trips usage and keeps closure out of response outcomes", () => {
+    const usage = {
+      input: 1,
+      output: 2,
+      cacheRead: 3,
+      cacheWrite: 4,
+      cost: 0.5,
+      contextTokens: 6,
+      turns: 7,
+    };
+    const persisted = JSON.parse(JSON.stringify(
+      Schema.encodeSync(WorkerUsage)(usage),
+    ));
+    expect(Schema.decodeUnknownSync(WorkerUsage)(persisted)).toEqual(usage);
+
+    expect(Schema.decodeUnknownSync(WorkerOutcome)({ status: "closed" })).toEqual({
+      status: "closed",
+    });
+    expect(() => Schema.decodeUnknownSync(WorkerResponseOutcome)({
+      status: "closed",
+    })).toThrow();
   });
 });
 

@@ -1,9 +1,21 @@
 import { describe, expect, test } from "bun:test";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { Deferred, Effect, Layer, ManagedRuntime } from "effect";
-import { DeliveryCoordinator } from "../extension/delivery.js";
-import { createWorkerCatalog, createSequentialWorkerIdFactory, type OrchestrateTaskInput, type RunMode } from "../extension/domain.js";
+import { Effect, Layer, ManagedRuntime } from "effect";
 import {
+  Delivery,
+  DeliveryCoordinator,
+  deliveryLayer,
+} from "../extension/delivery.js";
+import {
+  createSequentialRunIdFactory,
+  createSequentialWorkerIdFactory,
+  createWorkerCatalog,
+  type OrchestrateTaskInput,
+  type RunMode,
+} from "../extension/domain.js";
+import {
+  createProcessApplicationLayer,
+  createProcessHostRuntimeAdapter,
   destroyProcessHost,
   ProcessHostRuntimeAdapter,
   type ProcessHost,
@@ -13,12 +25,13 @@ import {
   OrchestrationActionRejected,
   SHUTDOWN_CLEANUP_GRACE_MS,
 } from "../extension/runtime.js";
-import { CleanupSupervisor, processSupervisorLayer } from "../extension/scheduler.js";
+import type { WorkerSettlement } from "../extension/worker-settlement.js";
 import type {
   AcceptedRun,
   CompletedRun,
   OrchestrationContext,
   OrchestrationService,
+  RuntimeSnapshot,
   SettlementListener,
 } from "../extension/runtime.js";
 
@@ -89,8 +102,15 @@ class TestOrchestration implements OrchestrationService {
   readonly abort = (): Effect.Effect<void> => Effect.void;
   readonly closeInteractive = (): Effect.Effect<void> => Effect.void;
   readonly snapshot = () => Effect.succeed({ runs: [], workers: [] });
-  readonly subscribeSettlement = () => () => {};
-  readonly subscribeState = () => () => {};
+  unsubscribeSettlement = () => {};
+  readonly subscribeSettlement = () => this.unsubscribeSettlement;
+  readonly subscribeState = (
+    _ownerSessionId: string,
+    listener: (snapshot: RuntimeSnapshot) => void,
+  ) => {
+    listener({ runs: [], workers: [] });
+    return () => {};
+  };
   readonly shutdown = (): Effect.Effect<void> => Effect.void;
 }
 
@@ -263,6 +283,78 @@ describe("ProcessHost AbortSignal adapter", () => {
   });
 });
 
+describe("ProcessHost root lifetime", () => {
+  test("shares one orchestration acquisition across the process application layer", async () => {
+    const effectRuntime = ManagedRuntime.make(createProcessApplicationLayer());
+
+    const first = effectRuntime.runSync(Orchestration);
+    const second = effectRuntime.runSync(Orchestration);
+    const delivery = effectRuntime.runSync(Delivery);
+
+    expect(second).toBe(first);
+    expect(delivery).toBeDefined();
+    await effectRuntime.dispose();
+  });
+
+  test("keeps retained snapshots readable after disposal while runtime-backed operations fail", async () => {
+    const effectRuntime = ManagedRuntime.make(createProcessApplicationLayer());
+    const adapter = createProcessHostRuntimeAdapter(effectRuntime);
+
+    expect(await adapter.snapshot("owner")).toEqual({ runs: [], workers: [] });
+    await effectRuntime.dispose();
+
+    expect(await adapter.snapshot("owner")).toEqual({ runs: [], workers: [] });
+    await expect(adapter.abort("owner", { all: true })).rejects.toBeDefined();
+  });
+
+  test("clears delivery state even when settlement unsubscription throws", async () => {
+    const orchestration = new TestOrchestration();
+    const unsubscribeFailure = new Error("unsubscribe failed");
+    orchestration.unsubscribeSettlement = () => {
+      throw unsubscribeFailure;
+    };
+    const root = deliveryLayer.pipe(
+      Layer.provideMerge(Layer.succeed(Orchestration, orchestration)),
+    );
+    const effectRuntime = ManagedRuntime.make(root);
+    const delivery = effectRuntime.runSync(Delivery);
+    const settlement: WorkerSettlement = {
+      eventId: "event",
+      sequence: 1,
+      ownerSessionId: "owner",
+      runId: createSequentialRunIdFactory()(),
+      workerId: createSequentialWorkerIdFactory()(),
+      generation: 1,
+      mode: "async",
+      worker: "worker",
+      title: "Test worker",
+      lifecycle: "one-shot",
+      status: "completed",
+      outcome: {
+        status: "completed",
+        assistantText: "Test complete.",
+      },
+      usage: {
+        input: 1,
+        output: 1,
+        cacheRead: 0,
+        cacheWrite: 0,
+        cost: 0,
+        contextTokens: 2,
+        turns: 1,
+      },
+      startedAt: 1,
+      settledAt: 2,
+      sessionFile: "/sessions/worker.jsonl",
+    };
+    delivery.accept(settlement);
+    expect(delivery.pendingCount("owner")).toBe(1);
+
+    await expect(effectRuntime.dispose()).rejects.toBeDefined();
+    expect(delivery.pendingCount("owner")).toBe(0);
+  });
+});
+
 describe("ProcessHost destruction", () => {
   test("publishes the shared destruction Promise before synchronous shutdown reentry", async () => {
     const shutdownFailure = new Error("shutdown failed after reentry");
@@ -347,57 +439,40 @@ describe("ProcessHost destruction", () => {
     }
   });
 
-  test("bounds root disposal while a real supervised uninterruptible cleanup remains gated", async () => {
-    const orchestration = new TestOrchestration();
-    const effectRuntime = ManagedRuntime.make(
-      Layer.merge(
-        Layer.succeed(Orchestration, orchestration),
-        processSupervisorLayer,
-      ),
-    );
-    const runtime = new ProcessHostRuntimeAdapter(effectRuntime, orchestration);
-    const delivery = new DeliveryCoordinator();
+  test("bounds root disposal and shares repeated destruction after logical teardown", async () => {
+    const disposalGate = deferred();
+    let disposalCalls = 0;
     const host = Object.assign(
-      { runtime, delivery } satisfies ProcessHost,
-      { effectRuntime },
+      {
+        runtime: { shutdown: async () => {} } as unknown as ProcessHost["runtime"],
+        delivery: new DeliveryCoordinator(),
+      } satisfies ProcessHost,
+      {
+        effectRuntime: {
+          dispose: () => {
+            disposalCalls += 1;
+            return disposalGate.promise;
+          },
+        },
+      },
     );
-    const cleanup = effectRuntime.runSync(CleanupSupervisor);
-    const started = Deferred.makeUnsafe<void>();
-    const release = Deferred.makeUnsafe<void>();
-    let finalized = false;
-
-    cleanup.supervise(
-      Deferred.succeed(started, undefined).pipe(
-        Effect.andThen(Deferred.await(release)),
-        Effect.uninterruptible,
-        Effect.ensuring(Effect.sync(() => {
-          finalized = true;
-        })),
-      ),
-    );
-    await Effect.runPromise(Deferred.await(started));
-
-    const deadline = deferred();
-    let rootDisposal: Promise<void> | undefined;
     let observedGrace: number | undefined;
     const destruction = destroyProcessHost(host, {
-      awaitRootDisposal: async (disposal, graceMs) => {
-        rootDisposal = disposal;
+      awaitRootDisposal: async (_disposal, graceMs) => {
         observedGrace = graceMs;
-        await Promise.race([disposal, deadline.promise]);
       },
     });
-    await Promise.resolve();
-    deadline.resolve();
+
     await destruction;
+    const repeated = destroyProcessHost(host);
 
+    expect(repeated).toBe(destruction);
     expect(observedGrace).toBe(SHUTDOWN_CLEANUP_GRACE_MS);
-    expect(finalized).toBe(false);
-    expect(rootDisposal).toBeDefined();
+    expect(disposalCalls).toBe(1);
 
-    Deferred.doneUnsafe(release, Effect.void);
-    await rootDisposal;
-    expect(finalized).toBe(true);
+    disposalGate.resolve();
+    await repeated;
+    expect(disposalCalls).toBe(1);
   });
 
   test("awaits an in-grace root rejection and observes a rejection after timeout", async () => {

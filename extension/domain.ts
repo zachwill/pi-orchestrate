@@ -1,4 +1,5 @@
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { Schema } from "effect";
 
 export const SUPPORTED_TOOL_NAMES = [
   "read",
@@ -88,17 +89,36 @@ function compareWorkersByName(left: WorkerDefinition, right: WorkerDefinition): 
   return 0;
 }
 
-export interface OrchestrateTaskInput {
-  readonly worker: string;
-  readonly title: string;
-  readonly instructions: string;
-}
+export const MAX_WORKER_TITLE_LENGTH = 200;
+export const MAX_WORKER_INSTRUCTIONS_LENGTH = 100_000;
+export const CANCELLATION_GRACE_MS = 5_000;
 
-declare const workerIdBrand: unique symbol;
-declare const runIdBrand: unique symbol;
+const NonBlankString = Schema.String.check(Schema.isPattern(/\S/));
+const WorkerLabel = NonBlankString.check(
+  Schema.isMaxLength(MAX_WORKER_TITLE_LENGTH),
+);
+const WorkerInstructions = NonBlankString.check(
+  Schema.isMaxLength(MAX_WORKER_INSTRUCTIONS_LENGTH),
+);
 
-export type WorkerId = string & { readonly [workerIdBrand]: "WorkerId" };
-export type RunId = string & { readonly [runIdBrand]: "RunId" };
+export const OrchestrateTaskInput = Schema.Struct({
+  worker: WorkerLabel,
+  title: WorkerLabel,
+  instructions: WorkerInstructions,
+});
+export interface OrchestrateTaskInput extends Schema.Schema.Type<typeof OrchestrateTaskInput> {}
+
+/** A validated worker identity. Worker IDs are stable across interactive generations. */
+export const WorkerId = Schema.String.check(
+  Schema.isPattern(/^worker-\S+$/),
+).pipe(Schema.brand("WorkerId"));
+export type WorkerId = typeof WorkerId.Type;
+
+/** A validated identity for exactly one worker generation. */
+export const RunId = Schema.String.check(
+  Schema.isPattern(/^run-\S+$/),
+).pipe(Schema.brand("RunId"));
+export type RunId = typeof RunId.Type;
 
 export type WorkerIdFactory = () => WorkerId;
 export type RunIdFactory = () => RunId;
@@ -111,13 +131,13 @@ export interface OrchestrateIdFactories {
 export function createRandomWorkerIdFactory(
   randomId: () => string = defaultRandomId,
 ): WorkerIdFactory {
-  return () => `worker-${randomId()}` as WorkerId;
+  return () => WorkerId.make(`worker-${randomId()}`);
 }
 
 export function createRandomRunIdFactory(
   randomId: () => string = defaultRandomId,
 ): RunIdFactory {
-  return () => `run-${randomId()}` as RunId;
+  return () => RunId.make(`run-${randomId()}`);
 }
 
 export function createRandomIdFactories(
@@ -131,12 +151,12 @@ export function createRandomIdFactories(
 
 export function createSequentialWorkerIdFactory(startAt = 1): WorkerIdFactory {
   let next = startAt;
-  return () => `worker-${next++}` as WorkerId;
+  return () => WorkerId.make(`worker-${next++}`);
 }
 
 export function createSequentialRunIdFactory(startAt = 1): RunIdFactory {
   let next = startAt;
-  return () => `run-${next++}` as RunId;
+  return () => RunId.make(`run-${next++}`);
 }
 
 export function createSequentialIdFactories(startAt = 1): OrchestrateIdFactories {
@@ -150,15 +170,23 @@ function defaultRandomId(): string {
   return globalThis.crypto.randomUUID();
 }
 
-export interface WorkerUsage {
-  readonly input: number;
-  readonly output: number;
-  readonly cacheRead: number;
-  readonly cacheWrite: number;
-  readonly cost: number;
-  readonly contextTokens: number;
-  readonly turns: number;
-}
+const NonnegativeFinite = Schema.Finite.check(
+  Schema.isGreaterThanOrEqualTo(0),
+);
+const NonnegativeInteger = Schema.Int.check(
+  Schema.isGreaterThanOrEqualTo(0),
+);
+
+export const WorkerUsage = Schema.Struct({
+  input: NonnegativeFinite,
+  output: NonnegativeFinite,
+  cacheRead: NonnegativeFinite,
+  cacheWrite: NonnegativeFinite,
+  cost: NonnegativeFinite,
+  contextTokens: NonnegativeFinite,
+  turns: NonnegativeInteger,
+});
+export interface WorkerUsage extends Schema.Schema.Type<typeof WorkerUsage> {}
 
 /** Direction of the most recent message across the worker/model boundary. */
 export type WorkerMessageDirection = "to-model" | "from-model";
@@ -173,38 +201,57 @@ export const EMPTY_WORKER_USAGE: WorkerUsage = Object.freeze({
   turns: 0,
 });
 
-export interface WorkerCompletedOutcome {
-  readonly status: "completed";
-  readonly assistantText: string;
-}
+export const WorkerCompletedOutcome = Schema.Struct({
+  status: Schema.Literal("completed"),
+  assistantText: Schema.String,
+});
+export interface WorkerCompletedOutcome
+  extends Schema.Schema.Type<typeof WorkerCompletedOutcome> {}
 
-export interface WorkerReadyOutcome {
-  readonly status: "ready";
-  readonly assistantText: string;
-}
+export const WorkerReadyOutcome = Schema.Struct({
+  status: Schema.Literal("ready"),
+  assistantText: Schema.String,
+});
+export interface WorkerReadyOutcome
+  extends Schema.Schema.Type<typeof WorkerReadyOutcome> {}
 
-export interface WorkerFailedOutcome {
-  readonly status: "failed";
-  readonly message: string;
-  readonly assistantText?: string;
-}
+export const WorkerFailedOutcome = Schema.Struct({
+  status: Schema.Literal("failed"),
+  message: Schema.String,
+  assistantText: Schema.optionalKey(Schema.String),
+});
+export interface WorkerFailedOutcome
+  extends Schema.Schema.Type<typeof WorkerFailedOutcome> {}
 
-export interface WorkerAbortedOutcome {
-  readonly status: "aborted";
-  readonly message?: string;
-  readonly assistantText?: string;
-}
+export const WorkerAbortedOutcome = Schema.Struct({
+  status: Schema.Literal("aborted"),
+  message: Schema.optionalKey(Schema.String),
+  assistantText: Schema.optionalKey(Schema.String),
+});
+export interface WorkerAbortedOutcome
+  extends Schema.Schema.Type<typeof WorkerAbortedOutcome> {}
 
-export interface WorkerClosedOutcome {
-  readonly status: "closed";
-}
+/** Outcomes emitted in response to a worker generation. */
+export const WorkerResponseOutcome = Schema.Union([
+  WorkerCompletedOutcome,
+  WorkerReadyOutcome,
+  WorkerFailedOutcome,
+  WorkerAbortedOutcome,
+]);
+export type WorkerResponseOutcome = typeof WorkerResponseOutcome.Type;
 
-export type WorkerOutcome =
-  | WorkerCompletedOutcome
-  | WorkerReadyOutcome
-  | WorkerFailedOutcome
-  | WorkerAbortedOutcome
-  | WorkerClosedOutcome;
+export const WorkerClosedOutcome = Schema.Struct({
+  status: Schema.Literal("closed"),
+});
+export interface WorkerClosedOutcome
+  extends Schema.Schema.Type<typeof WorkerClosedOutcome> {}
+
+/** Domain outcomes include closure, which is not a generation response. */
+export const WorkerOutcome = Schema.Union([
+  WorkerResponseOutcome,
+  WorkerClosedOutcome,
+]);
+export type WorkerOutcome = typeof WorkerOutcome.Type;
 export type WorkerStatus =
   | "starting"
   | "running"
@@ -301,7 +348,3 @@ export function transitionWorkerStatus(
 
   return { ...worker, status, outcome: undefined };
 }
-
-export const MAX_WORKER_TITLE_LENGTH = 200;
-export const MAX_WORKER_INSTRUCTIONS_LENGTH = 100_000;
-export const CANCELLATION_GRACE_MS = 5_000;

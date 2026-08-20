@@ -20,7 +20,7 @@ Keep decisions in the module that owns them:
 
 - `domain.ts` owns worker and run types, state transitions, IDs, and limits.
 - `catalog.ts` and `contract.ts` own trusted worker discovery, parsing, precedence, diagnostics, and parent guidance.
-- `runtime.ts` and `scheduler.ts` own admission, preflight, concurrency, ownership, cancellation, interactive generations, and retained state.
+- `runtime.ts` owns admission, preflight, concurrency, ownership, cancellation, interactive generations, retained state, and FiberMap/FiberSet coordination for generations, cancellation, and cleanup.
 - `worker-session.ts` and `worker-settlement.ts` own durable child sessions, usage and activity reporting, message direction, and persisted settlement decoding.
 - `host.ts` and `delivery.ts` own process-scoped persistence, owner binding, grouped synthesis, and exact-session delivery.
 - `tools.ts` owns public schemas, execution adapters, streaming updates, and tool renderers.
