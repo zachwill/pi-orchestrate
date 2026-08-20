@@ -1,4 +1,4 @@
-import type { WorkerSettlement } from "./runtime.js";
+import type { WorkerSettlement } from "./worker-settlement.js";
 
 export const MAX_DELIVERY_MARKDOWN_BYTES = 50 * 1024;
 export const MAX_WORKER_DELIVERY_MARKDOWN_BYTES = 16 * 1024;

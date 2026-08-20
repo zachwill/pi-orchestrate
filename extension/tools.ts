@@ -40,8 +40,8 @@ import type {
   RunResult,
   RuntimeSnapshot,
   SettlementListener,
-  WorkerSettlement,
 } from "./runtime.js";
+import type { WorkerSettlement } from "./worker-settlement.js";
 
 const STRICT_OBJECT = { additionalProperties: false } as const;
 const MAX_INSTRUCTION_PREVIEW_LINES = 2;

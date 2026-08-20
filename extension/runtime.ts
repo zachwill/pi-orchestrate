@@ -36,11 +36,6 @@ import type {
   WorkerSettlement,
 } from "./worker-settlement.js";
 
-export type {
-  SettlementFailureStage,
-  WorkerSettlement,
-} from "./worker-settlement.js";
-
 export const MAX_TERMINAL_WORKER_HISTORY = 100;
 export const MAX_COMPLETED_RUN_HISTORY = 100;
 /** Shutdown waits this long for interrupted bootstrap/prompt promises, then returns best-effort. */
@@ -576,6 +571,11 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
         return Effect.succeed(undefined);
       }
 
+      // Keep the original Promise observed independently from the Effect waiter below.
+      // Pi session creation has no AbortSignal: scheduler interruption may stop waiting,
+      // but acquisition can still succeed and must either match this exact generation or
+      // have its handle-owned scope disposed. Shutdown tracks the same completion
+      // best-effort without making process teardown wait forever.
       this.trackCleanup(creation.then(() => undefined, () => undefined));
       void creation.then((session) => {
         if (!this.canAdoptCreatedSession(workerId, generation, entry)) {

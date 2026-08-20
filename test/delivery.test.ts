@@ -11,7 +11,7 @@ import {
   type WorkerDeliveryMessage,
   type WorkerDeliveryOptions,
 } from "../extension/delivery.ts";
-import type { WorkerSettlement } from "../extension/runtime.ts";
+import type { WorkerSettlement } from "../extension/worker-settlement.ts";
 
 const usage = {
   input: 10,

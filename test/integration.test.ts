@@ -28,8 +28,8 @@ import {
 import type {
   OrchestrationContext,
   RuntimeSnapshot,
-  WorkerSettlement,
 } from "../extension/runtime.js";
+import type { WorkerSettlement } from "../extension/worker-settlement.js";
 
 const TOOL_NAMES = [
   "orchestrate",

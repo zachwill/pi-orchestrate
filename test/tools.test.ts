@@ -27,13 +27,13 @@ import type {
   OrchestratorRuntime,
   RuntimeSnapshot,
   SettlementListener,
-  WorkerSettlement,
 } from "../extension/runtime.js";
 import {
   registerOrchestrationTools,
   type DispatchDecision,
   type OrchestrationToolDependencies,
 } from "../extension/tools.js";
+import type { WorkerSettlement } from "../extension/worker-settlement.js";
 
 beforeAll(() => initTheme("dark", false));
 

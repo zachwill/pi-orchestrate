@@ -73,6 +73,11 @@ export interface WorkerSessionHandle {
   subscribeMessageDirection(listener: (direction: WorkerMessageDirection) => void): () => void;
 }
 
+/**
+ * Session creation is deliberately Promise-based. The factory starts acquisition with a
+ * lifetime independent of the interruptible worker-generation fiber: the runtime may
+ * stop awaiting it, but still observes late success and disposes a stale handle.
+ */
 export interface WorkerSessionFactory {
   create(options: WorkerSessionFactoryOptions): Promise<WorkerSessionHandle>;
 }
@@ -883,5 +888,8 @@ export function createWorkerSessionFactory(
   overrides: Partial<WorkerSessionDependencies> = {},
 ): WorkerSessionFactory {
   const dependencies: WorkerSessionDependencies = { ...defaultDependencies, ...overrides };
+  // createWorkerSession transfers its sequential Scope to the returned handle. Starting
+  // it on its own Effect runner lets uncancellable Pi acquisition finish after a
+  // generation stops waiting, so runtime can reclaim any handle that arrives late.
   return { create: (options) => Effect.runPromise(createWorkerSession(options, dependencies)) };
 }

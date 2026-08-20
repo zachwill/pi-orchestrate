@@ -34,6 +34,7 @@ import type {
   WorkerSessionFactoryOptions,
   WorkerSessionHandle,
 } from "../extension/worker-session.ts";
+import type { WorkerSettlement } from "../extension/worker-settlement.ts";
 
 class Deferred<T = void> {
   readonly promise: Promise<T>;
@@ -531,7 +532,7 @@ describe("per-worker settlement observability", () => {
         workerId: () => `worker-${nextWorker++ % (MAX_TERMINAL_WORKER_HISTORY + 1)}` as WorkerId,
       },
     });
-    const events: import("../extension/runtime.ts").WorkerSettlement[] = [];
+    const events: WorkerSettlement[] = [];
     orchestrator.subscribeSettlement((event) => events.push(event));
     const owner = context("owner", [definition("worker")]);
 
@@ -553,8 +554,8 @@ describe("per-worker settlement observability", () => {
     const handle = new FakeHandle("local-interactive", [first, second], tracker);
     const orchestrator = runtime(new FakeFactory([{ handle }]));
     const owner = context("owner", [definition("interactive", "interactive")]);
-    const local: import("../extension/runtime.ts").WorkerSettlement[] = [];
-    const global: import("../extension/runtime.ts").WorkerSettlement[] = [];
+    const local: WorkerSettlement[] = [];
+    const global: WorkerSettlement[] = [];
     orchestrator.subscribeSettlement((event) => global.push(event));
 
     const initial = orchestrator.orchestrate(owner, task("interactive"), "inline", undefined, (event) => local.push(event));
@@ -586,7 +587,7 @@ describe("per-worker settlement observability", () => {
       },
     };
     const failedRuntime = runtime(failedFactory);
-    const failed: import("../extension/runtime.ts").WorkerSettlement[] = [];
+    const failed: WorkerSettlement[] = [];
     failedRuntime.subscribeSettlement((event) => failed.push(event));
     await failedRuntime.orchestrate(
       context("failed-owner", [definition("worker")]),
@@ -606,7 +607,7 @@ describe("per-worker settlement observability", () => {
     const prompt = promptPlan({ status: "completed", assistantText: "late" });
     const handle = new FakeHandle("aborted-settlement", [prompt], tracker);
     const abortedRuntime = runtime(new FakeFactory([{ handle }]));
-    const aborted: import("../extension/runtime.ts").WorkerSettlement[] = [];
+    const aborted: WorkerSettlement[] = [];
     abortedRuntime.subscribeSettlement((event) => aborted.push(event));
     const accepted = await abortedRuntime.orchestrate(
       context("abort-owner", [definition("worker")]),
@@ -737,7 +738,7 @@ describe("ownership, cancellation, and shutdown", () => {
     );
     const factory = new FakeFactory([{ handle, gate: createGate }]);
     const orchestrator = runtime(factory);
-    const settlement = new Deferred<import("../extension/runtime.ts").WorkerSettlement>();
+    const settlement = new Deferred<WorkerSettlement>();
     orchestrator.subscribeSettlement((event) => settlement.resolve(event));
 
     const accepted = await orchestrator.orchestrate(
@@ -763,7 +764,7 @@ describe("ownership, cancellation, and shutdown", () => {
     const handle = new FakeHandle("running", [prompt], tracker);
     handle.abortGate = new Deferred();
     const orchestrator = runtime(new FakeFactory([{ handle }]));
-    const settlement = new Deferred<import("../extension/runtime.ts").WorkerSettlement>();
+    const settlement = new Deferred<WorkerSettlement>();
     orchestrator.subscribeSettlement((event) => settlement.resolve(event));
 
     const accepted = await orchestrator.orchestrate(
@@ -1107,7 +1108,7 @@ describe("inline AbortSignal ownership", () => {
     const orchestrator = runtime(new FakeFactory([{ handle }]));
     const owner = context("owner", [definition("worker")]);
     const controller = new AbortController();
-    const settlement = new Deferred<import("../extension/runtime.ts").WorkerSettlement>();
+    const settlement = new Deferred<WorkerSettlement>();
     orchestrator.subscribeSettlement((event) => settlement.resolve(event));
 
     await orchestrator.orchestrate(owner, task("worker"), "async", controller.signal);
