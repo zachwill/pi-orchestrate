@@ -3,7 +3,7 @@ import type { WorkerCatalog } from "./domain.js";
 const CONTRACT_START = "<!-- pi-orchestrate:contract:start -->";
 const CONTRACT_END = "<!-- pi-orchestrate:contract:end -->";
 
-function contractWorkers(catalog: WorkerCatalog) {
+function sortedWorkers(catalog: WorkerCatalog) {
   return [...catalog.workers].sort((left, right) => {
     if (left.name < right.name) return -1;
     if (left.name > right.name) return 1;
@@ -12,7 +12,7 @@ function contractWorkers(catalog: WorkerCatalog) {
 }
 
 function formatCatalog(catalog: WorkerCatalog): string {
-  const workers = contractWorkers(catalog);
+  const workers = sortedWorkers(catalog);
   if (workers.length === 0) return "- No trusted workers are available for this session.";
 
   return workers

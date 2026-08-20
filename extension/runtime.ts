@@ -66,7 +66,7 @@ export interface AcceptedRun {
   readonly workerId: WorkerId;
 }
 
-export interface CompletedResult {
+export interface RunResult {
   readonly workerId: WorkerId;
   readonly worker: string;
   readonly title: string;
@@ -82,7 +82,7 @@ export interface CompletedRun {
   readonly id: RunId;
   readonly ownerSessionId: string;
   readonly mode: RunMode;
-  readonly result: CompletedResult;
+  readonly result: RunResult;
 }
 
 export interface RuntimeSnapshot {
@@ -1238,7 +1238,7 @@ function isActiveWorkerStatus(status: WorkerRecord["status"]): boolean {
 
 function isSettledWorkerStatus(
   status: WorkerRecord["status"],
-): status is CompletedResult["status"] {
+): status is RunResult["status"] {
   return status === "completed" || status === "ready" || status === "failed" || status === "aborted";
 }
 
@@ -1336,11 +1336,11 @@ function freezeCompletedRun(
   if (record.settledAt === undefined) {
     throw new Error("Completed run requires a settlement timestamp");
   }
-  const result: CompletedResult = Object.freeze({
+  const result: RunResult = Object.freeze({
     workerId: record.id,
     worker: record.worker,
     title: record.title,
-    status: record.status as CompletedResult["status"],
+    status: record.status as RunResult["status"],
     outcome: Object.freeze(copyOutcome(outcome)),
     usage: Object.freeze(copyUsage(record.usage)),
     startedAt: record.startedAt,

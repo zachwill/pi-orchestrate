@@ -19,7 +19,7 @@ Check these before guessing:
 3. upstream source at that exact version when local source is incomplete
 4. current upstream only as non-authoritative research
 
-This repository pins `effect@4.0.0-beta.99`. Verify beta-sensitive Layer, FiberMap, ManagedRuntime, Schema, testing, and unstable APIs before use.
+This repository pins `effect@4.0.0-rc.111`. Verify release-candidate-sensitive Layer, FiberMap, ManagedRuntime, Schema, testing, and unstable APIs before use.
 
 Established project conventions override generic examples. Preserve behavior before changing architecture unless the task explicitly requests both.
 
@@ -28,7 +28,7 @@ Established project conventions override generic examples. Preserve behavior bef
 - Keep Pi-facing tools, hooks, and sessions as Promise/callback adapters where the SDK requires them.
 - Keep TypeBox for Pi tool parameter schemas. Use Effect Schema for application boundaries such as worker frontmatter and persisted message details.
 - Prefer `Schema.Struct(...)` plus a same-name `interface`; do not default to `Schema.Class`.
-- Use `Schema.TaggedErrorClass` for expected Effect errors when it fits.
+- Use `Schema.TaggedError` for expected Effect errors when it fits.
 - Prefer `Context.Service` for application capabilities.
 - Keep `bun:test`; run Effect at the Bun test boundary and use Effect testing primitives internally.
 - Preserve caller `AbortSignal.reason` explicitly at Promise boundaries.

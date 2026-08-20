@@ -47,7 +47,7 @@ const ACTIVE_STATUSES: ReadonlySet<WorkerStatus> = new Set(["starting", "running
 
 export type PresentationRuntime = Pick<OrchestratorRuntime, "snapshot" | "subscribeState">;
 
-type SafeSettlement = WorkerSettlementDetails;
+type DecodedSettlement = WorkerSettlementDetails;
 
 interface StatusBinding {
   readonly ownerSessionId: string;
@@ -216,12 +216,12 @@ export class WorkerStatusComponent implements Component {
     const turns = formatTurnMarker(worker);
     const context = `${formatContextTokens(numberOrZero(worker.usage?.contextTokens))} ctx`;
     const usageFields = width >= 28 ? [turns, context] : width >= 12 ? [turns] : [];
-    const workerType = this.theme.fg("muted", this.theme.italic(worker.worker));
-    const workerTypeFits = visibleWidth(
+    const workerName = this.theme.fg("muted", this.theme.italic(worker.worker));
+    const workerNameFits = visibleWidth(
       `⠋  · ${worker.worker} · ${usageFields.join(" · ")}`,
     ) + 10 <= width;
-    const suffixFields = width >= 72 && workerTypeFits
-      ? [workerType, ...usageFields]
+    const suffixFields = width >= 72 && workerNameFits
+      ? [workerName, ...usageFields]
       : usageFields;
     const prefix = `${glyph} `;
     const suffix = suffixFields.length ? ` · ${suffixFields.join(" · ")}` : "";
@@ -280,11 +280,11 @@ export class WorkerResultComponent implements Component {
     const elapsed = elapsedBetween(details.startedAt, details.settledAt);
     const qualifier = resultQualifier(details);
     const title = this.theme.bold(details.title);
-    const workerType = this.theme.fg("muted", this.theme.italic(details.worker));
+    const workerName = this.theme.fg("muted", this.theme.italic(details.worker));
     const suffix = [qualifier, elapsed].filter(Boolean).join(" · ");
     const header = [
       this.theme.fg(color, `${statusIcon(details)} ${title}`),
-      workerType,
+      workerName,
       ...(suffix ? [this.theme.fg(color, suffix)] : []),
     ].join(" · ");
     const outcome = presentedOutcome(details);
@@ -308,7 +308,7 @@ export class WorkerResultComponent implements Component {
   }
 }
 
-function readSettlement(value: unknown): SafeSettlement | undefined {
+function readSettlement(value: unknown): DecodedSettlement | undefined {
   const decoded = decodePersistedWorkerSettlementDetails(value);
   return Result.isSuccess(decoded) ? decoded.success : undefined;
 }
@@ -319,13 +319,13 @@ function workerAnimation(status: WorkerStatus) {
   return WORKER_ANIMATIONS.running;
 }
 
-function resultColor(status: SafeSettlement["status"]): "success" | "error" | "warning" {
+function resultColor(status: DecodedSettlement["status"]): "success" | "error" | "warning" {
   if (status === "failed") return "error";
   if (status === "aborted") return "warning";
   return "success";
 }
 
-function resultQualifier(result: SafeSettlement): string | undefined {
+function resultQualifier(result: DecodedSettlement): string | undefined {
   if (result.status === "aborted") return "aborted";
   if (result.status === "failed" && result.failureStage === "startup") {
     return "could not start";
@@ -335,7 +335,7 @@ function resultQualifier(result: SafeSettlement): string | undefined {
   return undefined;
 }
 
-function statusIcon(result: SafeSettlement): string {
+function statusIcon(result: DecodedSettlement): string {
   if (result.status === "failed") return "✗";
   if (result.status === "aborted") return "■";
   return "✓";
@@ -348,7 +348,7 @@ function outcomeText(outcome: WorkerOutcome): string {
   return "Worker session closed.";
 }
 
-function presentedOutcome(result: SafeSettlement): string {
+function presentedOutcome(result: DecodedSettlement): string {
   const body = outcomeText(result.outcome);
   if (result.status !== "completed" && result.status !== "ready") return body;
 
@@ -363,7 +363,7 @@ function presentedOutcome(result: SafeSettlement): string {
   return lines.join("\n").trimEnd();
 }
 
-function settlementMetadata(result: SafeSettlement): string[] {
+function settlementMetadata(result: DecodedSettlement): string[] {
   return [
     `worker ID ${result.workerId} · run ID ${result.runId}`,
     `status ${result.status} · generation ${result.generation}`,

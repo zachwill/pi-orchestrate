@@ -3,6 +3,7 @@ import type { RunId, WorkerId } from "./domain.js";
 
 const NonnegativeFinite = Schema.Finite.check(Schema.isGreaterThanOrEqualTo(0));
 const NonnegativeInteger = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+const PositiveInteger = Schema.Int.check(Schema.isGreaterThan(0));
 
 const WorkerUsage = Schema.Struct({
   input: NonnegativeFinite,
@@ -45,11 +46,11 @@ const FailureStage = Schema.Literals([
 /** Canonical schema for settlement details written by the current runtime. */
 export const WorkerSettlementDetails = Schema.Struct({
   eventId: Schema.String,
-  sequence: NonnegativeInteger,
+  sequence: PositiveInteger,
   ownerSessionId: Schema.String,
   runId: Schema.String,
   workerId: Schema.String,
-  generation: NonnegativeInteger,
+  generation: PositiveInteger,
   mode: Schema.Literals(["async", "inline"]),
   worker: Schema.String,
   title: Schema.String,
@@ -60,13 +61,31 @@ export const WorkerSettlementDetails = Schema.Struct({
   startedAt: NonnegativeInteger,
   settledAt: NonnegativeInteger,
   synthesisGroupId: Schema.optionalKey(Schema.String),
-  synthesisGroupSize: Schema.optionalKey(NonnegativeInteger),
+  synthesisGroupSize: Schema.optionalKey(PositiveInteger),
   sessionFile: Schema.optionalKey(Schema.String),
   failureStage: Schema.optionalKey(FailureStage),
 }).check(
   Schema.makeFilter((settlement) => {
     if (settlement.outcome.status !== settlement.status) {
       return "outcome status must match settlement status";
+    }
+    if (settlement.status === "ready" && settlement.lifecycle !== "interactive") {
+      return "ready settlement requires an interactive lifecycle";
+    }
+    if (settlement.status === "completed" && settlement.lifecycle !== "one-shot") {
+      return "completed settlement requires a one-shot lifecycle";
+    }
+    if (
+      (settlement.synthesisGroupId === undefined) !==
+      (settlement.synthesisGroupSize === undefined)
+    ) {
+      return "synthesis group ID and size must occur together";
+    }
+    if (
+      settlement.synthesisGroupSize !== undefined &&
+      settlement.synthesisGroupSize < 2
+    ) {
+      return "synthesis group size must be at least 2";
     }
     if (settlement.settledAt < settlement.startedAt) {
       return "settlement timestamp must not precede start timestamp";

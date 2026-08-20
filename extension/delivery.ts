@@ -45,7 +45,7 @@ export class DeliveryCoordinator {
   private readonly pendingSettlements: WorkerSettlement[] = [];
   private readonly flushingOwners = new Set<string>();
   private readonly synthesisGroups = new Map<string, SynthesisGroupState>();
-  private readonly finalSynthesisGroupEvents = new Set<string>();
+  private readonly finalSynthesisGroupEventIds = new Set<string>();
   private highestAcceptedSequence = 0;
 
   bind(binding: ParentBinding): void {
@@ -115,7 +115,7 @@ export class DeliveryCoordinator {
     this.pendingSettlements.length = 0;
     this.flushingOwners.clear();
     this.synthesisGroups.clear();
-    this.finalSynthesisGroupEvents.clear();
+    this.finalSynthesisGroupEventIds.clear();
     this.highestAcceptedSequence = 0;
   }
 
@@ -240,12 +240,12 @@ export class DeliveryCoordinator {
     }
     if (state.acceptedEventIds.length !== state.expected) return;
     const finalEventId = state.acceptedEventIds.at(-1);
-    if (finalEventId) this.finalSynthesisGroupEvents.add(finalEventId);
+    if (finalEventId) this.finalSynthesisGroupEventIds.add(finalEventId);
   }
 
   private isFinalBoundary(settlement: WorkerSettlement): boolean {
     if (!settlement.synthesisGroupId) return true;
-    return this.finalSynthesisGroupEvents.has(settlement.eventId);
+    return this.finalSynthesisGroupEventIds.has(settlement.eventId);
   }
 
   private finishSynthesisGroup(settlement: WorkerSettlement): void {
@@ -253,7 +253,7 @@ export class DeliveryCoordinator {
     this.synthesisGroups.delete(
       synthesisGroupKey(settlement.ownerSessionId, settlement.synthesisGroupId),
     );
-    this.finalSynthesisGroupEvents.delete(settlement.eventId);
+    this.finalSynthesisGroupEventIds.delete(settlement.eventId);
   }
 }
 

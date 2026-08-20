@@ -97,7 +97,7 @@ describe("published package resources", () => {
     const manifest = await readManifest();
 
     expect(manifest.name).toBe("@zachwill/pi-orchestrate");
-    expect(manifest.version).toBe("0.7.2");
+    expect(manifest.version).toBe("0.8.0");
     expect(manifest.files).toEqual(["extension/", "examples/", "README.md", "LICENSE"]);
     expect(manifest.pi).toEqual({ extensions: ["./extension/index.ts"] });
     expect(manifest.pi.skills).toBeUndefined();
@@ -121,7 +121,7 @@ describe("published package resources", () => {
     expect(manifest.bugs).toEqual({
       url: "https://github.com/zachwill/pi-orchestrate/issues",
     });
-    expect(manifest.dependencies.effect).toBe("4.0.0-beta.99");
+    expect(manifest.dependencies.effect).toBe("4.0.0-rc.111");
     for (const packageName of piPeerPackages) {
       expect(manifest.peerDependencies[packageName]).toBe("^0.80.10");
       expect(manifest.devDependencies[packageName]).toBe("0.80.10");

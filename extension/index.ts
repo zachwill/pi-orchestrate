@@ -125,16 +125,16 @@ export function createOrchestrationExtension(
       );
       const ownerSessionId = activeBinding?.ownerSessionId;
       if (!ownerSessionId) return;
-      const groupedOrchestration =
+      const isOrchestrateGroup =
         toolCalls.length > 1 &&
         toolCalls.every((toolCall) => toolCall.name === "orchestrate");
-      const synthesisGroup = groupedOrchestration
+      const synthesisGroup = isOrchestrateGroup
         ? { id: `orchestrate:${toolCalls[0]?.id ?? "group"}`, size: toolCalls.length }
         : undefined;
 
       for (const toolCall of toolCalls) {
         if (!DISPATCH_TOOL_NAMES.has(toolCall.name)) continue;
-        const mode = groupedOrchestration || toolCalls.length === 1
+        const mode = isOrchestrateGroup || toolCalls.length === 1
           ? "async"
           : "inline";
         dispatchDecisions.set(toolCall.id, {

@@ -34,10 +34,10 @@ import {
 import type {
   AbortTarget,
   AcceptedRun,
-  CompletedResult,
   CompletedRun,
   OrchestrationContext,
   OrchestratorRuntime,
+  RunResult,
   RuntimeSnapshot,
   SettlementListener,
   WorkerSettlement,
@@ -446,7 +446,7 @@ function completedRunDetails(run: CompletedRun) {
   };
 }
 
-function completedResultDetails(result: CompletedResult) {
+function completedResultDetails(result: RunResult) {
   return {
     worker_id: result.workerId,
     worker: result.worker,
@@ -766,10 +766,10 @@ class InlineResultComponent implements Component {
     const appearance = inlineResultAppearance(result.status);
     const suffix = [appearance.qualifier, result.elapsed].filter(Boolean).join(" · ");
     const title = this.theme.bold(result.title);
-    const workerType = this.theme.fg("muted", this.theme.italic(result.worker));
+    const workerName = this.theme.fg("muted", this.theme.italic(result.worker));
     const header = [
       this.theme.fg(appearance.color, `${appearance.icon} ${title}`),
-      workerType,
+      workerName,
       ...(suffix ? [this.theme.fg(appearance.color, suffix)] : []),
     ].join(" · ");
     container.addChild(new WidthBoundComponent(new Text(header, 0, 0), 1));

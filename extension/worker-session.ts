@@ -106,17 +106,17 @@ const WorkerAgentSessionAcquisitionOperation = Schema.Literals([
 ]);
 type WorkerAgentSessionAcquisitionOperation = typeof WorkerAgentSessionAcquisitionOperation.Type;
 
-export class WorkerModelAcquisitionError extends Schema.TaggedErrorClass<WorkerModelAcquisitionError>()(
+export class WorkerModelAcquisitionError extends Schema.TaggedError<WorkerModelAcquisitionError>()(
   "WorkerSession.ModelAcquisitionError",
   { operation: WorkerModelAcquisitionOperation, message: Schema.String, cause: Schema.Defect() },
 ) {}
 
-export class WorkerResourceAcquisitionError extends Schema.TaggedErrorClass<WorkerResourceAcquisitionError>()(
+export class WorkerResourceAcquisitionError extends Schema.TaggedError<WorkerResourceAcquisitionError>()(
   "WorkerSession.ResourceAcquisitionError",
   { operation: WorkerResourceAcquisitionOperation, message: Schema.String, cause: Schema.Defect() },
 ) {}
 
-export class WorkerAgentSessionAcquisitionError extends Schema.TaggedErrorClass<WorkerAgentSessionAcquisitionError>()(
+export class WorkerAgentSessionAcquisitionError extends Schema.TaggedError<WorkerAgentSessionAcquisitionError>()(
   "WorkerSession.AgentSessionAcquisitionError",
   { operation: WorkerAgentSessionAcquisitionOperation, message: Schema.String, cause: Schema.Defect() },
 ) {}

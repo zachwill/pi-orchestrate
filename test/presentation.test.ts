@@ -173,6 +173,43 @@ describe("per-worker result messages", () => {
     )).toBe(true);
   });
 
+  test("accepts only runtime-emittable lifecycle, grouping, and ordinal combinations", () => {
+    const validSettlements = [
+      settlement("completed"),
+      settlement("ready"),
+      {
+        ...settlement("completed"),
+        synthesisGroupId: "synthesis-1",
+        synthesisGroupSize: 2,
+      },
+    ];
+    for (const details of validSettlements) {
+      expect(Result.isSuccess(decodePersistedWorkerSettlementDetails(details))).toBe(true);
+    }
+
+    const invalidSettlements = [
+      { ...settlement("ready"), lifecycle: "one-shot" },
+      { ...settlement("completed"), lifecycle: "interactive" },
+      { ...settlement(), synthesisGroupId: "synthesis-1" },
+      { ...settlement(), synthesisGroupSize: 2 },
+      {
+        ...settlement(),
+        synthesisGroupId: "synthesis-1",
+        synthesisGroupSize: 1,
+      },
+      { ...settlement(), sequence: 0 },
+      { ...settlement(), generation: 0 },
+    ];
+    for (const details of invalidSettlements) {
+      expect(Result.isFailure(decodePersistedWorkerSettlementDetails(details))).toBe(true);
+      const output = Bun.stripANSI(
+        renderResult(details, true, 80, "raw boundary fallback").join("\n"),
+      );
+      expect(output).toContain("details unavailable");
+      expect(output).toContain("raw boundary fallback");
+    }
+  });
+
   test("decodes only direct current settlements and falls back with full raw content", () => {
     const withoutSession = settlement();
     Reflect.deleteProperty(withoutSession, "sessionFile");
