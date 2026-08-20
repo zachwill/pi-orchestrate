@@ -1,85 +1,72 @@
-import { Cause, Context, Effect, FiberMap, Layer, ManagedRuntime } from "effect";
+import { Cause, Context, Effect, FiberMap, FiberSet, Layer } from "effect";
 
 export type WorkflowDefectHandler = (error: unknown) => void;
 
-export interface WorkflowScheduler<Key> {
-  /** Starts a workflow immediately, interrupting and replacing the previous workflow at the key. */
-  start(
+export interface GenerationSupervisorService<Key = unknown> {
+  /** Starts a generation immediately, interrupting and replacing the previous generation at the key. */
+  readonly start: (
     key: Key,
     workflow: Effect.Effect<void, never>,
     onDefect: WorkflowDefectHandler,
-  ): void;
-  /** Interrupts the current workflow at the key and waits for its fiber to settle. */
-  remove(key: Key): Promise<void>;
-  /** Interrupts every retained workflow and closes the scheduler scope. */
-  close(): Promise<void>;
-}
-
-interface WorkflowSupervisorService {
-  readonly start: (
-    key: unknown,
-    workflow: Effect.Effect<void, never>,
   ) => void;
-  readonly remove: (key: unknown) => Effect.Effect<void>;
+  /** Interrupts the current generation at the key and waits for its fiber to settle. */
+  readonly remove: (key: Key) => Effect.Effect<void>;
 }
 
-class WorkflowSupervisor extends Context.Service<
-  WorkflowSupervisor,
-  WorkflowSupervisorService
->()("@zachwill/pi-orchestrate/WorkflowSupervisor") {}
+export class GenerationSupervisor extends Context.Service<
+  GenerationSupervisor,
+  GenerationSupervisorService
+>()("@zachwill/pi-orchestrate/GenerationSupervisor") {}
 
-const workflowSupervisorLayer = Layer.effect(
-  WorkflowSupervisor,
+export interface CleanupSupervisorService {
+  /** Starts a best-effort cleanup Effect in the process-owned FiberSet. */
+  readonly supervise: (cleanup: Effect.Effect<void, never>) => void;
+  /** Waits until every currently supervised cleanup fiber has settled. */
+  readonly awaitEmpty: () => Effect.Effect<void>;
+}
+
+export class CleanupSupervisor extends Context.Service<
+  CleanupSupervisor,
+  CleanupSupervisorService
+>()("@zachwill/pi-orchestrate/CleanupSupervisor") {}
+
+/** Process-scoped coordination graph. Its FiberMap and FiberSet live in the root ManagedRuntime scope. */
+export const processSupervisorLayer = Layer.effectContext(
   Effect.gen(function* () {
-    const fibers = yield* FiberMap.make<unknown, void, never>();
-    const run = yield* FiberMap.runtime(fibers)<never>();
-    return WorkflowSupervisor.of({
-      start(key, workflow) {
-        run(key, workflow);
+    const generations = yield* FiberMap.make<unknown, void, never>();
+    const runGeneration = yield* FiberMap.runtime(generations)<never>();
+    const cleanups = yield* FiberSet.make<void, never>();
+    const runCleanup = yield* FiberSet.runtime(cleanups)<never>();
+
+    const generationSupervisor = GenerationSupervisor.of({
+      start(key, workflow, onDefect) {
+        const supervised = workflow.pipe(
+          Effect.catchCause((cause) => {
+            if (Cause.hasInterruptsOnly(cause)) return Effect.void;
+            return Effect.sync(() => {
+              try {
+                onDefect(Cause.squash(cause));
+              } catch {
+                // Defect reporting must not become another unsupervised defect.
+              }
+            });
+          }),
+        );
+        runGeneration(key, supervised);
       },
-      remove: (key) => FiberMap.remove(fibers, key),
+      remove: (key) => FiberMap.remove(generations, key),
     });
+
+    const cleanupSupervisor = CleanupSupervisor.of({
+      supervise(cleanup) {
+        runCleanup(cleanup.pipe(Effect.catchCause(() => Effect.void)));
+      },
+      awaitEmpty: () => FiberSet.awaitEmpty(cleanups),
+    });
+
+    return Context.empty().pipe(
+      Context.add(GenerationSupervisor, generationSupervisor),
+      Context.add(CleanupSupervisor, cleanupSupervisor),
+    );
   }),
 );
-
-class EffectWorkflowScheduler<Key> implements WorkflowScheduler<Key> {
-  private readonly managedRuntime = ManagedRuntime.make(workflowSupervisorLayer);
-  private readonly supervisor = this.managedRuntime.runSync(WorkflowSupervisor);
-  private closePromise: Promise<void> | undefined;
-
-  start(
-    key: Key,
-    workflow: Effect.Effect<void, never>,
-    onDefect: WorkflowDefectHandler,
-  ): void {
-    const supervised = workflow.pipe(
-      Effect.catchCause((cause) => {
-        if (!Cause.hasInterruptsOnly(cause)) {
-          return Effect.sync(() => {
-            try {
-              onDefect(Cause.squash(cause));
-            } catch {
-              // Defect reporting must not become another unsupervised defect.
-            }
-          });
-        }
-        return Effect.void;
-      }),
-    );
-
-    this.supervisor.start(key, supervised);
-  }
-
-  remove(key: Key): Promise<void> {
-    return this.managedRuntime.runPromise(this.supervisor.remove(key));
-  }
-
-  close(): Promise<void> {
-    this.closePromise ??= this.managedRuntime.dispose();
-    return this.closePromise;
-  }
-}
-
-export function createWorkflowScheduler<Key>(): WorkflowScheduler<Key> {
-  return new EffectWorkflowScheduler<Key>();
-}

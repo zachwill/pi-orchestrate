@@ -736,8 +736,16 @@ describe("Pi Orchestrate extension integration", () => {
     expect(shared.runtime.unsubscribeStateCalls).toBe(1);
   });
 
-  test("concurrent host destruction closes its runtime lifetime exactly once", async () => {
+  test("concurrent host destruction closes its runtime and root Effect lifetime exactly once", async () => {
     const shared = fakeHost();
+    let effectRuntimeDisposeCalls = 0;
+    Object.assign(shared.host, {
+      effectRuntime: {
+        async dispose() {
+          effectRuntimeDisposeCalls += 1;
+        },
+      },
+    });
     let releaseShutdown: (() => void) | undefined;
     const shutdownGate = new Promise<void>((resolve) => {
       releaseShutdown = resolve;
@@ -749,11 +757,37 @@ describe("Pi Orchestrate extension integration", () => {
 
     const first = destroyProcessHost(shared.host);
     const second = destroyProcessHost(shared.host);
+    expect(second).toBe(first);
     await Promise.resolve();
     expect(shared.runtime.shutdownCalls).toBe(1);
 
     releaseShutdown?.();
     await Promise.all([first, second]);
+    expect(shared.runtime.shutdownCalls).toBe(1);
+    expect(effectRuntimeDisposeCalls).toBe(1);
+  });
+
+  test("destruction gates new attachments until its shared failure settles", async () => {
+    const shared = fakeHost();
+    let rejectShutdown!: (error: Error) => void;
+    const shutdownFailure = new Error("shutdown failed");
+    const shutdownGate = new Promise<void>((_resolve, reject) => {
+      rejectShutdown = reject;
+    });
+    shared.runtime.shutdown = async () => {
+      shared.runtime.shutdownCalls += 1;
+      await shutdownGate;
+    };
+
+    const first = destroyProcessHost(shared.host);
+    expect(() => attachProcessHost(shared.host)).toThrow("Cannot attach to a destroying process host");
+    const second = destroyProcessHost(shared.host);
+    expect(second).toBe(first);
+
+    rejectShutdown(shutdownFailure);
+    await expect(first).rejects.toBe(shutdownFailure);
+    await expect(second).rejects.toBe(shutdownFailure);
+    expect(() => attachProcessHost(shared.host)).toThrow("Cannot attach to a destroyed process host");
     expect(shared.runtime.shutdownCalls).toBe(1);
   });
 
@@ -804,7 +838,51 @@ describe("Pi Orchestrate extension integration", () => {
     expect(getProcessHost()).toBe(first);
     expect(detachProcessHost(second, secondAttachment)).toBe(true);
 
+    let releaseShutdown!: () => void;
+    const shutdownGate = new Promise<void>((resolve) => {
+      releaseShutdown = resolve;
+    });
+    Object.assign(first.runtime, {
+      shutdown: () => shutdownGate,
+    });
+    const destruction = quitProcessHost();
+    expect(() => createProcessHost()).toThrow(
+      "Cannot create a process host while the current host is being destroyed",
+    );
+    expect(() => attachProcessHost(first)).toThrow(
+      "Cannot attach to a destroying process host",
+    );
+
+    releaseShutdown();
+    await destruction;
+    expect(getProcessHost()).toBeUndefined();
+  });
+
+  test("late disposal settlement cannot delete a replacement process host", async () => {
     await quitProcessHost();
+    const staleHost = createProcessHost();
+    const root = (staleHost as unknown as {
+      effectRuntime: { dispose(): Promise<void> };
+    }).effectRuntime;
+    const disposeRoot = root.dispose.bind(root);
+    let rejectLate!: (error: Error) => void;
+    const lateDisposal = new Promise<void>((_resolve, reject) => {
+      rejectLate = reject;
+    });
+    root.dispose = () => lateDisposal;
+
+    await destroyProcessHost(staleHost, {
+      awaitRootDisposal: async () => {},
+    });
+    const replacement = createProcessHost();
+    rejectLate(new Error("stale disposal failed"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(getProcessHost()).toBe(replacement);
+
+    await disposeRoot();
+    await destroyProcessHost(replacement);
     expect(getProcessHost()).toBeUndefined();
   });
 });

@@ -1,6 +1,6 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { Effect, Option } from "effect";
+import { Cause, Context, Deferred, Effect, Fiber, Layer, Schema } from "effect";
 import {
   CANCELLATION_GRACE_MS,
   EMPTY_WORKER_USAGE,
@@ -23,12 +23,15 @@ import {
   type WorkerUsage,
 } from "./domain.js";
 import {
-  createWorkflowScheduler,
-  type WorkflowScheduler,
+  CleanupSupervisor,
+  GenerationSupervisor,
+  type CleanupSupervisorService,
+  type GenerationSupervisorService,
 } from "./scheduler.js";
 import {
-  resolveWorkerModel,
-  type WorkerSessionFactory,
+  ChildSessions,
+  type ChildSessionsService,
+  type WorkerSessionAbortError,
   type WorkerSessionHandle,
 } from "./worker-session.js";
 import type {
@@ -38,7 +41,7 @@ import type {
 
 export const MAX_TERMINAL_WORKER_HISTORY = 100;
 export const MAX_COMPLETED_RUN_HISTORY = 100;
-/** Shutdown waits this long for interrupted bootstrap/prompt promises, then returns best-effort. */
+/** Shutdown waits this long for interrupted workflows and supervised cleanup, then returns best-effort. */
 export const SHUTDOWN_CLEANUP_GRACE_MS = CANCELLATION_GRACE_MS;
 
 export interface OrchestrationContext {
@@ -89,83 +92,106 @@ export type SettlementListener = (settlement: WorkerSettlement) => void;
 export type UnsubscribeSettlement = () => void;
 export type StateListener = (ownerSessionId: string) => void;
 
-export type AbortTarget =
-  | {
-      readonly workerIds: readonly WorkerId[];
-      readonly all?: never;
-    }
-  | {
-      readonly all: true;
-      readonly workerIds?: never;
-    };
-
-export type DeadlineResult = "settled" | "timed-out";
-
-export interface BestEffortDeadline {
-  wait(promise: Promise<unknown>, timeoutMs: number): Promise<DeadlineResult>;
+export interface AbortTarget {
+  readonly workerIds?: readonly string[];
+  readonly all?: boolean;
 }
 
-export interface OrchestratorRuntimeOptions {
-  readonly workerSessionFactory: WorkerSessionFactory;
+export interface OrchestrationLayerOptions {
   readonly idFactories?: OrchestrateIdFactories;
   readonly clock?: () => number;
-  readonly scheduler?: WorkflowScheduler<WorkerId>;
-  readonly bestEffortDeadline?: BestEffortDeadline;
 }
 
-export interface OrchestratorRuntime {
+const OrchestrationOperation = Schema.Literals([
+  "orchestrate",
+  "sendInteractive",
+  "abort",
+  "closeInteractive",
+  "snapshot",
+]);
+type OrchestrationOperation = typeof OrchestrationOperation.Type;
+
+const OrchestrationRejectionReason = Schema.Literals([
+  "shutdown",
+  "validation",
+  "ownership",
+  "target",
+  "worker-state",
+  "unknown-worker",
+  "model-unavailable",
+]);
+type OrchestrationRejectionReason = typeof OrchestrationRejectionReason.Type;
+
+export class OrchestrationActionRejected extends Schema.TaggedError<OrchestrationActionRejected>()(
+  "Orchestration.ActionRejected",
+  {
+    operation: OrchestrationOperation,
+    reason: OrchestrationRejectionReason,
+    message: Schema.String,
+  },
+) {}
+
+export interface OrchestrationService {
   orchestrate(
     context: OrchestrationContext,
     task: OrchestrateTaskInput,
     mode: "async",
-    signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun>;
+  ): Effect.Effect<AcceptedRun, OrchestrationActionRejected>;
   orchestrate(
     context: OrchestrationContext,
     task: OrchestrateTaskInput,
     mode: "inline",
-    signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<CompletedRun>;
+  ): Effect.Effect<CompletedRun, OrchestrationActionRejected>;
   orchestrate(
     context: OrchestrationContext,
     task: OrchestrateTaskInput,
     mode: RunMode,
-    signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun | CompletedRun>;
+  ): Effect.Effect<AcceptedRun | CompletedRun, OrchestrationActionRejected>;
   sendInteractive(
     context: OrchestrationContext,
-    workerId: WorkerId,
+    workerId: string,
     instructions: string,
     mode: "async",
-    signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun>;
+  ): Effect.Effect<AcceptedRun, OrchestrationActionRejected>;
   sendInteractive(
     context: OrchestrationContext,
-    workerId: WorkerId,
+    workerId: string,
     instructions: string,
     mode: "inline",
-    signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<CompletedRun>;
+  ): Effect.Effect<CompletedRun, OrchestrationActionRejected>;
   sendInteractive(
     context: OrchestrationContext,
-    workerId: WorkerId,
+    workerId: string,
     instructions: string,
     mode: RunMode,
-    signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun | CompletedRun>;
-  abort(ownerSessionId: string, target: AbortTarget): Promise<void>;
-  closeInteractive(ownerSessionId: string, workerId: WorkerId): Promise<void>;
-  snapshot(ownerSessionId: string): Promise<RuntimeSnapshot>;
-  subscribeSettlement(listener: SettlementListener): UnsubscribeSettlement;
-  subscribeState(listener: StateListener): () => void;
-  shutdown(): Promise<void>;
+  ): Effect.Effect<AcceptedRun | CompletedRun, OrchestrationActionRejected>;
+  readonly abort: (
+    ownerSessionId: string,
+    target: AbortTarget,
+  ) => Effect.Effect<void, OrchestrationActionRejected>;
+  readonly closeInteractive: (
+    ownerSessionId: string,
+    workerId: string,
+  ) => Effect.Effect<void, OrchestrationActionRejected>;
+  readonly snapshot: (
+    ownerSessionId: string,
+  ) => Effect.Effect<RuntimeSnapshot, OrchestrationActionRejected>;
+  readonly subscribeSettlement: (listener: SettlementListener) => UnsubscribeSettlement;
+  readonly subscribeState: (listener: StateListener) => () => void;
+  /** Closes admission synchronously when called, before teardown begins. */
+  readonly shutdown: () => Effect.Effect<void>;
 }
+
+export class Orchestration extends Context.Service<Orchestration, OrchestrationService>()(
+  "@zachwill/pi-orchestrate/Orchestration",
+) {}
+
 
 interface RuntimeEntry {
   readonly context: OrchestrationContext;
@@ -177,253 +203,271 @@ interface RuntimeEntry {
   unsubscribeMessageDirection?: () => void;
 }
 
-interface RunWaiter {
-  readonly promise: Promise<CompletedRun>;
-  settled: boolean;
-  onSettled?: () => void;
-  resolve(run: CompletedRun): void;
-}
-
-const defaultBestEffortDeadline: BestEffortDeadline = {
-  wait(promise, timeoutMs) {
-    const settled = Effect.promise(() => promise.then(
-      () => "settled" as const,
-      () => "settled" as const,
-    ));
-    return Effect.runPromise(
-      settled.pipe(
-        Effect.timeoutOption(timeoutMs),
-        Effect.map((result) => Option.getOrElse(result, () => "timed-out" as const)),
-      ),
-    );
-  },
-};
-
-class DefaultOrchestratorRuntime implements OrchestratorRuntime {
-  private readonly workerSessionFactory: WorkerSessionFactory;
+class StatefulOrchestration implements OrchestrationService {
+  private readonly childSessions: ChildSessionsService;
+  private readonly generations: GenerationSupervisorService;
+  private readonly cleanup: CleanupSupervisorService;
   private readonly idFactories: OrchestrateIdFactories;
   private readonly clock: () => number;
-  private readonly scheduler: WorkflowScheduler<WorkerId>;
-  private readonly bestEffortDeadline: BestEffortDeadline;
   private readonly workers = new Map<WorkerId, WorkerRecord>();
   private readonly runs = new Map<RunId, RunRecord>();
   private readonly entries = new Map<WorkerId, RuntimeEntry>();
-  private readonly runWaiters = new Map<RunId, RunWaiter>();
+  private readonly runCompletions = new Map<RunId, Deferred.Deferred<CompletedRun>>();
   private readonly completedRuns = new Map<RunId, CompletedRun>();
-  private readonly cancellationPromises = new Map<WorkerId, Promise<void>>();
-  private readonly cleanupOperations = new Set<Promise<void>>();
+  private readonly cancellations = new Map<WorkerId, Deferred.Deferred<void>>();
   private readonly terminalWorkerOrder: WorkerId[] = [];
   private readonly completedRunOrder: RunId[] = [];
   private readonly settlementListeners = new Set<SettlementListener>();
   private readonly runSettlementListeners = new Map<RunId, SettlementListener>();
   private readonly stateListeners = new Set<StateListener>();
   private settlementSequence = 0;
-  private readonly disposedSessions = new WeakSet<WorkerSessionHandle>();
   private shuttingDown = false;
-  private shutdownPromise: Promise<void> | undefined;
+  private shutdownStarted = false;
+  private readonly shutdownCompletion = Deferred.makeUnsafe<void>();
 
-  constructor(options: OrchestratorRuntimeOptions) {
-    this.workerSessionFactory = options.workerSessionFactory;
+  constructor(
+    childSessions: ChildSessionsService,
+    generations: GenerationSupervisorService,
+    cleanup: CleanupSupervisorService,
+    options: OrchestrationLayerOptions,
+  ) {
+    this.childSessions = childSessions;
+    this.generations = generations;
+    this.cleanup = cleanup;
     this.idFactories = options.idFactories ?? createRandomIdFactories();
     this.clock = options.clock ?? Date.now;
-    this.scheduler = options.scheduler ?? createWorkflowScheduler<WorkerId>();
-    this.bestEffortDeadline = options.bestEffortDeadline ?? defaultBestEffortDeadline;
   }
 
   orchestrate(
     context: OrchestrationContext,
     task: OrchestrateTaskInput,
     mode: "async",
-    signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun>;
+  ): Effect.Effect<AcceptedRun, OrchestrationActionRejected>;
   orchestrate(
     context: OrchestrationContext,
     task: OrchestrateTaskInput,
     mode: "inline",
-    signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<CompletedRun>;
+  ): Effect.Effect<CompletedRun, OrchestrationActionRejected>;
   orchestrate(
     context: OrchestrationContext,
     task: OrchestrateTaskInput,
     mode: RunMode,
-    signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun | CompletedRun>;
-  async orchestrate(
+  ): Effect.Effect<AcceptedRun | CompletedRun, OrchestrationActionRejected>;
+  orchestrate(
     context: OrchestrationContext,
     task: OrchestrateTaskInput,
     mode: RunMode,
-    signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun | CompletedRun> {
-    this.assertOpen();
-    throwIfAborted(signal);
-    const definition = this.validateTask(context, task, mode);
+  ): Effect.Effect<AcceptedRun | CompletedRun, OrchestrationActionRejected> {
+    return Effect.gen({ self: this }, function* () {
+      yield* this.requireOpen("orchestrate");
+      const definition = yield* this.validateTask(context, task, mode);
 
-    const runId = this.idFactories.runId();
-    const workerId = this.idFactories.workerId();
-    this.assertFreshIds(runId, workerId);
+      const runId = this.idFactories.runId();
+      const workerId = this.idFactories.workerId();
+      this.assertFreshIds(runId, workerId);
 
-    const run: RunRecord = {
-      id: runId,
-      ownerSessionId: context.ownerSessionId,
-      workerId,
-      mode,
-      state: "running",
-      createdAt: this.clock(),
-      ...(context.synthesisGroup
-        ? {
-            synthesisGroupId: context.synthesisGroup.id,
-            synthesisGroupSize: context.synthesisGroup.size,
-          }
-        : {}),
-    };
-    const record: WorkerRecord = {
-      id: workerId,
-      worker: definition.name,
-      ownerSessionId: context.ownerSessionId,
-      runId,
-      title: task.title,
-      instructions: task.instructions,
-      lifecycle: definition.lifecycle,
-      status: "starting",
-      usage: copyUsage(EMPTY_WORKER_USAGE),
-      messageDirection: "to-model",
-      startedAt: this.clock(),
-    };
+      const run: RunRecord = {
+        id: runId,
+        ownerSessionId: context.ownerSessionId,
+        workerId,
+        mode,
+        state: "running",
+        createdAt: this.clock(),
+        ...(context.synthesisGroup
+          ? {
+              synthesisGroupId: context.synthesisGroup.id,
+              synthesisGroupSize: context.synthesisGroup.size,
+            }
+          : {}),
+      };
+      const record: WorkerRecord = {
+        id: workerId,
+        worker: definition.name,
+        ownerSessionId: context.ownerSessionId,
+        runId,
+        title: task.title,
+        instructions: task.instructions,
+        lifecycle: definition.lifecycle,
+        status: "starting",
+        usage: copyUsage(EMPTY_WORKER_USAGE),
+        messageDirection: "to-model",
+        startedAt: this.clock(),
+      };
 
-    const waiter = makeRunWaiter();
-    this.runs.set(runId, run);
-    this.runWaiters.set(runId, waiter);
-    if (onSettlement) this.runSettlementListeners.set(runId, onSettlement);
-    this.workers.set(workerId, record);
-    this.entries.set(workerId, { context, definition, generation: 1 });
-    this.emitState(context.ownerSessionId);
-    this.launchBootstrap(workerId, 1);
+      const completion = Deferred.makeUnsafe<CompletedRun>();
+      this.runs.set(runId, run);
+      this.runCompletions.set(runId, completion);
+      if (onSettlement) this.runSettlementListeners.set(runId, onSettlement);
+      this.workers.set(workerId, record);
+      this.entries.set(workerId, { context, definition, generation: 1 });
+      this.emitState(context.ownerSessionId);
+      this.launchBootstrap(workerId, 1);
 
-    if (mode === "inline") {
-      return this.awaitInlineRun(run, waiter, signal);
-    }
-    return freezeAcceptedRun(runId, workerId);
+      return yield* mode === "inline"
+        ? this.awaitInlineRun(run, completion)
+        : Effect.succeed(freezeAcceptedRun(runId, workerId));
+    });
   }
 
   sendInteractive(
     context: OrchestrationContext,
-    workerId: WorkerId,
+    workerId: string,
     instructions: string,
     mode: "async",
-    signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun>;
+  ): Effect.Effect<AcceptedRun, OrchestrationActionRejected>;
   sendInteractive(
     context: OrchestrationContext,
-    workerId: WorkerId,
+    workerId: string,
     instructions: string,
     mode: "inline",
-    signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<CompletedRun>;
+  ): Effect.Effect<CompletedRun, OrchestrationActionRejected>;
   sendInteractive(
     context: OrchestrationContext,
-    workerId: WorkerId,
+    workerId: string,
     instructions: string,
     mode: RunMode,
-    signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun | CompletedRun>;
-  async sendInteractive(
+  ): Effect.Effect<AcceptedRun | CompletedRun, OrchestrationActionRejected>;
+  sendInteractive(
     context: OrchestrationContext,
-    workerId: WorkerId,
+    workerId: string,
     instructions: string,
     mode: RunMode,
-    signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun | CompletedRun> {
-    this.assertOpen();
-    throwIfAborted(signal);
-    validateContextOwner(context.ownerSessionId);
-    validateMode(mode);
-    validateText("instructions", instructions, MAX_WORKER_INSTRUCTIONS_LENGTH);
+  ): Effect.Effect<AcceptedRun | CompletedRun, OrchestrationActionRejected> {
+    return Effect.gen({ self: this }, function* () {
+      yield* this.requireOpen("sendInteractive");
+      yield* validateContextOwner("sendInteractive", context.ownerSessionId);
+      yield* validateMode("sendInteractive", mode);
+      yield* validateText(
+        "sendInteractive",
+        "instructions",
+        instructions,
+        MAX_WORKER_INSTRUCTIONS_LENGTH,
+      );
+      const validatedWorkerId = yield* validateWorkerId(
+        "sendInteractive",
+        workerId,
+      );
 
-    const current = this.ownedWorker(context.ownerSessionId, workerId);
-    if (current.lifecycle !== "interactive" || current.status !== "ready") {
-      throw new Error("interactive_send requires an owned ready interactive worker");
-    }
-    const entry = this.entries.get(workerId);
-    if (!entry?.session) throw new Error("Ready interactive worker has no session handle");
+      const current = yield* this.ownedWorker(
+        "sendInteractive",
+        context.ownerSessionId,
+        validatedWorkerId,
+      );
+      if (current.lifecycle !== "interactive" || current.status !== "ready") {
+        return yield* rejectAction(
+          "sendInteractive",
+          "worker-state",
+          "interactive_send requires an owned ready interactive worker",
+        );
+      }
+      const entry = this.entries.get(validatedWorkerId);
+      if (!entry?.session) throw new Error("Ready interactive worker has no session handle");
 
-    const runId = this.idFactories.runId();
-    if (this.runs.has(runId)) throw new Error(`Duplicate run ID: ${runId}`);
-    const run: RunRecord = {
-      id: runId,
-      ownerSessionId: context.ownerSessionId,
-      workerId,
-      mode,
-      state: "running",
-      createdAt: this.clock(),
-    };
-    const running: WorkerRecord = {
-      ...transitionWorkerStatus(current, "running"),
-      runId,
-      instructions,
-      activity: undefined,
-      messageDirection: "to-model",
-      startedAt: this.clock(),
-      settledAt: undefined,
-    };
-    const waiter = makeRunWaiter();
+      const runId = this.idFactories.runId();
+      if (this.runs.has(runId)) throw new Error(`Duplicate run ID: ${runId}`);
+      const run: RunRecord = {
+        id: runId,
+        ownerSessionId: context.ownerSessionId,
+        workerId: validatedWorkerId,
+        mode,
+        state: "running",
+        createdAt: this.clock(),
+      };
+      const running: WorkerRecord = {
+        ...transitionWorkerStatus(current, "running"),
+        runId,
+        instructions,
+        activity: undefined,
+        messageDirection: "to-model",
+        startedAt: this.clock(),
+        settledAt: undefined,
+      };
+      const completion = Deferred.makeUnsafe<CompletedRun>();
 
-    entry.generation += 1;
-    const generation = entry.generation;
-    this.runs.set(runId, run);
-    this.runWaiters.set(runId, waiter);
-    if (onSettlement) this.runSettlementListeners.set(runId, onSettlement);
-    this.workers.set(workerId, running);
-    this.subscribeEntryObservability(workerId, entry, entry.session, generation);
-    this.emitState(context.ownerSessionId);
-    this.launchPrompt(workerId, generation, entry.session, instructions);
+      entry.generation += 1;
+      const generation = entry.generation;
+      this.runs.set(runId, run);
+      this.runCompletions.set(runId, completion);
+      if (onSettlement) this.runSettlementListeners.set(runId, onSettlement);
+      this.workers.set(validatedWorkerId, running);
+      this.subscribeEntryObservability(validatedWorkerId, entry, entry.session, generation);
+      this.emitState(context.ownerSessionId);
+      this.launchPrompt(validatedWorkerId, generation, entry.session, instructions);
 
-    if (mode === "inline") {
-      return this.awaitInlineRun(run, waiter, signal);
-    }
-    return freezeAcceptedRun(runId, workerId);
+      return yield* mode === "inline"
+        ? this.awaitInlineRun(run, completion)
+        : Effect.succeed(freezeAcceptedRun(runId, validatedWorkerId));
+    });
   }
 
-  async abort(ownerSessionId: string, target: AbortTarget): Promise<void> {
-    this.assertOpen();
-    validateContextOwner(ownerSessionId);
-    const targets = this.resolveAbortTargets(ownerSessionId, target);
-    await this.cancelWorkers(targets);
+  abort(
+    ownerSessionId: string,
+    target: AbortTarget,
+  ): Effect.Effect<void, OrchestrationActionRejected> {
+    return Effect.gen({ self: this }, function* () {
+      yield* this.requireOpen("abort");
+      yield* validateContextOwner("abort", ownerSessionId);
+      const workerIds = yield* this.resolveAbortTargets(ownerSessionId, target);
+      yield* this.cancelWorkers(workerIds);
+    });
   }
 
-  async closeInteractive(ownerSessionId: string, workerId: WorkerId): Promise<void> {
-    this.assertOpen();
-    validateContextOwner(ownerSessionId);
-    const current = this.ownedWorker(ownerSessionId, workerId);
-    if (current.lifecycle !== "interactive" || current.status !== "ready") {
-      throw new Error("interactive_close requires an owned ready interactive worker");
-    }
-    this.closeReadyInteractiveWorker(current);
+  closeInteractive(
+    ownerSessionId: string,
+    workerId: string,
+  ): Effect.Effect<void, OrchestrationActionRejected> {
+    return Effect.gen({ self: this }, function* () {
+      yield* this.requireOpen("closeInteractive");
+      yield* validateContextOwner("closeInteractive", ownerSessionId);
+      const validatedWorkerId = yield* validateWorkerId(
+        "closeInteractive",
+        workerId,
+      );
+      const current = yield* this.ownedWorker(
+        "closeInteractive",
+        ownerSessionId,
+        validatedWorkerId,
+      );
+      if (current.lifecycle !== "interactive" || current.status !== "ready") {
+        return yield* rejectAction(
+          "closeInteractive",
+          "worker-state",
+          "interactive_close requires an owned ready interactive worker",
+        );
+      }
+      this.closeReadyInteractiveWorker(current);
+    });
   }
 
-  async snapshot(ownerSessionId: string): Promise<RuntimeSnapshot> {
-    validateContextOwner(ownerSessionId);
-    const runs = [...this.runs.values()]
-      .filter((run) => run.ownerSessionId === ownerSessionId)
-      .map(copyRunRecord);
-    const workers = [...this.workers.values()]
-      .filter((worker) => worker.ownerSessionId === ownerSessionId)
-      .map(copyWorkerRecord);
-    return Object.freeze({
-      runs: Object.freeze(runs),
-      workers: Object.freeze(workers),
+  snapshot(
+    ownerSessionId: string,
+  ): Effect.Effect<RuntimeSnapshot, OrchestrationActionRejected> {
+    return Effect.gen({ self: this }, function* () {
+      yield* validateContextOwner("snapshot", ownerSessionId);
+      const runs = [...this.runs.values()]
+        .filter((run) => run.ownerSessionId === ownerSessionId)
+        .map(copyRunRecord);
+      const workers = [...this.workers.values()]
+        .filter((worker) => worker.ownerSessionId === ownerSessionId)
+        .map(copyWorkerRecord);
+      return Object.freeze({
+        runs: Object.freeze(runs),
+        workers: Object.freeze(workers),
+      });
     });
   }
 
   subscribeSettlement(listener: SettlementListener): UnsubscribeSettlement {
     if (typeof listener !== "function") throw new Error("Settlement listener must be a function");
+    if (this.shuttingDown) return noOp;
     this.settlementListeners.add(listener);
     let subscribed = true;
     return () => {
@@ -435,6 +479,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
 
   subscribeState(listener: StateListener): () => void {
     if (typeof listener !== "function") throw new Error("State listener must be a function");
+    if (this.shuttingDown) return noOp;
     this.stateListeners.add(listener);
     let subscribed = true;
     return () => {
@@ -444,59 +489,131 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     };
   }
 
-  shutdown(): Promise<void> {
-    if (this.shutdownPromise) return this.shutdownPromise;
+  shutdown(): Effect.Effect<void> {
     this.shuttingDown = true;
-    this.shutdownPromise = this.performShutdown();
-    return this.shutdownPromise;
+    return Effect.suspend(() => {
+      if (this.shutdownStarted) return Deferred.await(this.shutdownCompletion);
+      this.shutdownStarted = true;
+      return this.performShutdown().pipe(
+        Effect.ensuring(Effect.sync(() => {
+          Deferred.doneUnsafe(this.shutdownCompletion, Effect.void);
+        })),
+      );
+    });
   }
 
-  private async performShutdown(): Promise<void> {
-    try {
-      this.closeReadyInteractiveWorkersForShutdown();
-      const active = [...this.workers.values()]
+  private performShutdown(): Effect.Effect<void> {
+    const runtime = this;
+    return Effect.gen(function* () {
+      runtime.closeReadyInteractiveWorkersForShutdown();
+      const active = [...runtime.workers.values()]
         .filter((worker) => isActiveWorkerStatus(worker.status))
         .map((worker) => worker.id);
-      await this.cancelWorkers(active);
-    } finally {
-      try {
-        await this.scheduler.close();
-      } catch {
-        // Scheduler closure is best-effort during process shutdown.
-      } finally {
-        await this.awaitTrackedCleanupBestEffort();
-        this.runSettlementListeners.clear();
-        this.settlementListeners.clear();
-        this.stateListeners.clear();
-      }
-    }
+      yield* runtime.cancelWorkers(active);
+      yield* runtime.childSessions.shutdown().pipe(Effect.catchCause(() => Effect.void));
+      yield* runtime.awaitSupervisedCleanupBestEffort();
+      runtime.runSettlementListeners.clear();
+      runtime.settlementListeners.clear();
+      runtime.stateListeners.clear();
+    }).pipe(Effect.ensuring(Effect.sync(() => {
+      this.runSettlementListeners.clear();
+      this.settlementListeners.clear();
+      this.stateListeners.clear();
+    })));
   }
 
   private validateTask(
     context: OrchestrationContext,
     task: OrchestrateTaskInput,
     mode: RunMode,
-  ): WorkerDefinition {
-    validateContextOwner(context.ownerSessionId);
-    validateMode(mode);
-    if (!task || typeof task !== "object" || Array.isArray(task)) {
-      throw new Error("orchestrate requires one task object");
-    }
-    if (context.synthesisGroup) {
-      validateText("synthesis group ID", context.synthesisGroup.id, MAX_WORKER_TITLE_LENGTH);
-      if (mode !== "async") throw new Error("Sibling synthesis requires an async task");
-      if (!Number.isSafeInteger(context.synthesisGroup.size) || context.synthesisGroup.size < 2) {
-        throw new Error("Synthesis group size must be an integer of at least 2");
+  ): Effect.Effect<WorkerDefinition, OrchestrationActionRejected> {
+    return Effect.gen(function* () {
+      yield* validateContextOwner("orchestrate", context.ownerSessionId);
+      yield* validateMode("orchestrate", mode);
+      if (!task || typeof task !== "object" || Array.isArray(task)) {
+        return yield* rejectAction(
+          "orchestrate",
+          "validation",
+          "orchestrate requires one task object",
+        );
       }
-    }
+      if (context.synthesisGroup) {
+        yield* validateText(
+          "orchestrate",
+          "synthesis group ID",
+          context.synthesisGroup.id,
+          MAX_WORKER_TITLE_LENGTH,
+        );
+        if (mode !== "async") {
+          return yield* rejectAction(
+            "orchestrate",
+            "validation",
+            "Sibling synthesis requires an async task",
+          );
+        }
+        if (
+          !Number.isSafeInteger(context.synthesisGroup.size) ||
+          context.synthesisGroup.size < 2
+        ) {
+          return yield* rejectAction(
+            "orchestrate",
+            "validation",
+            "Synthesis group size must be an integer of at least 2",
+          );
+        }
+      }
 
-    validateText("worker", task.worker, MAX_WORKER_TITLE_LENGTH);
-    validateText("title", task.title, MAX_WORKER_TITLE_LENGTH);
-    validateText("instructions", task.instructions, MAX_WORKER_INSTRUCTIONS_LENGTH);
-    const definition = findWorkerByName(context.catalog, task.worker);
-    if (!definition) throw new Error(`Unknown worker: ${task.worker}`);
-    resolveWorkerModel(definition, context.parentModel, context.modelRegistry);
-    return definition;
+      yield* validateText(
+        "orchestrate",
+        "worker",
+        task.worker,
+        MAX_WORKER_TITLE_LENGTH,
+      );
+      yield* validateText(
+        "orchestrate",
+        "title",
+        task.title,
+        MAX_WORKER_TITLE_LENGTH,
+      );
+      yield* validateText(
+        "orchestrate",
+        "instructions",
+        task.instructions,
+        MAX_WORKER_INSTRUCTIONS_LENGTH,
+      );
+      const definition = findWorkerByName(context.catalog, task.worker);
+      if (!definition) {
+        return yield* rejectAction(
+          "orchestrate",
+          "unknown-worker",
+          `Unknown worker: ${task.worker}`,
+        );
+      }
+
+      const configured = definition.model;
+      if (!configured) {
+        if (!context.parentModel) {
+          return yield* rejectAction(
+            "orchestrate",
+            "model-unavailable",
+            `Worker "${definition.name}" has no configured model and no parent model is available`,
+          );
+        }
+      } else {
+        const selected = context.modelRegistry.find(
+          configured.provider,
+          configured.modelId,
+        );
+        if (!selected) {
+          return yield* rejectAction(
+            "orchestrate",
+            "model-unavailable",
+            `Worker "${definition.name}" configured model "${configured.provider}/${configured.modelId}" was not found`,
+          );
+        }
+      }
+      return definition;
+    });
   }
 
   private assertFreshIds(runId: RunId, workerId: WorkerId): void {
@@ -506,7 +623,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
 
   private launchBootstrap(workerId: WorkerId, generation: number): void {
     try {
-      this.scheduler.start(
+      this.generations.start(
         workerId,
         this.bootstrapAndPrompt(workerId, generation),
         (error) => this.settleWorkflowDefect(workerId, generation, error),
@@ -523,7 +640,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     instructions: string,
   ): void {
     try {
-      this.scheduler.start(
+      this.generations.start(
         workerId,
         this.executePrompt(workerId, generation, session, instructions),
         (error) => this.settleWorkflowDefect(workerId, generation, error),
@@ -555,49 +672,26 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
       const entry = this.entries.get(workerId);
       if (!entry) return Effect.succeed(undefined);
 
-      let creation: Promise<WorkerSessionHandle>;
-      try {
-        creation = this.workerSessionFactory.create({
-          cwd: entry.context.cwd,
-          agentDir: entry.context.agentDir,
-          parentSessionFile: entry.context.parentSessionFile,
-          projectTrusted: entry.context.projectTrusted,
-          definition: entry.definition,
-          parentModel: entry.context.parentModel,
-          modelRegistry: entry.context.modelRegistry,
-        });
-      } catch (error) {
-        this.settleCreationFailure(workerId, generation, error);
-        return Effect.succeed(undefined);
-      }
-
-      // Keep the original Promise observed independently from the Effect waiter below.
-      // Pi session creation has no AbortSignal: scheduler interruption may stop waiting,
-      // but acquisition can still succeed and must either match this exact generation or
-      // have its handle-owned scope disposed. Shutdown tracks the same completion
-      // best-effort without making process teardown wait forever.
-      this.trackCleanup(creation.then(() => undefined, () => undefined));
-      void creation.then((session) => {
-        if (!this.canAdoptCreatedSession(workerId, generation, entry)) {
-          this.disposeSession(session);
-        }
-      }, () => undefined);
-
-      return Effect.tryPromise({
-        try: () => creation,
-        catch: (error) => error,
-      }).pipe(
+      return this.childSessions.acquire({
+        cwd: entry.context.cwd,
+        agentDir: entry.context.agentDir,
+        parentSessionFile: entry.context.parentSessionFile,
+        projectTrusted: entry.context.projectTrusted,
+        definition: entry.definition,
+        parentModel: entry.context.parentModel,
+        modelRegistry: entry.context.modelRegistry,
+      }, (session) => this.adoptCreatedSession(
+        workerId,
+        generation,
+        entry,
+        session,
+      )).pipe(
         Effect.match({
           onFailure: (error) => {
             this.settleCreationFailure(workerId, generation, error);
             return undefined;
           },
-          onSuccess: (session) => this.adoptCreatedSession(
-            workerId,
-            generation,
-            entry,
-            session,
-          ),
+          onSuccess: (session) => session,
         }),
       );
     });
@@ -611,6 +705,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     const current = this.workers.get(workerId);
     return !this.shuttingDown &&
       current?.status === "starting" &&
+      this.entries.get(workerId) === entry &&
       entry.generation === generation;
   }
 
@@ -622,7 +717,6 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
   ): WorkerSessionHandle | undefined {
     const current = this.workers.get(workerId);
     if (!this.canAdoptCreatedSession(workerId, generation, entry) || !current) {
-      this.disposeSession(session);
       return undefined;
     }
 
@@ -636,7 +730,8 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
       this.emitState(current.ownerSessionId);
       return session;
     } catch (error) {
-      this.disposeEntrySession(entry);
+      this.unsubscribeEntryObservability(entry);
+      entry.session = undefined;
       this.settleCreationFailure(workerId, generation, error);
       return undefined;
     }
@@ -661,22 +756,7 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
         return Effect.void;
       }
 
-      let prompt: Promise<WorkerOutcome>;
-      try {
-        prompt = session.prompt(instructions);
-      } catch (error) {
-        this.settleOutcome(workerId, generation, session, {
-          status: "failed",
-          message: describeError(error, "Worker prompt failed"),
-        });
-        return Effect.void;
-      }
-      this.trackCleanup(prompt.then(() => undefined, () => undefined));
-
-      return Effect.tryPromise({
-        try: () => prompt,
-        catch: (error) => error,
-      }).pipe(
+      return session.prompt(instructions).pipe(
         Effect.match({
           onFailure: (error): WorkerOutcome => ({
             status: "failed",
@@ -866,8 +946,9 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     this.completedRuns.set(runId, completed);
     this.completedRunOrder.push(runId);
     this.runs.set(runId, { ...run, state: "complete" });
-    this.runWaiters.get(runId)?.resolve(completed);
-    this.runWaiters.delete(runId);
+    const completion = this.runCompletions.get(runId);
+    if (completion) Deferred.doneUnsafe(completion, Effect.succeed(completed));
+    this.runCompletions.delete(runId);
   }
 
   private rememberTerminalWorker(workerId: WorkerId): Set<string> {
@@ -906,112 +987,155 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     return affectedOwners;
   }
 
-  private resolveAbortTargets(ownerSessionId: string, target: AbortTarget): WorkerId[] {
-    if (!target || typeof target !== "object") throw new Error("Invalid abort target");
-    const candidate = target as {
-      workerIds?: readonly WorkerId[];
-      all?: boolean;
-    };
-    const selected = [
-      candidate.workerIds !== undefined,
-      candidate.all !== undefined,
-    ].filter(Boolean).length;
-    if (selected !== 1 || (candidate.all !== undefined && candidate.all !== true)) {
-      throw new Error("Abort target must specify exactly one of workerIds or all: true");
-    }
-
-    if (candidate.workerIds !== undefined) {
-      if (!Array.isArray(candidate.workerIds) || candidate.workerIds.length === 0) {
-        throw new Error("workerIds must contain at least one worker ID");
+  private resolveAbortTargets(
+    ownerSessionId: string,
+    target: AbortTarget,
+  ): Effect.Effect<WorkerId[], OrchestrationActionRejected> {
+    return Effect.gen({ self: this }, function* () {
+      if (!target || typeof target !== "object") {
+        return yield* rejectAction("abort", "target", "Invalid abort target");
       }
-      const unique = [...new Set(candidate.workerIds)];
-      for (const workerId of unique) {
-        const worker = this.ownedWorker(ownerSessionId, workerId);
-        if (worker.status === "ready") {
-          throw new Error("Ready interactive workers are not active; use interactive_close");
+      const candidate = target;
+      const selected = [
+        candidate.workerIds !== undefined,
+        candidate.all !== undefined,
+      ].filter(Boolean).length;
+      if (selected !== 1 || (candidate.all !== undefined && candidate.all !== true)) {
+        return yield* rejectAction(
+          "abort",
+          "target",
+          "Abort target must specify exactly one of workerIds or all: true",
+        );
+      }
+
+      if (candidate.workerIds !== undefined) {
+        if (!Array.isArray(candidate.workerIds) || candidate.workerIds.length === 0) {
+          return yield* rejectAction(
+            "abort",
+            "target",
+            "workerIds must contain at least one worker ID",
+          );
         }
-        if (!isActiveWorkerStatus(worker.status)) {
-          throw new Error("worker_abort requires owned active workers");
+        const unique = [...new Set(candidate.workerIds)];
+        const validatedWorkerIds = yield* Effect.all(
+          unique.map((workerId) => validateWorkerId("abort", workerId)),
+        );
+        for (const workerId of validatedWorkerIds) {
+          const worker = yield* this.ownedWorker(
+            "abort",
+            ownerSessionId,
+            workerId,
+          );
+          if (worker.status === "ready") {
+            return yield* rejectAction(
+              "abort",
+              "worker-state",
+              "Ready interactive workers are not active; use interactive_close",
+            );
+          }
+          if (!isActiveWorkerStatus(worker.status)) {
+            return yield* rejectAction(
+              "abort",
+              "worker-state",
+              "worker_abort requires owned active workers",
+            );
+          }
         }
+        return validatedWorkerIds;
       }
-      return unique;
-    }
 
-    return [...this.workers.values()]
-      .filter(
-        (worker) =>
-          worker.ownerSessionId === ownerSessionId && isActiveWorkerStatus(worker.status),
-      )
-      .map((worker) => worker.id);
-  }
-
-  private async cancelWorkers(workerIds: readonly WorkerId[]): Promise<void> {
-    const owners = new Set<string>();
-    const cancellations: Promise<void>[] = [];
-
-    for (const workerId of workerIds) {
-      const current = this.workers.get(workerId);
-      if (!current || !isActiveWorkerStatus(current.status)) continue;
-      if (current.status !== "stopping") {
-        this.workers.set(workerId, {
-          ...transitionWorkerStatus(current, "stopping"),
-          activity: undefined,
-        });
-      }
-      owners.add(current.ownerSessionId);
-      cancellations.push(this.cancellationFor(workerId));
-    }
-
-    this.emitStateForOwners(owners);
-    await Promise.all(cancellations);
-  }
-
-  private cancellationFor(workerId: WorkerId): Promise<void> {
-    const existing = this.cancellationPromises.get(workerId);
-    if (existing) return existing;
-
-    const cancellation = Promise.resolve()
-      .then(() => this.cancelWorker(workerId))
-      .catch((error) => {
-        this.settleCancellationFailure(workerId, error);
-      });
-    this.cancellationPromises.set(workerId, cancellation);
-    void cancellation.then(() => {
-      if (this.cancellationPromises.get(workerId) === cancellation) {
-        this.cancellationPromises.delete(workerId);
-      }
+      return [...this.workers.values()]
+        .filter(
+          (worker) =>
+            worker.ownerSessionId === ownerSessionId && isActiveWorkerStatus(worker.status),
+        )
+        .map((worker) => worker.id);
     });
-    return cancellation;
   }
 
-  private async cancelWorker(workerId: WorkerId): Promise<void> {
-    const entry = this.entries.get(workerId);
-    const session = entry?.session;
+  private cancelWorkers(workerIds: readonly WorkerId[]): Effect.Effect<void> {
+    const runtime = this;
+    return Effect.gen(function* () {
+      const owners = new Set<string>();
+      const cancellations: Effect.Effect<void>[] = [];
 
-    try {
+      for (const workerId of workerIds) {
+        const current = runtime.workers.get(workerId);
+        if (!current || !isActiveWorkerStatus(current.status)) continue;
+        if (current.status !== "stopping") {
+          runtime.workers.set(workerId, {
+            ...transitionWorkerStatus(current, "stopping"),
+            activity: undefined,
+          });
+        }
+        owners.add(current.ownerSessionId);
+        cancellations.push(runtime.cancellationFor(workerId));
+      }
+
+      runtime.emitStateForOwners(owners);
+      yield* Effect.all(cancellations, { concurrency: "unbounded" });
+    });
+  }
+
+  private cancellationFor(workerId: WorkerId): Effect.Effect<void> {
+    return Effect.suspend(() => {
+      const existing = this.cancellations.get(workerId);
+      if (existing) return Deferred.await(existing);
+
+      const completion = Deferred.makeUnsafe<void>();
+      this.cancellations.set(workerId, completion);
+      return this.cancelWorker(workerId).pipe(
+        Effect.catchCause((cause) => Effect.sync(() => {
+          this.settleCancellationFailure(workerId, Cause.squash(cause));
+        })),
+        Effect.ensuring(Effect.sync(() => {
+          if (this.cancellations.get(workerId) === completion) {
+            this.cancellations.delete(workerId);
+          }
+          Deferred.doneUnsafe(completion, Effect.void);
+        })),
+      );
+    });
+  }
+
+  private cancelWorker(workerId: WorkerId): Effect.Effect<void> {
+    const runtime = this;
+    return Effect.gen(function* () {
+      const entry = runtime.entries.get(workerId);
+      const session = entry?.session;
+
       if (session) {
-        const abortOperation = Promise.resolve()
-          .then(() => session.abort())
-          .catch(() => undefined);
-        await this.waitBestEffort(abortOperation, CANCELLATION_GRACE_MS);
+        yield* session.abort().pipe(
+          Effect.catchTag(
+            "WorkerSession.AbortError",
+            (_error: WorkerSessionAbortError) => Effect.void,
+          ),
+          Effect.timeoutOption(CANCELLATION_GRACE_MS),
+        );
       }
-      try {
-        await this.scheduler.remove(workerId);
-      } catch {
-        // Worker state still settles even if scheduler cleanup fails.
-      }
-    } finally {
-      if (entry) this.disposeEntrySession(entry);
-      const current = this.workers.get(workerId);
+      // FiberMap.remove normally remains awaited so in-grace generation finalization
+      // completes before the worker settles. The detached waiter lets cancellation
+      // abandon only a removal whose uninterruptible finalizer exceeds the grace;
+      // the process-owned generation still retains and observes its physical cleanup.
+      const removal = yield* runtime.generations.remove(workerId).pipe(
+        Effect.catchCause(() => Effect.void),
+        Effect.forkDetach,
+      );
+      yield* Fiber.await(removal).pipe(
+        Effect.timeoutOption(CANCELLATION_GRACE_MS),
+        Effect.ignore,
+      );
+      if (entry) runtime.disposeEntrySession(entry);
+      const current = runtime.workers.get(workerId);
       if (current?.status === "stopping") {
-        this.settleTerminalWorker(
+        runtime.settleTerminalWorker(
           current,
           "aborted",
           { status: "aborted" },
           "cancellation",
         );
       }
-    }
+    });
   }
 
   private settleCancellationFailure(workerId: WorkerId, error: unknown): void {
@@ -1025,47 +1149,25 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     }, "cancellation");
   }
 
-  private async cancelExactRun(run: RunRecord): Promise<void> {
+  private cancelExactRun(run: RunRecord): Effect.Effect<void> {
     const worker = this.workers.get(run.workerId);
     const active = worker?.ownerSessionId === run.ownerSessionId &&
         worker.runId === run.id &&
         isActiveWorkerStatus(worker.status)
       ? [worker.id]
       : [];
-    await this.cancelWorkers(active);
-    this.maybeCompleteRun(run.id);
+    return this.cancelWorkers(active).pipe(
+      Effect.tap(() => Effect.sync(() => this.maybeCompleteRun(run.id))),
+    );
   }
 
   private awaitInlineRun(
     run: RunRecord,
-    waiter: RunWaiter,
-    signal: AbortSignal | undefined,
-  ): Promise<CompletedRun> {
-    if (!signal) return waiter.promise;
-
-    return new Promise<CompletedRun>((resolve, reject) => {
-      let abortClaimed = false;
-      const removeAbortListener = () => signal.removeEventListener("abort", onAbort);
-      const onAbort = () => {
-        if (abortClaimed || waiter.settled) return;
-        abortClaimed = true;
-        removeAbortListener();
-        const reason = abortSignalReason(signal);
-        void this.cancelExactRun(run).then(
-          () => reject(reason),
-          () => reject(reason),
-        );
-      };
-
-      waiter.onSettled = () => {
-        removeAbortListener();
-        if (!abortClaimed) waiter.promise.then(resolve, reject);
-      };
-      signal.addEventListener("abort", onAbort, { once: true });
-
-      if (signal.aborted) onAbort();
-      else if (waiter.settled) waiter.onSettled();
-    });
+    completion: Deferred.Deferred<CompletedRun>,
+  ): Effect.Effect<CompletedRun> {
+    return Deferred.await(completion).pipe(
+      Effect.onInterrupt(() => this.cancelExactRun(run)),
+    );
   }
 
   private closeReadyInteractiveWorker(current: WorkerRecord): void {
@@ -1138,12 +1240,15 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
     for (const ownerSessionId of ownerSessionIds) this.emitState(ownerSessionId);
   }
 
-  private ownedWorker(ownerSessionId: string, workerId: WorkerId): WorkerRecord {
+  private ownedWorker(
+    operation: OrchestrationOperation,
+    ownerSessionId: string,
+    workerId: WorkerId,
+  ): Effect.Effect<WorkerRecord, OrchestrationActionRejected> {
     const worker = this.workers.get(workerId);
-    if (!worker || worker.ownerSessionId !== ownerSessionId) {
-      throw new Error("Worker is not owned by this session");
-    }
-    return worker;
+    return !worker || worker.ownerSessionId !== ownerSessionId
+      ? rejectAction(operation, "ownership", "Worker is not owned by this session")
+      : Effect.succeed(worker);
   }
 
   private unsubscribeEntryObservability(entry: RuntimeEntry): void {
@@ -1162,68 +1267,95 @@ class DefaultOrchestratorRuntime implements OrchestratorRuntime {
   }
 
   private disposeSession(session: WorkerSessionHandle): void {
-    if (this.disposedSessions.has(session)) return;
-    this.disposedSessions.add(session);
-
-    try {
-      this.trackCleanup(session.dispose());
-    } catch {
-      // Cleanup is best-effort and cannot leave lifecycle state unsettled.
-    }
+    this.cleanup.supervise(session.dispose());
   }
 
-  private trackCleanup(operation: Promise<void>): Promise<void> {
-    this.cleanupOperations.add(operation);
-    const forget = () => this.cleanupOperations.delete(operation);
-    void operation.then(forget, forget);
-    return operation;
-  }
-
-  private async awaitTrackedCleanupBestEffort(): Promise<void> {
-    const operations = [...this.cleanupOperations];
-    if (operations.length === 0) return;
-    await this.waitBestEffort(
-      Promise.allSettled(operations).then(() => undefined),
-      SHUTDOWN_CLEANUP_GRACE_MS,
+  private awaitSupervisedCleanupBestEffort(): Effect.Effect<void> {
+    return this.cleanup.awaitEmpty().pipe(
+      Effect.timeoutOption(SHUTDOWN_CLEANUP_GRACE_MS),
+      Effect.ignore,
     );
   }
 
-  private async waitBestEffort(promise: Promise<unknown>, timeoutMs: number): Promise<void> {
-    try {
-      await this.bestEffortDeadline.wait(promise, timeoutMs);
-    } catch {
-      // A deadline implementation cannot prevent lifecycle settlement.
-    }
-  }
-
-  private assertOpen(): void {
-    if (this.shuttingDown) throw new Error("Orchestrator runtime is shutting down");
+  private requireOpen(
+    operation: OrchestrationOperation,
+  ): Effect.Effect<void, OrchestrationActionRejected> {
+    return this.shuttingDown
+      ? rejectAction(operation, "shutdown", "Orchestrator runtime is shutting down")
+      : Effect.void;
   }
 }
 
-export function createOrchestratorRuntime(
-  options: OrchestratorRuntimeOptions,
-): OrchestratorRuntime {
-  return new DefaultOrchestratorRuntime(options);
+export function orchestrationLayer(
+  options: OrchestrationLayerOptions = {},
+): Layer.Layer<Orchestration, never, ChildSessions | GenerationSupervisor | CleanupSupervisor> {
+  return Layer.effect(
+    Orchestration,
+    Effect.gen(function* () {
+      const childSessions = yield* ChildSessions;
+      const generations = yield* GenerationSupervisor;
+      const cleanup = yield* CleanupSupervisor;
+      return Orchestration.of(new StatefulOrchestration(
+        childSessions,
+        generations,
+        cleanup,
+        options,
+      ));
+    }),
+  );
 }
 
-function validateContextOwner(ownerSessionId: string): void {
-  if (typeof ownerSessionId !== "string" || ownerSessionId.trim() === "") {
-    throw new Error("ownerSessionId must not be blank");
-  }
+function rejectAction(
+  operation: OrchestrationOperation,
+  reason: OrchestrationRejectionReason,
+  message: string,
+): Effect.Effect<never, OrchestrationActionRejected> {
+  return Effect.fail(new OrchestrationActionRejected({ operation, reason, message }));
 }
 
-function validateMode(mode: RunMode): void {
-  if (mode !== "async" && mode !== "inline") throw new Error("Invalid orchestration mode");
+function validateContextOwner(
+  operation: OrchestrationOperation,
+  ownerSessionId: string,
+): Effect.Effect<void, OrchestrationActionRejected> {
+  return typeof ownerSessionId !== "string" || ownerSessionId.trim() === ""
+    ? rejectAction(operation, "validation", "ownerSessionId must not be blank")
+    : Effect.void;
 }
 
-function validateText(name: string, value: string, maximumLength: number): void {
+function validateWorkerId(
+  operation: OrchestrationOperation,
+  workerId: string,
+): Effect.Effect<WorkerId, OrchestrationActionRejected> {
+  return typeof workerId !== "string" || workerId.trim() === ""
+    ? rejectAction(operation, "validation", "worker_id must not be blank")
+    : Effect.succeed(workerId as WorkerId);
+}
+
+function validateMode(
+  operation: OrchestrationOperation,
+  mode: RunMode,
+): Effect.Effect<void, OrchestrationActionRejected> {
+  return mode !== "async" && mode !== "inline"
+    ? rejectAction(operation, "validation", "Invalid orchestration mode")
+    : Effect.void;
+}
+
+function validateText(
+  operation: OrchestrationOperation,
+  name: string,
+  value: string,
+  maximumLength: number,
+): Effect.Effect<void, OrchestrationActionRejected> {
   if (typeof value !== "string" || value.trim() === "") {
-    throw new Error(`${name} must not be blank`);
+    return rejectAction(operation, "validation", `${name} must not be blank`);
   }
-  if (value.length > maximumLength) {
-    throw new Error(`${name} must be at most ${maximumLength} characters`);
-  }
+  return value.length > maximumLength
+    ? rejectAction(
+        operation,
+        "validation",
+        `${name} must be at most ${maximumLength} characters`,
+      )
+    : Effect.void;
 }
 
 function describeError(error: unknown, fallback: string): string {
@@ -1242,6 +1374,8 @@ function isSettledWorkerStatus(
   return status === "completed" || status === "ready" || status === "failed" || status === "aborted";
 }
 
+function noOp(): void {}
+
 function safelyCall(callback: (() => void) | undefined): void {
   if (!callback) return;
   try {
@@ -1249,15 +1383,6 @@ function safelyCall(callback: (() => void) | undefined): void {
   } catch {
     // Session cleanup is idempotent best-effort and must not strand lifecycle state.
   }
-}
-
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw abortSignalReason(signal);
-}
-
-function abortSignalReason(signal: AbortSignal): unknown {
-  if ("reason" in signal) return signal.reason;
-  return new DOMException("This operation was aborted", "AbortError");
 }
 
 function addAll(target: Set<string>, source: ReadonlySet<string>): void {
@@ -1274,23 +1399,6 @@ function notifySettlementListener(
   } catch {
     // One observer cannot prevent settlement or other observers from being notified.
   }
-}
-
-function makeRunWaiter(): RunWaiter {
-  let complete!: (run: CompletedRun) => void;
-  const waiter: RunWaiter = {
-    promise: new Promise<CompletedRun>((resolve) => {
-      complete = resolve;
-    }),
-    settled: false,
-    resolve(run) {
-      if (waiter.settled) return;
-      waiter.settled = true;
-      waiter.onSettled?.();
-      complete(run);
-    },
-  };
-  return waiter;
 }
 
 function copyUsage(usage: WorkerUsage): WorkerUsage {

@@ -19,15 +19,16 @@ import {
   type WorkerId,
   type WorkerUsage,
 } from "../extension/domain.js";
+import { OrchestrationActionRejected } from "../extension/runtime.js";
 import type {
   AbortTarget,
   AcceptedRun,
   CompletedRun,
   OrchestrationContext,
-  OrchestratorRuntime,
   RuntimeSnapshot,
   SettlementListener,
 } from "../extension/runtime.js";
+import type { OrchestratorRuntime } from "../extension/host.js";
 import {
   registerOrchestrationTools,
   type DispatchDecision,
@@ -64,13 +65,13 @@ class FakeRuntime {
   settlementToEmit: WorkerSettlement | undefined;
   readonly interactiveSendCalls: Array<{
     context: OrchestrationContext;
-    workerId: WorkerId;
+    workerId: string;
     instructions: string;
     mode: DispatchMode;
     signal?: AbortSignal;
   }> = [];
   readonly abortCalls: Array<{ ownerSessionId: string; target: AbortTarget }> = [];
-  readonly interactiveCloseCalls: Array<{ ownerSessionId: string; workerId: WorkerId }> = [];
+  readonly interactiveCloseCalls: Array<{ ownerSessionId: string; workerId: string }> = [];
   readonly snapshotCalls: string[] = [];
 
   acceptedRun: AcceptedRun = {
@@ -99,7 +100,7 @@ class FakeRuntime {
 
   async sendInteractive(
     context: OrchestrationContext,
-    workerId: WorkerId,
+    workerId: string,
     instructions: string,
     mode: DispatchMode,
     signal?: AbortSignal,
@@ -117,7 +118,7 @@ class FakeRuntime {
     if (this.failures.abort) throw this.failures.abort;
   }
 
-  async closeInteractive(ownerSessionId: string, workerId: WorkerId): Promise<void> {
+  async closeInteractive(ownerSessionId: string, workerId: string): Promise<void> {
     this.interactiveCloseCalls.push({ ownerSessionId, workerId });
     if (this.failures.closeInteractive) throw this.failures.closeInteractive;
   }
@@ -575,7 +576,7 @@ describe("registerOrchestrationTools", () => {
     );
   });
 
-  test("interactive_send validates its branded boundary and follows mode termination semantics", async () => {
+  test("interactive_send forwards plain worker IDs and follows mode termination semantics", async () => {
     const { pi, runtime, context, modes } = harness();
     modes.set("send-async", "async");
     modes.set("send-inline", "inline");
@@ -605,13 +606,13 @@ describe("registerOrchestrationTools", () => {
       signal,
     }))).toEqual([
       {
-        workerId: "worker-ready" as WorkerId,
+        workerId: "worker-ready",
         instructions: "Continue.",
         mode: "async",
         signal: controller.signal,
       },
       {
-        workerId: "worker-ready" as WorkerId,
+        workerId: "worker-ready",
         instructions: "Finish.",
         mode: "inline",
         signal: controller.signal,
@@ -621,16 +622,14 @@ describe("registerOrchestrationTools", () => {
     expect(asyncResult.terminate).toBe(true);
     expect(inlineResult).not.toHaveProperty("terminate");
 
-    await expect(
-      invoke(
-        pi,
-        "interactive_send",
-        "send-blank",
-        { worker_id: "   ", instructions: "Continue." },
-        context,
-      ),
-    ).rejects.toThrow("worker_id must not be blank");
-    expect(runtime.interactiveSendCalls).toHaveLength(2);
+    await invoke(
+      pi,
+      "interactive_send",
+      "send-blank",
+      { worker_id: "   ", instructions: "Continue." },
+      context,
+    );
+    expect(runtime.interactiveSendCalls.at(-1)?.workerId).toBe("   ");
   });
 
   test("rejects already-aborted async interactive_send admission with the exact reason", async () => {
@@ -695,7 +694,7 @@ describe("registerOrchestrationTools", () => {
     );
   });
 
-  test("maps each exclusive abort target and forwards owner isolation", async () => {
+  test("normalizes abort field names without enforcing target policy", async () => {
     const { pi, runtime, context } = harness();
 
     await invoke(
@@ -707,26 +706,32 @@ describe("registerOrchestrationTools", () => {
     );
     await invoke(pi, "worker_abort", "abort-all", { all: true }, context);
 
+    await invoke(
+      pi,
+      "worker_abort",
+      "abort-blank-worker",
+      { worker_ids: [" "] },
+      context,
+    );
+    await invoke(
+      pi,
+      "worker_abort",
+      "abort-ambiguous",
+      { worker_ids: ["worker-1"], all: true },
+      context,
+    );
+    await invoke(pi, "worker_abort", "abort-empty", { worker_ids: [] }, context);
+
     expect(runtime.abortCalls).toEqual([
-      { ownerSessionId: "owner-session", target: { workerIds: ["worker-1" as WorkerId, "worker-2" as WorkerId] } },
+      { ownerSessionId: "owner-session", target: { workerIds: ["worker-1", "worker-2"] } },
       { ownerSessionId: "owner-session", target: { all: true } },
+      { ownerSessionId: "owner-session", target: { workerIds: [" "] } },
+      {
+        ownerSessionId: "owner-session",
+        target: { workerIds: ["worker-1"], all: true },
+      },
+      { ownerSessionId: "owner-session", target: { workerIds: [] } },
     ]);
-    await expect(
-      invoke(pi, "worker_abort", "abort-blank-worker", { worker_ids: [" "] }, context),
-    ).rejects.toThrow("worker_id must not be blank");
-    await expect(
-      invoke(
-        pi,
-        "worker_abort",
-        "abort-ambiguous",
-        { worker_ids: ["worker-1"], all: true },
-        context,
-      ),
-    ).rejects.toThrow("exactly one target");
-    await expect(
-      invoke(pi, "worker_abort", "abort-empty", { worker_ids: [] }, context),
-    ).rejects.toThrow("at least one worker ID");
-    expect(runtime.abortCalls).toHaveLength(2);
   });
 
   test("closes an owner-scoped ready interactive worker", async () => {
@@ -741,15 +746,19 @@ describe("registerOrchestrationTools", () => {
     );
 
     expect(runtime.interactiveCloseCalls).toEqual([
-      { ownerSessionId: "owner-session", workerId: "worker-ready" as WorkerId },
+      { ownerSessionId: "owner-session", workerId: "worker-ready" },
     ]);
     expect(result.details).toEqual({ worker_id: "worker-ready" });
     expect(result).not.toHaveProperty("terminate");
 
-    await expect(
-      invoke(pi, "interactive_close", "close-blank", { worker_id: "\t" }, context),
-    ).rejects.toThrow("worker_id must not be blank");
-    expect(runtime.interactiveCloseCalls).toHaveLength(1);
+    await invoke(
+      pi,
+      "interactive_close",
+      "close-blank",
+      { worker_id: "\t" },
+      context,
+    );
+    expect(runtime.interactiveCloseCalls.at(-1)?.workerId).toBe("\t");
   });
 
   test("renders incomplete streaming tool arguments without crashing", () => {
@@ -863,6 +872,78 @@ describe("registerOrchestrationTools", () => {
     expect(Bun.stripANSI(rendered.render(80).join("\n"))).not.toContain("state ready");
     const partial = tool.renderResult!(result, { isPartial: true, expanded: false }, themeForRendering(), {} as never);
     expect(Bun.stripANSI(partial.render(80).join("\n")).trimEnd()).toBe("Reading worker diagnostics…");
+  });
+
+  test("propagates typed worker-ID validation rejections from executable actions", async () => {
+    const cases = [
+      {
+        tool: "interactive_send",
+        runtimeMethod: "sendInteractive",
+        operation: "sendInteractive",
+        params: { worker_id: "  ", instructions: "Continue." },
+      },
+      {
+        tool: "worker_abort",
+        runtimeMethod: "abort",
+        operation: "abort",
+        params: { worker_ids: ["\t"] },
+      },
+      {
+        tool: "interactive_close",
+        runtimeMethod: "closeInteractive",
+        operation: "closeInteractive",
+        params: { worker_id: "\n" },
+      },
+    ] as const;
+
+    for (const expected of cases) {
+      const { pi, runtime, context } = harness();
+      const rejected = new OrchestrationActionRejected({
+        operation: expected.operation,
+        reason: "validation",
+        message: "worker_id must not be blank",
+      });
+      runtime.failures[expected.runtimeMethod] = rejected;
+
+      const observed = await invoke(
+        pi,
+        expected.tool,
+        `${expected.tool}-blank`,
+        expected.params,
+        context,
+      ).then(
+        () => "unexpected success",
+        (error: unknown) => error,
+      );
+
+      expect(observed).toBe(rejected);
+      expect(observed).toMatchObject({
+        operation: expected.operation,
+        reason: "validation",
+        message: "worker_id must not be blank",
+      });
+    }
+  });
+
+  test("preserves tagged orchestration rejection identity through tool execution", async () => {
+    const { pi, runtime, context } = harness();
+    const rejected = new OrchestrationActionRejected({
+      operation: "orchestrate",
+      reason: "unknown-worker",
+      message: "Unknown worker: missing",
+    });
+    runtime.failures.orchestrate = rejected;
+
+    await expect(
+      invoke(
+        pi,
+        "orchestrate",
+        "typed-rejection",
+        { worker: "missing", title: "Inspect", instructions: "Inspect." },
+        context,
+      ),
+    ).rejects.toBe(rejected);
+    expect(rejected.message).toBe("Unknown worker: missing");
   });
 
   test("throws execution failures instead of returning fake error results", async () => {

@@ -21,14 +21,18 @@ import {
   type Skill,
 } from "@earendil-works/pi-coding-agent";
 import type { WorkerDefinition } from "../extension/domain.js";
+import { Effect, Fiber, ManagedRuntime } from "effect";
 import {
-  createWorkerSessionFactory,
+  ChildSessions,
+  createChildSessionsLayer,
   isOrchestrationExtensionPath,
   WorkerAgentSessionAcquisitionError,
   WorkerModelAcquisitionError,
   WorkerResourceAcquisitionError,
+  WorkerSessionAbortError,
   type WorkerSessionDependencies,
-  type WorkerSessionFactoryOptions,
+  type ChildSessionOptions,
+  type WorkerSessionHandle,
 } from "../extension/worker-session.js";
 
 function model(provider: string, id: string): Model<Api> {
@@ -377,8 +381,8 @@ function registry(overrides: Partial<ModelRegistry> = {}): ModelRegistry {
 }
 
 function options(
-  overrides: Partial<WorkerSessionFactoryOptions> = {},
-): WorkerSessionFactoryOptions {
+  overrides: Partial<ChildSessionOptions> = {},
+): ChildSessionOptions {
   return {
     cwd: "/project",
     agentDir: "/agent",
@@ -391,17 +395,180 @@ function options(
   };
 }
 
+function createChildSessionTestClient(
+  dependencies: Partial<WorkerSessionDependencies> = {},
+) {
+  return {
+    acquire(sessionOptions: ChildSessionOptions) {
+      return Effect.runPromise(
+        Effect.gen(function* () {
+          const sessions = yield* ChildSessions;
+          const session = yield* sessions.acquire(sessionOptions, (handle) => handle);
+          if (!session) return yield* Effect.die(new Error("Expected session adoption"));
+          return session;
+        }).pipe(Effect.provide(createChildSessionsLayer(dependencies))),
+      );
+    },
+  };
+}
+
+class PromiseGate<T = void> {
+  readonly promise: Promise<T>;
+  private resolvePromise!: (value: T | PromiseLike<T>) => void;
+
+  constructor() {
+    this.promise = new Promise<T>((resolve) => {
+      this.resolvePromise = resolve;
+    });
+  }
+
+  resolve(value: T extends void ? undefined : T): void {
+    this.resolvePromise(value as T);
+  }
+}
+
 async function writeSkill(filePath: string, name: string, description: string): Promise<void> {
   await mkdir(join(filePath, ".."), { recursive: true });
   await Bun.write(filePath, `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n`);
 }
 
-describe("worker session factory", () => {
+describe("child session acquisition handoff", () => {
+  test("interruption abandons waiting while late success is disposed exactly once", async () => {
+    const h = harness();
+    const started = new PromiseGate();
+    const release = new PromiseGate();
+    const disposed = new PromiseGate();
+    const finalized = new PromiseGate();
+    h.dependencies.createModelRuntime = async () => {
+      started.resolve(undefined);
+      await release.promise;
+      return h.runtime as unknown as ModelRuntime;
+    };
+    h.session.dispose.mockImplementation(() => disposed.resolve(undefined));
+    h.loaderDispose.mockImplementation(() => finalized.resolve(undefined));
+    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
+    const sessions = effectRuntime.runSync(ChildSessions);
+
+    const acquisition = effectRuntime.runFork(
+      sessions.acquire(options(), (session) => session),
+    );
+    await started.promise;
+    await effectRuntime.runPromise(Fiber.interrupt(acquisition));
+    release.resolve(undefined);
+    await disposed.promise;
+    await finalized.promise;
+
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+    expect(h.loaderDispose).toHaveBeenCalledTimes(1);
+    await effectRuntime.dispose();
+  });
+
+  test("shutdown abandons pending acquisition without blocking and reclaims late success", async () => {
+    const h = harness();
+    const started = new PromiseGate();
+    const release = new PromiseGate();
+    const disposed = new PromiseGate();
+    h.dependencies.createModelRuntime = async () => {
+      started.resolve(undefined);
+      await release.promise;
+      return h.runtime as unknown as ModelRuntime;
+    };
+    h.session.dispose.mockImplementation(() => disposed.resolve(undefined));
+    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
+    const sessions = effectRuntime.runSync(ChildSessions);
+
+    const acquisition = effectRuntime.runFork(
+      sessions.acquire(options(), (session) => session),
+    );
+    await started.promise;
+    await effectRuntime.runPromise(sessions.shutdown());
+    await expect(effectRuntime.runPromise(Fiber.join(acquisition))).rejects.toMatchObject({
+      _tag: "WorkerSession.AcquisitionClosedError",
+    });
+    await effectRuntime.dispose();
+    expect(h.session.dispose).toHaveBeenCalledTimes(0);
+    release.resolve(undefined);
+    await disposed.promise;
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  test("late acquisition failure after interruption remains typed and unobserved by the abandoned caller", async () => {
+    const h = harness();
+    const started = new PromiseGate();
+    const release = new PromiseGate();
+    h.dependencies.createModelRuntime = async () => {
+      started.resolve(undefined);
+      await release.promise;
+      throw new Error("late model failure");
+    };
+    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
+    const sessions = effectRuntime.runSync(ChildSessions);
+
+    const acquisition = effectRuntime.runFork(
+      sessions.acquire(options(), (session) => session),
+    );
+    await started.promise;
+    await effectRuntime.runPromise(Fiber.interrupt(acquisition));
+    release.resolve(undefined);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(h.loaderOptions).toHaveLength(0);
+    expect(h.session.dispose).toHaveBeenCalledTimes(0);
+    await effectRuntime.dispose();
+  });
+
+  test("interruption requested inside adoption cannot orphan the offered session", async () => {
+    const h = harness();
+    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
+    const sessions = effectRuntime.runSync(ChildSessions);
+    let adopted: WorkerSessionHandle | undefined;
+    let interruptAcquisition: () => void = () => {
+      throw new Error("Acquisition fiber was not installed");
+    };
+
+    const acquisition = effectRuntime.runFork(
+      sessions.acquire(options(), (session) => {
+        adopted = session;
+        interruptAcquisition();
+        return session;
+      }),
+    );
+    interruptAcquisition = () => acquisition.interruptUnsafe();
+
+    const acquisitionExit = await effectRuntime.runPromise(Fiber.await(acquisition));
+    expect(acquisitionExit._tag).toBe("Failure");
+    if (!adopted) throw new Error("Expected session adoption");
+    await effectRuntime.runPromise(sessions.shutdown());
+    expect(h.session.dispose).toHaveBeenCalledTimes(0);
+    await Effect.runPromise(adopted.dispose());
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+    await effectRuntime.dispose();
+  });
+
+  test("adopted sessions transfer out of the process handoff and survive service shutdown", async () => {
+    const h = harness();
+    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
+    const sessions = effectRuntime.runSync(ChildSessions);
+    const handle = await effectRuntime.runPromise(
+      sessions.acquire(options(), (session) => session),
+    );
+    if (!handle) throw new Error("Expected session adoption");
+
+    await effectRuntime.runPromise(sessions.shutdown());
+    expect(h.session.dispose).toHaveBeenCalledTimes(0);
+    await Effect.runPromise(handle.dispose());
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+    await effectRuntime.dispose();
+  });
+});
+
+describe("child sessions service", () => {
   test("builds isolated resources, exact skills/tools, settings, and a direct-child prompt", async () => {
     const h = harness();
-    const factory = createWorkerSessionFactory(h.dependencies);
+    const factory = createChildSessionTestClient(h.dependencies);
     const factoryOptions = options();
-    await factory.create(factoryOptions);
+    await factory.acquire(factoryOptions);
 
     expect(h.reload).toHaveBeenCalledTimes(1);
     expect(h.session.bindExtensions).toHaveBeenCalledTimes(1);
@@ -453,14 +620,14 @@ describe("worker session factory", () => {
       loadedSkills.push("beta");
     });
 
-    await createWorkerSessionFactory(h.dependencies).create(options());
+    await createChildSessionTestClient(h.dependencies).acquire(options());
 
     expect(h.session.bindExtensions).toHaveBeenCalledTimes(1);
   });
 
   test("leaves normal skill discovery unfiltered when skills are omitted", async () => {
     const h = harness();
-    await createWorkerSessionFactory(h.dependencies).create(
+    await createChildSessionTestClient(h.dependencies).acquire(
       options({ definition: definition({ skills: undefined }) }),
     );
 
@@ -475,7 +642,7 @@ describe("worker session factory", () => {
       "/configured/other-extension.ts",
     ];
 
-    await createWorkerSessionFactory(h.dependencies).create(options());
+    await createChildSessionTestClient(h.dependencies).acquire(options());
 
     expect(isOrchestrationExtensionPath(join(import.meta.dir, "..", "extension", "index.ts")))
       .toBe(true);
@@ -583,7 +750,7 @@ describe("worker session factory", () => {
       parentRuntime.registerProvider(providerId, providerConfig);
       await parentRuntime.refresh({ allowNetwork: false });
       const parentModel = parentRuntime.getModel(providerId, modelId)!;
-      const factory = createWorkerSessionFactory({
+      const factory = createChildSessionTestClient({
         createModelRuntime: (input) =>
           ModelRuntime.create({ ...input, allowModelNetwork: false }),
         createSessionManager: ({ cwd: sessionCwd, parentSessionFile }) =>
@@ -591,7 +758,7 @@ describe("worker session factory", () => {
             parentSession: parentSessionFile,
           }),
       });
-      const handle = await factory.create(options({
+      const handle = await factory.acquire(options({
         cwd,
         agentDir,
         parentSessionFile: undefined,
@@ -609,7 +776,7 @@ describe("worker session factory", () => {
         inputs: [],
       });
       const instructions = "/intercept-worker-brief exercise the configured extension";
-      expect(await handle.prompt(instructions)).toEqual({
+      expect(await Effect.runPromise(handle.prompt(instructions))).toEqual({
         status: "completed",
         assistantText: "extension response",
       });
@@ -621,7 +788,7 @@ describe("worker session factory", () => {
       expect(state.commands).toBe(0);
       expect(state.inputs).toEqual([{ text: instructions, source: "extension" }]);
 
-      await Promise.all([handle.dispose(), handle.dispose()]);
+      await Effect.runPromise(Effect.all([handle.dispose(), handle.dispose()]));
       expect(state.shutdowns).toBe(1);
     } finally {
       Reflect.deleteProperty(globalThis, stateKey);
@@ -631,7 +798,7 @@ describe("worker session factory", () => {
 
   test("loads no skills when none are selected and excludes context in untrusted projects", async () => {
     const h = harness();
-    await createWorkerSessionFactory(h.dependencies).create(
+    await createChildSessionTestClient(h.dependencies).acquire(
       options({ definition: definition({ skills: [] }), projectTrusted: false }),
     );
 
@@ -676,7 +843,7 @@ describe("worker session factory", () => {
     const runtime = new FakeModelRuntime([]);
     const h = harness(new FakeSession(), ["alpha", "beta"], runtime);
 
-    await createWorkerSessionFactory(h.dependencies).create(
+    await createChildSessionTestClient(h.dependencies).acquire(
       options({
         definition: definition({
           model: { provider: "provider", modelId: "configured/model" },
@@ -703,9 +870,9 @@ describe("worker session factory", () => {
     expect(h.agentInputs[0]!.services.modelRuntime).toBe(runtime as unknown as ModelRuntime);
 
     const missingHarness = harness(new FakeSession(), ["alpha", "beta"], new FakeModelRuntime([]));
-    const missingFactory = createWorkerSessionFactory(missingHarness.dependencies);
+    const missingFactory = createChildSessionTestClient(missingHarness.dependencies);
     await expect(
-      missingFactory.create(
+      missingFactory.acquire(
         options({
           definition: definition({
             model: { provider: "provider", modelId: "missing" },
@@ -727,7 +894,7 @@ describe("worker session factory", () => {
     });
     const h = harness();
 
-    await createWorkerSessionFactory(h.dependencies).create(
+    await createChildSessionTestClient(h.dependencies).acquire(
       options({ modelRegistry: parentRegistry }),
     );
 
@@ -783,7 +950,7 @@ describe("worker session factory", () => {
         childRuntime = await ModelRuntime.create({ ...input, allowModelNetwork: false });
         return childRuntime;
       };
-      await createWorkerSessionFactory(h.dependencies).create(options({
+      await createChildSessionTestClient(h.dependencies).acquire(options({
         agentDir: root,
         definition: definition({
           model: { provider: "actual-custom", modelId: "actual-model" },
@@ -863,7 +1030,7 @@ describe("worker session factory", () => {
         childRuntime = await ModelRuntime.create({ ...input, allowModelNetwork: false });
         return childRuntime;
       };
-      const handle = await createWorkerSessionFactory(h.dependencies).create(options({
+      const handle = await createChildSessionTestClient(h.dependencies).acquire(options({
         agentDir: root,
         definition: definition({
           model: { provider: "refresh-only", modelId: dynamicModel.id },
@@ -884,7 +1051,7 @@ describe("worker session factory", () => {
       }]);
       expect(refreshNetworkModes.length).toBeGreaterThan(0);
       expect(refreshNetworkModes.every((allowNetwork) => allowNetwork === false)).toBe(true);
-      await handle.dispose();
+      await Effect.runPromise(handle.dispose());
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -898,7 +1065,7 @@ describe("worker session factory", () => {
       }),
     });
     await expect(
-      createWorkerSessionFactory(providerFailure.dependencies).create(
+      createChildSessionTestClient(providerFailure.dependencies).acquire(
         options({ modelRegistry: providerRegistry }),
       ),
     ).rejects.toMatchObject({
@@ -913,7 +1080,7 @@ describe("worker session factory", () => {
       }),
     });
     await expect(
-      createWorkerSessionFactory(authenticationFailure.dependencies).create(
+      createChildSessionTestClient(authenticationFailure.dependencies).acquire(
         options({ modelRegistry: authenticationRegistry }),
       ),
     ).rejects.toMatchObject({
@@ -926,7 +1093,7 @@ describe("worker session factory", () => {
       throw new Error("services failed");
     };
     await expect(
-      createWorkerSessionFactory(servicesFailure.dependencies).create(options()),
+      createChildSessionTestClient(servicesFailure.dependencies).acquire(options()),
     ).rejects.toMatchObject({
       _tag: "WorkerSession.ResourceAcquisitionError",
       operation: "create-services",
@@ -942,7 +1109,7 @@ describe("worker session factory", () => {
 
     let initialFailure: unknown;
     try {
-      await createWorkerSessionFactory(initialRefresh.dependencies).create(options());
+      await createChildSessionTestClient(initialRefresh.dependencies).acquire(options());
     } catch (error) {
       initialFailure = error;
     }
@@ -963,7 +1130,7 @@ describe("worker session factory", () => {
       .mockResolvedValueOnce({ aborted: true, errors: new Map() });
     let postExtensionFailure: unknown;
     try {
-      await createWorkerSessionFactory(postExtensionRefresh.dependencies).create(options());
+      await createChildSessionTestClient(postExtensionRefresh.dependencies).acquire(options());
     } catch (error) {
       postExtensionFailure = error;
     }
@@ -980,7 +1147,7 @@ describe("worker session factory", () => {
     const h = harness();
 
     await expect(
-      createWorkerSessionFactory(h.dependencies).create(options({ parentModel: undefined })),
+      createChildSessionTestClient(h.dependencies).acquire(options({ parentModel: undefined })),
     ).rejects.toThrow("no configured model and no parent model is available");
 
     expect(h.modelRuntimeInputs).toHaveLength(0);
@@ -995,7 +1162,7 @@ describe("worker session factory", () => {
     let failure: unknown;
 
     try {
-      await createWorkerSessionFactory(h.dependencies).create(options());
+      await createChildSessionTestClient(h.dependencies).acquire(options());
     } catch (error) {
       failure = error;
     }
@@ -1079,12 +1246,12 @@ describe("worker session factory", () => {
           };
         },
       } as unknown as WorkerSessionDependencies;
-      const factory = createWorkerSessionFactory(dependencies);
+      const factory = createChildSessionTestClient(dependencies);
       const selectedDefinition = definition({
         skills: ["trust-shared", "ancestor-skill"],
       });
 
-      await expect(factory.create(options({
+      await expect(factory.acquire(options({
         cwd,
         agentDir,
         projectTrusted: false,
@@ -1099,7 +1266,7 @@ describe("worker session factory", () => {
         join(agentDir, "AGENTS.md"),
       ]);
 
-      const handle = await factory.create(options({
+      const handle = await factory.acquire(options({
         cwd,
         agentDir,
         projectTrusted: true,
@@ -1117,7 +1284,7 @@ describe("worker session factory", () => {
       expect(loaders[1]!.getAgentsFiles().agentsFiles.map((file) => file.path)).toEqual(
         expect.arrayContaining([join(projectRoot, "AGENTS.md"), join(cwd, "AGENTS.md")]),
       );
-      await handle.dispose();
+      await Effect.runPromise(handle.dispose());
       expect(sessions[0]!.dispose).toHaveBeenCalledTimes(1);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -1130,7 +1297,7 @@ describe("worker session factory", () => {
       throw new Error("reload failed");
     });
     await expect(
-      createWorkerSessionFactory(reloadFailure.dependencies).create(options()),
+      createChildSessionTestClient(reloadFailure.dependencies).acquire(options()),
     ).rejects.toThrow("reload failed");
     expect(reloadFailure.loaderDispose).toHaveBeenCalledTimes(1);
 
@@ -1139,7 +1306,7 @@ describe("worker session factory", () => {
       throw new Error("session failed");
     };
     await expect(
-      createWorkerSessionFactory(creationFailure.dependencies).create(options()),
+      createChildSessionTestClient(creationFailure.dependencies).acquire(options()),
     ).rejects.toThrow("session failed");
     expect(creationFailure.loaderDispose).toHaveBeenCalledTimes(1);
 
@@ -1148,14 +1315,14 @@ describe("worker session factory", () => {
       throw new Error("runtime failed");
     };
     await expect(
-      createWorkerSessionFactory(runtimeFailure.dependencies).create(options()),
+      createChildSessionTestClient(runtimeFailure.dependencies).acquire(options()),
     ).rejects.toThrow("runtime failed");
     expect(runtimeFailure.session.dispose).toHaveBeenCalledTimes(1);
     expect(runtimeFailure.loaderDispose).toHaveBeenCalledTimes(1);
 
     const noDurability = harness(new FakeSession(""));
     await expect(
-      createWorkerSessionFactory(noDurability.dependencies).create(options()),
+      createChildSessionTestClient(noDurability.dependencies).acquire(options()),
     ).rejects.toThrow("durable storage");
     expect(noDurability.session.dispose).toHaveBeenCalledTimes(1);
     expect(noDurability.loaderDispose).toHaveBeenCalledTimes(1);
@@ -1167,7 +1334,7 @@ describe("worker session factory", () => {
     let failure: unknown;
 
     try {
-      await createWorkerSessionFactory(h.dependencies).create(options());
+      await createChildSessionTestClient(h.dependencies).acquire(options());
     } catch (error) {
       failure = error;
     }
@@ -1186,7 +1353,7 @@ describe("worker session factory", () => {
     const bindFailure = harness();
     bindFailure.session.bindExtensions.mockRejectedValueOnce(new Error("private bind detail"));
     await expect(
-      createWorkerSessionFactory(bindFailure.dependencies).create(options()),
+      createChildSessionTestClient(bindFailure.dependencies).acquire(options()),
     ).rejects.toMatchObject({
       _tag: "WorkerSession.AgentSessionAcquisitionError",
       operation: "bind-extensions",
@@ -1194,7 +1361,7 @@ describe("worker session factory", () => {
 
     const durabilityFailure = harness(new FakeSession(""));
     await expect(
-      createWorkerSessionFactory(durabilityFailure.dependencies).create(options()),
+      createChildSessionTestClient(durabilityFailure.dependencies).acquire(options()),
     ).rejects.toMatchObject({
       _tag: "WorkerSession.AgentSessionAcquisitionError",
       operation: "verify-durability",
@@ -1203,7 +1370,7 @@ describe("worker session factory", () => {
 
   test("creates fresh session lineage without importing a parent transcript", async () => {
     const h = harness();
-    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
 
     expect(handle.sessionFile).toBe("/sessions/child.jsonl");
     expect(h.sessionManagerInputs).toEqual([
@@ -1219,8 +1386,8 @@ describe("worker session handle", () => {
     oneShotHarness.session.prompt.mockImplementation(async () => {
       oneShotHarness.session.finishTurn(assistant("first block"));
     });
-    const oneShot = await createWorkerSessionFactory(oneShotHarness.dependencies).create(options());
-    expect(await oneShot.prompt("task")).toEqual({
+    const oneShot = await createChildSessionTestClient(oneShotHarness.dependencies).acquire(options());
+    expect(await Effect.runPromise(oneShot.prompt("task"))).toEqual({
       status: "completed",
       assistantText: "first block\nsecond block",
     });
@@ -1229,10 +1396,10 @@ describe("worker session handle", () => {
     interactiveHarness.session.prompt.mockImplementation(async () => {
       interactiveHarness.session.finishTurn(assistant("continue"));
     });
-    const interactive = await createWorkerSessionFactory(interactiveHarness.dependencies).create(
+    const interactive = await createChildSessionTestClient(interactiveHarness.dependencies).acquire(
       options({ definition: definition({ lifecycle: "interactive" }) }),
     );
-    expect(await interactive.prompt("instructions")).toEqual({
+    expect(await Effect.runPromise(interactive.prompt("instructions"))).toEqual({
       status: "ready",
       assistantText: "continue\nsecond block",
     });
@@ -1240,9 +1407,9 @@ describe("worker session handle", () => {
 
   test("submits instructions literally as extension-originated input", async () => {
     const h = harness();
-    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
 
-    await handle.prompt("/skill:review literal worker brief");
+    await Effect.runPromise(handle.prompt("/skill:review literal worker brief"));
 
     expect(h.session.prompt).toHaveBeenCalledWith(
       "/skill:review literal worker brief",
@@ -1259,8 +1426,8 @@ describe("worker session handle", () => {
       h.session.prompt.mockImplementation(async () => {
         h.session.finishTurn(assistant("partial", stopReason, {}, `${stopReason} detail`));
       });
-      const handle = await createWorkerSessionFactory(h.dependencies).create(options());
-      expect(await handle.prompt("task")).toEqual({
+      const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
+      expect(await Effect.runPromise(handle.prompt("task"))).toEqual({
         status: expectedStatus,
         message: `${stopReason} detail`,
         assistantText: "partial\nsecond block",
@@ -1271,8 +1438,8 @@ describe("worker session handle", () => {
     failed.session.prompt.mockImplementation(async () => {
       throw new Error("request failed");
     });
-    const failedHandle = await createWorkerSessionFactory(failed.dependencies).create(options());
-    expect(await failedHandle.prompt("task")).toEqual({
+    const failedHandle = await createChildSessionTestClient(failed.dependencies).acquire(options());
+    expect(await Effect.runPromise(failedHandle.prompt("task"))).toEqual({
       status: "failed",
       message: "request failed",
     });
@@ -1283,10 +1450,34 @@ describe("worker session handle", () => {
       () => new Promise<void>((_resolve, reject) => (rejectPrompt = reject)),
     );
     aborting.session.abort.mockImplementation(async () => rejectPrompt(new Error("cancelled")));
-    const abortingHandle = await createWorkerSessionFactory(aborting.dependencies).create(options());
-    const prompt = abortingHandle.prompt("task");
-    await abortingHandle.abort();
+    const abortingHandle = await createChildSessionTestClient(aborting.dependencies).acquire(options());
+    const prompt = Effect.runPromise(abortingHandle.prompt("task"));
+    await Effect.runPromise(abortingHandle.abort());
     expect(await prompt).toEqual({ status: "aborted", message: "cancelled" });
+  });
+
+  test("interrupting prompt waiting does not invent Pi cancellation or release the active prompt early", async () => {
+    const h = harness();
+    const promptGate = new PromiseGate();
+    h.session.prompt.mockImplementation(() => promptGate.promise);
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
+
+    const promptFiber = Effect.runFork(handle.prompt("task"));
+    await Promise.resolve();
+    await Effect.runPromise(Fiber.interrupt(promptFiber));
+
+    expect(h.session.abort).toHaveBeenCalledTimes(0);
+    await expect(Effect.runPromise(handle.prompt("too early"))).rejects.toThrow(
+      "already processing a prompt",
+    );
+
+    promptGate.resolve(undefined);
+    await Promise.resolve();
+    h.session.prompt.mockResolvedValue(undefined);
+    expect(await Effect.runPromise(handle.prompt("next task"))).toEqual({
+      status: "completed",
+      assistantText: "",
+    });
   });
 
   test("tracks turn count and the latest message direction as messages cross the model boundary", async () => {
@@ -1300,13 +1491,13 @@ describe("worker session handle", () => {
       h.session.startMessage(second);
       h.session.finishTurn(second);
     });
-    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
     const turns: number[] = [];
     const directions: string[] = [];
     handle.subscribeUsage((current) => turns.push(current.turns));
     handle.subscribeMessageDirection((direction) => directions.push(direction));
 
-    await handle.prompt("task");
+    await Effect.runPromise(handle.prompt("task"));
 
     expect(turns).toEqual([1, 2]);
     expect(directions).toEqual(["to-model", "from-model", "to-model", "from-model"]);
@@ -1314,7 +1505,7 @@ describe("worker session handle", () => {
 
   test("accumulates turn usage and removes usage subscriptions", async () => {
     const h = harness();
-    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
     const updates: unknown[] = [];
     const unsubscribe = handle.subscribeUsage((usage) => updates.push(usage));
 
@@ -1368,7 +1559,7 @@ describe("worker session handle", () => {
 
   test("isolates throwing usage and activity listeners", async () => {
     const h = harness();
-    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
     const usageUpdates: number[] = [];
     const activityUpdates: Array<string | undefined> = [];
 
@@ -1393,7 +1584,7 @@ describe("worker session handle", () => {
 
   test("tracks overlapping tools in start order and falls back to the latest active tool", async () => {
     const h = harness();
-    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
     const updates: Array<string | undefined> = [];
     const unsubscribe = handle.subscribeActivity((activity) => updates.push(activity));
 
@@ -1417,7 +1608,7 @@ describe("worker session handle", () => {
 
   test("preserves same-tool overlap, ignores stale ends, and stops activity after dispose", async () => {
     const h = harness();
-    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
     const updates: Array<string | undefined> = [];
     handle.subscribeActivity((activity) => updates.push(activity));
 
@@ -1431,7 +1622,7 @@ describe("worker session handle", () => {
     expect(updates).toEqual(["read", undefined]);
 
     h.session.startTool("find-1", "find");
-    await handle.dispose();
+    await Effect.runPromise(handle.dispose());
     h.session.endTool("find-1", "find");
     h.session.startTool("after-dispose", "write");
     expect(updates).toEqual(["read", undefined, "find"]);
@@ -1451,9 +1642,9 @@ describe("worker session handle", () => {
         order.push("runtime");
       },
     });
-    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
 
-    await handle.dispose();
+    await Effect.runPromise(handle.dispose());
 
     expect(order).toEqual(["subscription", "runtime", "loader"]);
   });
@@ -1485,12 +1676,10 @@ describe("worker session handle", () => {
         throw runtimeFailure;
       },
     });
-    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
 
-    await expect(Promise.all([handle.dispose(), handle.dispose()])).resolves.toEqual([
-      undefined,
-      undefined,
-    ]);
+    await expect(Effect.runPromise(Effect.all([handle.dispose(), handle.dispose()])))
+      .resolves.toEqual([undefined, undefined]);
     h.session.startTool("after-dispose", "read");
 
     expect(order).toEqual([
@@ -1532,7 +1721,7 @@ describe("worker session handle", () => {
     };
 
     await expect(
-      createWorkerSessionFactory(h.dependencies).create(options()),
+      createChildSessionTestClient(h.dependencies).acquire(options()),
     ).rejects.toMatchObject({
       _tag: "WorkerSession.AgentSessionAcquisitionError",
       operation: "create-runtime",
@@ -1552,17 +1741,18 @@ describe("worker session handle", () => {
     const runtimeDisposal = new Promise<void>((resolve) => (releaseRuntime = resolve));
     const disposeRuntime = mock(() => runtimeDisposal);
     h.dependencies.createRuntime = (input) => ({ session: input.session, dispose: disposeRuntime });
-    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
 
     const first = handle.dispose();
     const second = handle.dispose();
     expect(first).toBe(second);
+    const disposing = Effect.runPromise(Effect.all([first, second]));
     await Promise.resolve();
     expect(disposeRuntime).toHaveBeenCalledTimes(1);
     expect(h.loaderDispose).toHaveBeenCalledTimes(0);
 
     releaseRuntime();
-    await Promise.all([first, second]);
+    await disposing;
     expect(disposeRuntime).toHaveBeenCalledTimes(1);
     expect(h.loaderDispose).toHaveBeenCalledTimes(1);
   });
@@ -1576,10 +1766,10 @@ describe("worker session handle", () => {
       order.push("abort-prompt");
       return new Promise<void>((resolve) => (releaseAbort = resolve));
     });
-    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
 
     let abortSettled = false;
-    const abort = handle.abort().then(() => (abortSettled = true));
+    const abort = Effect.runPromise(handle.abort()).then(() => (abortSettled = true));
     await Promise.resolve();
     expect(order).toEqual(["abort-compaction", "abort-prompt"]);
     expect(abortSettled).toBe(false);
@@ -1587,20 +1777,68 @@ describe("worker session handle", () => {
     await abort;
     expect(abortSettled).toBe(true);
 
-    await Promise.all([handle.dispose(), handle.dispose()]);
+    await Effect.runPromise(Effect.all([handle.dispose(), handle.dispose()]));
     expect(h.session.unsubscribe).toHaveBeenCalledTimes(1);
     expect(h.session.dispose).toHaveBeenCalledTimes(1);
     expect(h.loaderDispose).toHaveBeenCalledTimes(1);
   });
 
-  test("still aborts the active prompt when compaction cancellation fails", async () => {
+  test("classifies a compaction-only abort failure and still aborts the active prompt", async () => {
     const h = harness();
     const compactionFailure = new Error("compaction cancellation failed");
     h.session.abortCompaction.mockImplementation(() => { throw compactionFailure; });
-    h.session.abort.mockRejectedValue(new Error("prompt cancellation failed"));
-    const handle = await createWorkerSessionFactory(h.dependencies).create(options());
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
 
-    await expect(handle.abort()).rejects.toBe(compactionFailure);
+    await expect(Effect.runPromise(handle.abort())).rejects.toMatchObject({
+      _tag: "WorkerSession.AbortError",
+      operation: "abort-compaction",
+      stage: "compaction",
+      message: "compaction cancellation failed",
+      cause: compactionFailure,
+    });
+    expect(h.session.abortCompaction).toHaveBeenCalledTimes(1);
+    expect(h.session.abort).toHaveBeenCalledTimes(1);
+  });
+
+  test("preserves the compaction-first typed failure when both abort operations fail", async () => {
+    const h = harness();
+    const compactionFailure = new Error("compaction cancellation failed");
+    const promptFailure = new Error("prompt cancellation failed");
+    h.session.abortCompaction.mockImplementation(() => { throw compactionFailure; });
+    h.session.abort.mockRejectedValue(promptFailure);
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
+
+    let failure: unknown;
+    try {
+      await Effect.runPromise(handle.abort());
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(WorkerSessionAbortError);
+    expect(failure).toMatchObject({
+      _tag: "WorkerSession.AbortError",
+      operation: "abort-compaction",
+      stage: "compaction",
+      message: "compaction cancellation failed",
+      cause: compactionFailure,
+    });
+    expect(h.session.abortCompaction).toHaveBeenCalledTimes(1);
+    expect(h.session.abort).toHaveBeenCalledTimes(1);
+  });
+
+  test("classifies prompt-only abort failures with their original cause", async () => {
+    const h = harness();
+    const promptFailure = new Error("prompt cancellation failed");
+    h.session.abort.mockRejectedValue(promptFailure);
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
+
+    await expect(Effect.runPromise(handle.abort())).rejects.toMatchObject({
+      _tag: "WorkerSession.AbortError",
+      operation: "abort-prompt",
+      stage: "prompt",
+      message: "prompt cancellation failed",
+      cause: promptFailure,
+    });
     expect(h.session.abortCompaction).toHaveBeenCalledTimes(1);
     expect(h.session.abort).toHaveBeenCalledTimes(1);
   });

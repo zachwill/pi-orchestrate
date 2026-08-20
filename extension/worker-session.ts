@@ -19,7 +19,7 @@ import {
   type CreateAgentSessionResult,
   type DefaultResourceLoader,
 } from "@earendil-works/pi-coding-agent";
-import { Cause, Effect, Exit, Schema, Scope } from "effect";
+import { Cause, Context, Deferred, Effect, Exit, Layer, Schema, Scope } from "effect";
 import type {
   WorkerDefinition,
   WorkerMessageDirection,
@@ -52,7 +52,7 @@ type ResourceLoaderOptions = Omit<
   "cwd" | "agentDir" | "settingsManager"
 >;
 
-export interface WorkerSessionFactoryOptions {
+export interface ChildSessionOptions {
   cwd: string;
   agentDir: string;
   parentSessionFile: string | undefined;
@@ -65,21 +65,12 @@ export interface WorkerSessionFactoryOptions {
 
 export interface WorkerSessionHandle {
   readonly sessionFile: string;
-  prompt(instructions: string): Promise<WorkerOutcome>;
-  abort(): Promise<void>;
-  dispose(): Promise<void>;
+  prompt(instructions: string): Effect.Effect<WorkerOutcome, never>;
+  abort(): Effect.Effect<void, WorkerSessionAbortError>;
+  dispose(): Effect.Effect<void, never>;
   subscribeUsage(listener: (usage: WorkerUsage) => void): () => void;
   subscribeActivity(listener: (activity: string | undefined) => void): () => void;
   subscribeMessageDirection(listener: (direction: WorkerMessageDirection) => void): () => void;
-}
-
-/**
- * Session creation is deliberately Promise-based. The factory starts acquisition with a
- * lifetime independent of the interruptible worker-generation fiber: the runtime may
- * stop awaiting it, but still observes late success and disposes a stale handle.
- */
-export interface WorkerSessionFactory {
-  create(options: WorkerSessionFactoryOptions): Promise<WorkerSessionHandle>;
 }
 
 const WorkerModelAcquisitionOperation = Schema.Literals([
@@ -124,6 +115,54 @@ export class WorkerResourceAcquisitionError extends Schema.TaggedError<WorkerRes
 export class WorkerAgentSessionAcquisitionError extends Schema.TaggedError<WorkerAgentSessionAcquisitionError>()(
   "WorkerSession.AgentSessionAcquisitionError",
   { operation: WorkerAgentSessionAcquisitionOperation, message: Schema.String, cause: Schema.Defect() },
+) {}
+
+export class WorkerSessionAcquisitionClosedError extends Schema.TaggedError<WorkerSessionAcquisitionClosedError>()(
+  "WorkerSession.AcquisitionClosedError",
+  { message: Schema.String },
+) {}
+
+const WorkerSessionAbortOperation = Schema.Literals([
+  "abort-compaction",
+  "abort-prompt",
+]);
+export type WorkerSessionAbortOperation = typeof WorkerSessionAbortOperation.Type;
+
+const WorkerSessionAbortStage = Schema.Literals(["compaction", "prompt"]);
+export type WorkerSessionAbortStage = typeof WorkerSessionAbortStage.Type;
+
+export class WorkerSessionAbortError extends Schema.TaggedError<WorkerSessionAbortError>()(
+  "WorkerSession.AbortError",
+  {
+    operation: WorkerSessionAbortOperation,
+    stage: WorkerSessionAbortStage,
+    message: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {}
+
+export type WorkerSessionAcquisitionError =
+  | WorkerModelAcquisitionError
+  | WorkerResourceAcquisitionError
+  | WorkerAgentSessionAcquisitionError
+  | WorkerSessionAcquisitionClosedError;
+
+export interface ChildSessionsService {
+  /**
+   * Acquires a child session through a process-owned producer. The adopter must
+   * synchronously install ownership before returning a value. Returning undefined
+   * rejects adoption and leaves ChildSessions responsible for disposal.
+   */
+  readonly acquire: <Adopted>(
+    options: ChildSessionOptions,
+    adopt: (session: WorkerSessionHandle) => Adopted | undefined,
+  ) => Effect.Effect<Adopted | undefined, WorkerSessionAcquisitionError>;
+  /** Closes every handoff without waiting for uncancellable Pi calls. */
+  readonly shutdown: () => Effect.Effect<void>;
+}
+
+export class ChildSessions extends Context.Service<ChildSessions, ChildSessionsService>()(
+  "@zachwill/pi-orchestrate/ChildSessions",
 ) {}
 
 const WorkerSessionCleanupOperation = Schema.Literals([
@@ -344,7 +383,9 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
   private readonly messageDirectionListeners = new Set<(direction: WorkerMessageDirection) => void>();
   private readonly activeToolCalls = new Map<string, string>();
   private disposed = false;
-  private disposePromise: Promise<void> | undefined;
+  private disposeStarted = false;
+  private readonly disposeDone = Deferred.makeUnsafe<void>();
+  private readonly disposeOperation: Effect.Effect<void, never>;
   private activity: string | undefined;
   private messageDirection: WorkerMessageDirection | undefined;
   private prompting = false;
@@ -359,6 +400,21 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
     private readonly cleanupReporter: WorkerSessionCleanupReporter,
   ) {
     this.sessionFile = sessionFile;
+    this.disposeOperation = Effect.fn("WorkerSession.disposeHandle")(() =>
+      Effect.suspend(() => {
+        if (this.disposeStarted) return Deferred.await(this.disposeDone);
+        this.disposeStarted = true;
+        this.disposed = true;
+        this.activeToolCalls.clear();
+        this.usageListeners.clear();
+        this.activityListeners.clear();
+        this.messageDirectionListeners.clear();
+        return disposeWorkerSession(this.scope, this.cleanupReporter).pipe(
+          Effect.ensuring(Deferred.succeed(this.disposeDone, undefined)),
+          Effect.uninterruptible,
+        );
+      })
+    )();
   }
 
   receiveSessionEvent(event: AgentSessionEvent): void {
@@ -403,71 +459,82 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
     for (const listener of [...this.messageDirectionListeners]) safelyNotify(() => listener(direction));
   }
 
-  async prompt(instructions: string): Promise<WorkerOutcome> {
-    if (this.disposed) throw new Error("Worker session has been disposed");
-    if (this.prompting) throw new Error("Worker session is already processing a prompt");
-    this.prompting = true;
-    this.abortRequested = false;
-    this.promptAssistant = undefined;
-    this.setMessageDirection("to-model");
-    const previousAssistant = lastAssistant(this.runtime.session.messages);
-    let failureMessage: string | undefined;
-    try {
-      await this.runtime.session.prompt(instructions, {
-        expandPromptTemplates: false,
-        source: "extension",
-      });
-    } catch (error) {
-      failureMessage = describeError(error, "Worker prompt failed");
-    } finally {
-      this.prompting = false;
-    }
-    const latestAssistant = lastAssistant(this.runtime.session.messages);
-    const message = this.promptAssistant ?? (latestAssistant !== previousAssistant ? latestAssistant : undefined);
-    const text = assistantText(message);
-    const assistantPayload = text === undefined ? {} : { assistantText: text };
-    if (this.abortRequested || message?.stopReason === "aborted") {
-      const abortMessage = message?.errorMessage ?? failureMessage;
-      return { status: "aborted", ...(abortMessage ? { message: abortMessage } : {}), ...assistantPayload };
-    }
-    if (message?.stopReason === "error") {
-      return { status: "failed", message: message.errorMessage ?? failureMessage ?? "Worker assistant reported a failure", ...assistantPayload };
-    }
-    if (failureMessage) return { status: "failed", message: failureMessage, ...assistantPayload };
-    return { status: this.interactive ? "ready" : "completed", assistantText: text ?? "" };
+  prompt(instructions: string): Effect.Effect<WorkerOutcome, never> {
+    return Effect.fn("WorkerSession.prompt")(function* (this: DefaultWorkerSessionHandle) {
+      if (this.disposed) return yield* Effect.die(new Error("Worker session has been disposed"));
+      if (this.prompting) return yield* Effect.die(new Error("Worker session is already processing a prompt"));
+      this.prompting = true;
+      this.abortRequested = false;
+      this.promptAssistant = undefined;
+      this.setMessageDirection("to-model");
+      const previousAssistant = lastAssistant(this.runtime.session.messages);
+      const failureMessage = yield* Effect.tryPromise({
+        try: () => {
+          try {
+            return this.runtime.session.prompt(instructions, {
+              expandPromptTemplates: false,
+              source: "extension",
+            }).finally(() => {
+              this.prompting = false;
+            });
+          } catch (error) {
+            this.prompting = false;
+            throw error;
+          }
+        },
+        catch: (cause) => describeError(cause, "Worker prompt failed"),
+      }).pipe(
+        Effect.match({
+          onFailure: (message) => message,
+          onSuccess: () => undefined,
+        }),
+      );
+      const latestAssistant = lastAssistant(this.runtime.session.messages);
+      const message = this.promptAssistant ?? (latestAssistant !== previousAssistant ? latestAssistant : undefined);
+      const text = assistantText(message);
+      const assistantPayload = text === undefined ? {} : { assistantText: text };
+      if (this.abortRequested || message?.stopReason === "aborted") {
+        const abortMessage = message?.errorMessage ?? failureMessage;
+        return { status: "aborted", ...(abortMessage ? { message: abortMessage } : {}), ...assistantPayload } satisfies WorkerOutcome;
+      }
+      if (message?.stopReason === "error") {
+        return { status: "failed", message: message.errorMessage ?? failureMessage ?? "Worker assistant reported a failure", ...assistantPayload } satisfies WorkerOutcome;
+      }
+      if (failureMessage) return { status: "failed", message: failureMessage, ...assistantPayload } satisfies WorkerOutcome;
+      return { status: this.interactive ? "ready" : "completed", assistantText: text ?? "" } satisfies WorkerOutcome;
+    }).call(this);
   }
 
-  async abort(): Promise<void> {
-    if (this.prompting) this.abortRequested = true;
+  abort(): Effect.Effect<void, WorkerSessionAbortError> {
+    return Effect.fn("WorkerSession.abort")(function* (this: DefaultWorkerSessionHandle) {
+      if (this.prompting) this.abortRequested = true;
 
-    let firstFailure: unknown;
-    try {
-      this.runtime.session.abortCompaction();
-    } catch (error) {
-      firstFailure = error;
-    }
+      const compaction = yield* Effect.result(Effect.try({
+        try: () => this.runtime.session.abortCompaction(),
+        catch: (cause) => new WorkerSessionAbortError({
+          operation: "abort-compaction",
+          stage: "compaction",
+          message: describeError(cause, "Worker compaction abort failed"),
+          cause,
+        }),
+      }));
+      const prompt = yield* Effect.result(Effect.tryPromise({
+        try: () => this.runtime.session.abort(),
+        catch: (cause) => new WorkerSessionAbortError({
+          operation: "abort-prompt",
+          stage: "prompt",
+          message: describeError(cause, "Worker prompt abort failed"),
+          cause,
+        }),
+      }));
 
-    try {
-      await this.runtime.session.abort();
-    } catch (error) {
-      if (firstFailure === undefined) firstFailure = error;
-    }
-
-    if (firstFailure !== undefined) throw firstFailure;
+      if (compaction._tag === "Failure") return yield* Effect.fail(compaction.failure);
+      if (prompt._tag === "Failure") return yield* Effect.fail(prompt.failure);
+    }).call(this);
   }
 
-  dispose(): Promise<void> {
-    if (this.disposePromise) return this.disposePromise;
-
-    this.disposed = true;
-    this.activeToolCalls.clear();
-    this.usageListeners.clear();
-    this.activityListeners.clear();
-    this.messageDirectionListeners.clear();
-    this.disposePromise = Effect.runPromise(
-      disposeWorkerSession(this.scope, this.cleanupReporter),
-    );
-    return this.disposePromise;
+  dispose(): Effect.Effect<void, never> {
+    return this.disposeOperation;
   }
 
   subscribeUsage(listener: (usage: WorkerUsage) => void): () => void {
@@ -561,7 +628,7 @@ const refreshModelRuntime = Effect.fn("WorkerSession.refreshModelRuntime")(funct
 });
 
 const prepareChildModelRuntime = Effect.fn("WorkerSession.prepareChildModelRuntime")(function* (
-  options: WorkerSessionFactoryOptions,
+  options: ChildSessionOptions,
   dependencies: WorkerSessionDependencies,
 ) {
   const selected = yield* Effect.try({
@@ -653,7 +720,7 @@ const disposeWorkerSession = Effect.fn("WorkerSession.dispose")(function* (
 });
 
 const acquireWorkerServices = Effect.fn("WorkerSession.acquireServices")(function* (
-  options: WorkerSessionFactoryOptions,
+  options: ChildSessionOptions,
   dependencies: WorkerSessionDependencies,
   modelRuntime: ModelRuntime,
 ) {
@@ -785,7 +852,7 @@ const acquireSessionSubscription = Effect.fn("WorkerSession.acquireSubscription"
 });
 
 const createWorkerSession = Effect.fn("WorkerSession.create")(function* (
-  options: WorkerSessionFactoryOptions,
+  options: ChildSessionOptions,
   dependencies: WorkerSessionDependencies,
 ) {
   const scope = yield* Scope.make("sequential");
@@ -884,12 +951,161 @@ const createWorkerSession = Effect.fn("WorkerSession.create")(function* (
   );
 });
 
-export function createWorkerSessionFactory(
+type AcquisitionHandoffState = "pending" | "offered" | "adopted" | "abandoned" | "failed";
+
+interface AcquisitionHandoff {
+  state: AcquisitionHandoffState;
+  readonly result: Deferred.Deferred<WorkerSessionHandle, WorkerSessionAcquisitionError>;
+  session: WorkerSessionHandle | undefined;
+  closedError: WorkerSessionAcquisitionClosedError | undefined;
+}
+
+function abandonHandoff(handoff: AcquisitionHandoff): WorkerSessionHandle | undefined {
+  if (handoff.state === "adopted" || handoff.state === "failed" || handoff.state === "abandoned") {
+    return undefined;
+  }
+  handoff.state = "abandoned";
+  const session = handoff.session;
+  handoff.session = undefined;
+  return session;
+}
+
+function disposeLateSession(session: WorkerSessionHandle): Effect.Effect<void> {
+  return session.dispose().pipe(Effect.catchCause(() => Effect.void));
+}
+
+function reclaimSession(session: WorkerSessionHandle): Effect.Effect<void> {
+  return Effect.forkDetach(disposeLateSession(session), {
+    startImmediately: true,
+    uninterruptible: true,
+  }).pipe(Effect.asVoid);
+}
+
+function adoptHandoff<Adopted>(
+  handoff: AcquisitionHandoff,
+  session: WorkerSessionHandle,
+  handoffs: Set<AcquisitionHandoff>,
+  adopt: (session: WorkerSessionHandle) => Adopted | undefined,
+): Effect.Effect<Adopted | undefined, WorkerSessionAcquisitionError> {
+  return Effect.suspend(() => {
+    if (handoff.state !== "offered" || handoff.session !== session) {
+      const closedError = handoff.closedError;
+      if (closedError) return Effect.fail(closedError);
+      return Effect.die(new Error("Child session acquisition handoff was abandoned"));
+    }
+
+    let adopted: Adopted | undefined;
+    try {
+      adopted = adopt(session);
+    } catch (cause) {
+      const owned = abandonHandoff(handoff);
+      handoffs.delete(handoff);
+      return (owned ? reclaimSession(owned) : Effect.void).pipe(
+        Effect.andThen(Effect.die(cause)),
+      );
+    }
+
+    if (adopted === undefined) {
+      const owned = abandonHandoff(handoff);
+      handoffs.delete(handoff);
+      return (owned ? reclaimSession(owned) : Effect.void).pipe(
+        Effect.as(undefined),
+      );
+    }
+
+    handoff.state = "adopted";
+    handoff.session = undefined;
+    handoffs.delete(handoff);
+    return Effect.succeed(adopted);
+  });
+}
+
+export function createChildSessionsLayer(
   overrides: Partial<WorkerSessionDependencies> = {},
-): WorkerSessionFactory {
-  const dependencies: WorkerSessionDependencies = { ...defaultDependencies, ...overrides };
-  // createWorkerSession transfers its sequential Scope to the returned handle. Starting
-  // it on its own Effect runner lets uncancellable Pi acquisition finish after a
-  // generation stops waiting, so runtime can reclaim any handle that arrives late.
-  return { create: (options) => Effect.runPromise(createWorkerSession(options, dependencies)) };
+): Layer.Layer<ChildSessions> {
+  return Layer.effect(
+    ChildSessions,
+    Effect.gen(function* () {
+      const dependencies: WorkerSessionDependencies = { ...defaultDependencies, ...overrides };
+      const handoffs = new Set<AcquisitionHandoff>();
+      let shuttingDown = false;
+
+      const shutdown = Effect.fn("ChildSessions.shutdown")(function* () {
+        shuttingDown = true;
+        for (const handoff of [...handoffs]) {
+          const closedError = new WorkerSessionAcquisitionClosedError({
+            message: "Child sessions are shutting down",
+          });
+          handoff.closedError = closedError;
+          const session = abandonHandoff(handoff);
+          Deferred.doneUnsafe(handoff.result, Effect.fail(closedError));
+          handoffs.delete(handoff);
+          if (session) yield* reclaimSession(session);
+        }
+      });
+
+      yield* Effect.addFinalizer(() => shutdown());
+
+      const acquire = Effect.fn("ChildSessions.acquire")(function* <Adopted>(
+        options: ChildSessionOptions,
+        adopt: (session: WorkerSessionHandle) => Adopted | undefined,
+      ) {
+        if (shuttingDown) {
+          return yield* Effect.fail(new WorkerSessionAcquisitionClosedError({
+            message: "Child sessions are shutting down",
+          }));
+        }
+
+        const handoff: AcquisitionHandoff = {
+          state: "pending",
+          result: Deferred.makeUnsafe<WorkerSessionHandle, WorkerSessionAcquisitionError>(),
+          session: undefined,
+          closedError: undefined,
+        };
+        handoffs.add(handoff);
+
+        const producer = createWorkerSession(options, dependencies).pipe(
+          Effect.matchCauseEffect({
+            onFailure: (cause) => Effect.sync(() => {
+              if (handoff.state === "pending") {
+                handoff.state = "failed";
+                handoffs.delete(handoff);
+                Deferred.doneUnsafe(handoff.result, Effect.failCause(cause));
+              } else if (handoff.state === "abandoned") {
+                handoffs.delete(handoff);
+              }
+            }),
+            onSuccess: (session) => Effect.suspend(() => {
+              if (handoff.state === "pending" && !shuttingDown) {
+                handoff.state = "offered";
+                handoff.session = session;
+                Deferred.doneUnsafe(handoff.result, Effect.succeed(session));
+                return Effect.void;
+              }
+              handoffs.delete(handoff);
+              return disposeLateSession(session);
+            }),
+          }),
+        );
+        yield* Effect.forkDetach(producer, {
+          startImmediately: true,
+          uninterruptible: true,
+        });
+
+        return yield* Effect.uninterruptibleMask((restore) =>
+          restore(Deferred.await(handoff.result)).pipe(
+            Effect.flatMap((session) => adoptHandoff(handoff, session, handoffs, adopt)),
+          )
+        ).pipe(
+          Effect.onInterrupt(() => Effect.suspend(() => {
+            const stale = abandonHandoff(handoff);
+            handoffs.delete(handoff);
+            return stale ? reclaimSession(stale) : Effect.void;
+          })),
+        );
+      });
+
+      return ChildSessions.of({ acquire, shutdown });
+    }),
+  );
 }

@@ -26,7 +26,6 @@ import {
   type RunRecord,
   type WorkerCatalog,
   type WorkerDefinition,
-  type WorkerId,
   type WorkerOutcome,
   type WorkerRecord,
   type WorkerUsage,
@@ -36,11 +35,11 @@ import type {
   AcceptedRun,
   CompletedRun,
   OrchestrationContext,
-  OrchestratorRuntime,
   RunResult,
   RuntimeSnapshot,
   SettlementListener,
 } from "./runtime.js";
+import type { OrchestratorRuntime } from "./host.js";
 import type { WorkerSettlement } from "./worker-settlement.js";
 
 const STRICT_OBJECT = { additionalProperties: false } as const;
@@ -99,7 +98,7 @@ export interface DispatchDecision {
 
 export interface OrchestrationToolDependencies {
   readonly runtime: OrchestratorRuntime;
-  getCatalog(ctx: ExtensionContext): WorkerCatalog | Promise<WorkerCatalog>;
+  getCatalog(ctx: ExtensionContext): WorkerCatalog;
   getDispatchDecision(toolCallId: string): DispatchDecision;
 }
 
@@ -130,7 +129,7 @@ export function registerOrchestrationTools(
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const decision = deps.getDispatchDecision(toolCallId);
       const mode = decision.mode;
-      const runtimeContext = await buildRuntimeContext(ctx, deps, decision.synthesisGroup);
+      const runtimeContext = buildRuntimeContext(ctx, deps, decision.synthesisGroup);
       if (mode === "async") {
         const acceptedRun = await deps.runtime.orchestrate(
           runtimeContext,
@@ -191,14 +190,9 @@ export function registerOrchestrationTools(
       return renderDiagnosticsResult(result, isPartial, theme);
     },
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
-      const ownerSessionId = requireNonblank(
-        "owner session ID",
-        ctx.sessionManager.getSessionId(),
-      );
-      const [catalog, snapshot] = await Promise.all([
-        deps.getCatalog(ctx),
-        deps.runtime.snapshot(ownerSessionId),
-      ]);
+      const ownerSessionId = ctx.sessionManager.getSessionId();
+      const catalog = deps.getCatalog(ctx);
+      const snapshot = await deps.runtime.snapshot(ownerSessionId);
       const readable = statusDetails(catalog, snapshot);
       return {
         content: [
@@ -229,9 +223,9 @@ export function registerOrchestrationTools(
       return renderOrchestrationResult(result, isPartial, expanded, theme, context.lastComponent);
     },
     async execute(toolCallId, params, signal, onUpdate, ctx) {
-      const workerId = asWorkerId(params.worker_id);
+      const workerId = params.worker_id;
       const mode = deps.getDispatchDecision(toolCallId).mode;
-      const runtimeContext = await buildRuntimeContext(ctx, deps);
+      const runtimeContext = buildRuntimeContext(ctx, deps);
       if (mode === "async") {
         const acceptedRun = await deps.runtime.sendInteractive(
           runtimeContext,
@@ -297,13 +291,14 @@ export function registerOrchestrationTools(
       return renderSimpleResult(result, isPartial ? "Requesting worker stop…" : "Worker stop requested", theme, "warning");
     },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const ownerSessionId = requireNonblank(
-        "owner session ID",
-        ctx.sessionManager.getSessionId(),
-      );
-      const target = abortTarget(params);
-      await deps.runtime.abort(ownerSessionId, target.runtime);
-      const readable = { target: target.external };
+      const ownerSessionId = ctx.sessionManager.getSessionId();
+      const target = normalizeAbortTarget(params);
+      await deps.runtime.abort(ownerSessionId, target);
+      const readable = {
+        target: "worker_ids" in params
+          ? { worker_ids: params.worker_ids }
+          : { all: params.all },
+      };
       return {
         content: [
           {
@@ -311,7 +306,7 @@ export function registerOrchestrationTools(
             text: readableDetails("Abort request completed.", readable),
           },
         ],
-        details: { target: target.external },
+        details: readable,
       };
     },
   });
@@ -332,11 +327,8 @@ export function registerOrchestrationTools(
       return renderSimpleResult(result, isPartial ? "Closing worker…" : "✓ Worker closed", theme);
     },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-      const ownerSessionId = requireNonblank(
-        "owner session ID",
-        ctx.sessionManager.getSessionId(),
-      );
-      const workerId = asWorkerId(params.worker_id);
+      const ownerSessionId = ctx.sessionManager.getSessionId();
+      const workerId = params.worker_id;
       await deps.runtime.closeInteractive(ownerSessionId, workerId);
       const readable = { worker_id: workerId };
       return {
@@ -352,21 +344,18 @@ export function registerOrchestrationTools(
   });
 }
 
-async function buildRuntimeContext(
+function buildRuntimeContext(
   ctx: ExtensionContext,
   deps: OrchestrationToolDependencies,
   synthesisGroup?: DispatchDecision["synthesisGroup"],
-): Promise<OrchestrationContext> {
+): OrchestrationContext {
   return {
-    ownerSessionId: requireNonblank(
-      "owner session ID",
-      ctx.sessionManager.getSessionId(),
-    ),
+    ownerSessionId: ctx.sessionManager.getSessionId(),
     cwd: ctx.cwd,
     agentDir: getAgentDir(),
     parentSessionFile: ctx.sessionManager.getSessionFile(),
     projectTrusted: ctx.isProjectTrusted(),
-    catalog: await deps.getCatalog(ctx),
+    catalog: deps.getCatalog(ctx),
     parentModel: ctx.model,
     modelRegistry: ctx.modelRegistry,
     ...(synthesisGroup ? { synthesisGroup } : {}),
@@ -387,45 +376,13 @@ function createInlineSettlementListener(
   };
 }
 
-function requireNonblank(name: string, value: string): string {
-  if (typeof value !== "string" || value.trim() === "") {
-    throw new Error(`${name} must not be blank`);
-  }
-  return value;
-}
-
-function asWorkerId(value: string): WorkerId {
-  return requireNonblank("worker_id", value) as WorkerId;
-}
-
-function abortTarget(params: {
+function normalizeAbortTarget(params: {
   worker_ids?: string[];
-  all?: true;
-}): {
-  runtime: AbortTarget;
-  external: { worker_ids: readonly WorkerId[] } | { all: true };
-} {
-  const selectedTargetCount = [
-    params.worker_ids !== undefined,
-    params.all !== undefined,
-  ].filter(Boolean).length;
-  if (selectedTargetCount !== 1 || (params.all !== undefined && params.all !== true)) {
-    throw new Error("Abort target must specify exactly one target");
-  }
-
-  if (params.worker_ids !== undefined) {
-    if (!Array.isArray(params.worker_ids) || params.worker_ids.length === 0) {
-      throw new Error("worker_ids must contain at least one worker ID");
-    }
-    const workerIds = params.worker_ids.map(asWorkerId);
-    return {
-      runtime: { workerIds },
-      external: { worker_ids: workerIds },
-    };
-  }
+  all?: boolean;
+}): AbortTarget {
   return {
-    runtime: { all: true },
-    external: { all: true },
+    ...(params.worker_ids !== undefined ? { workerIds: params.worker_ids } : {}),
+    ...(params.all !== undefined ? { all: params.all } : {}),
   };
 }
 

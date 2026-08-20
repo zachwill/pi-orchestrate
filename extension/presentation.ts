@@ -17,7 +17,8 @@ import {
 import { Result } from "effect";
 import type { WorkerDeliveryDetails } from "./delivery.js";
 import type { WorkerOutcome, WorkerRecord, WorkerStatus } from "./domain.js";
-import type { OrchestratorRuntime, RuntimeSnapshot } from "./runtime.js";
+import type { OrchestratorRuntime } from "./host.js";
+import type { RuntimeSnapshot } from "./runtime.js";
 import {
   decodePersistedWorkerSettlementDetails,
   type WorkerSettlementDetails,
