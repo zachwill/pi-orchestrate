@@ -514,22 +514,35 @@ test("controller rebind synchronously replaces an active widget with retained re
   const runtime = new RuntimeHarness();
   runtime.initialSnapshots.set("active-owner", snapshot([worker("active", "running")]));
   runtime.initialSnapshots.set("ready-owner", snapshot([worker("ready", "ready")]));
-  const widgets: unknown[] = [];
+  let installed: WorkerStatusComponent | undefined;
+  let installs = 0;
+  let clears = 0;
   const statuses: unknown[] = [];
   const ctx = { mode: "tui", ui: {
     setStatus(_key: string, value: unknown) { statuses.push(value); },
-    setWidget(_key: string, value: unknown) { widgets.push(value); },
+    setWidget(_key: string, value: unknown) {
+      installed?.dispose();
+      installed = undefined;
+      if (typeof value === "function") {
+        installed = value({ requestRender() {} }, theme);
+        installs += 1;
+      } else {
+        clears += 1;
+      }
+    },
   } } as unknown as ExtensionContext;
   const controller = new StatusController(runtime);
 
   controller.bind("active-owner", ctx);
-  expect(typeof widgets.at(-1)).toBe("function");
+  expect(installs).toBe(1);
+  expect(installed).toBeDefined();
   controller.bind("ready-owner", ctx);
 
   expect(runtime.listeners.has("active-owner")).toBe(false);
   expect(runtime.listeners.has("ready-owner")).toBe(true);
   expect(runtime.unsubscribeCalls).toBe(1);
-  expect(widgets.at(-1)).toBeUndefined();
+  expect(clears).toBe(1);
+  expect(installed).toBeUndefined();
   expect(statuses.at(-1)).toBe("1 interactive ready");
   controller.dispose();
 });
@@ -561,17 +574,18 @@ test("controller bind, unbind, and rebind subscriptions are isolated", () => {
 
 test("lets Pi dispose installed widgets exactly once", () => {
   const runtime = new RuntimeHarness();
-  let installed: Component | undefined;
+  let installed: WorkerStatusComponent | undefined;
   let disposals = 0;
   const ctx = { mode: "tui", ui: {
     setStatus() {},
     setWidget(_key: string, value: unknown) {
       if (typeof value === "function") {
-        installed = (value as (tui: unknown, theme: Theme) => Component)({ requestRender() {} }, theme);
-        const original = (installed as WorkerStatusComponent).dispose.bind(installed);
-        (installed as WorkerStatusComponent).dispose = () => { disposals += 1; original(); };
-      } else if (installed) {
-        (installed as WorkerStatusComponent).dispose();
+        const component: WorkerStatusComponent = value({ requestRender() {} }, theme);
+        const original = component.dispose.bind(component);
+        component.dispose = () => { disposals += 1; original(); };
+        installed = component;
+      } else if (installed !== undefined) {
+        installed.dispose();
         installed = undefined;
       }
     },
@@ -579,29 +593,45 @@ test("lets Pi dispose installed widgets exactly once", () => {
   const controller = new StatusController(runtime);
   controller.bind("owner", ctx);
   runtime.emit(snapshot([worker("active", "running")]));
-  runtime.emit(snapshot([]));
+  controller.dispose();
   controller.dispose();
   expect(disposals).toBe(1);
 });
 
 test("controller updates one widget instance, removes terminal rows, and clears at zero", () => {
   const runtime = new RuntimeHarness();
-  const widgets: unknown[] = [];
+  let installed: WorkerStatusComponent | undefined;
+  let installs = 0;
+  let clears = 0;
   const statuses: unknown[] = [];
   const ctx = { mode: "tui", ui: {
     setStatus(key: string, value: unknown) { expect(key).toBe(ORCHESTRATION_PRESENTATION_KEY); statuses.push(value); },
-    setWidget(key: string, value: unknown) { expect(key).toBe(ORCHESTRATION_PRESENTATION_KEY); widgets.push(value); },
+    setWidget(key: string, value: unknown) {
+      expect(key).toBe(ORCHESTRATION_PRESENTATION_KEY);
+      if (typeof value === "function") {
+        installed = value({ requestRender() {} }, theme);
+        installs += 1;
+      } else {
+        installed?.dispose();
+        installed = undefined;
+        clears += 1;
+      }
+    },
   } } as unknown as ExtensionContext;
   const controller = new StatusController(runtime);
   controller.bind("owner", ctx);
   runtime.emit(snapshot([worker("a", "running"), worker("b", "running")]));
-  expect(widgets).toHaveLength(1);
-  const component = (widgets[0] as (tui: unknown, theme: Theme) => Component)({ requestRender() {} }, theme);
+  expect(installs).toBe(1);
+  const component = installed;
+  expect(component).toBeDefined();
+  if (component === undefined) throw new Error("Expected synchronous widget installation");
   runtime.emit(snapshot([worker("a", "completed"), worker("b", "running")]));
-  expect(widgets).toHaveLength(1);
+  expect(installs).toBe(1);
   expect(Bun.stripANSI(component.render(80).join("\n"))).not.toContain("Task a");
   runtime.emit(snapshot([worker("a", "completed"), worker("b", "ready")]));
-  expect(widgets.at(-1)).toBeUndefined();
+  expect(clears).toBe(1);
+  expect(installed).toBeUndefined();
   expect(statuses.at(-1)).toBe("1 interactive ready");
   controller.dispose();
+  expect(clears).toBe(1);
 });

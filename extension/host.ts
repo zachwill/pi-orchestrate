@@ -79,7 +79,7 @@ interface AttachmentAwareProcessHost extends ProcessHost {
   attachments?: Set<ProcessHostAttachment>;
 }
 
-type ProcessHostLifecycle = "active" | "destroying" | "destroyed";
+type ProcessHostLifecycle = "destroying" | "destroyed";
 
 interface OwnedProcessHost extends AttachmentAwareProcessHost {
   readonly effectRuntime?: ManagedRuntime.ManagedRuntime<Orchestration | Delivery, never>;
@@ -254,11 +254,9 @@ export function createProcessHost(): ProcessHost {
     throw new Error("Cannot create a process host while the current host is being destroyed");
   }
   if (existing?.lifecycle === "destroyed") {
-    delete global[PROCESS_HOST_KEY];
-  } else if (existing) {
-    existing.lifecycle = "active";
-    return existing;
+    throw new Error("Cannot create a process host after the current host was destroyed");
   }
+  if (existing) return existing;
 
   const effectRuntime = ManagedRuntime.make(createProcessApplicationLayer());
   const runtime = createProcessHostRuntimeAdapter(effectRuntime);
@@ -268,7 +266,6 @@ export function createProcessHost(): ProcessHost {
     delivery,
     effectRuntime,
     attachments: new Set(),
-    lifecycle: "active",
   };
   global[PROCESS_HOST_KEY] = host;
   return host;
@@ -304,7 +301,6 @@ export function destroyProcessHost(
   const ownedHost = host as OwnedProcessHost;
   if (ownedHost.destroyPromise) return ownedHost.destroyPromise;
   if ((ownedHost.attachments?.size ?? 0) > 0) return Promise.resolve();
-  if (ownedHost.lifecycle === "destroyed") return Promise.resolve();
 
   ownedHost.lifecycle = "destroying";
   let resolveDestruction!: () => void;

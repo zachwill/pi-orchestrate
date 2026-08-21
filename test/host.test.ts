@@ -14,9 +14,12 @@ import {
   type RunMode,
 } from "../extension/domain.js";
 import {
+  attachProcessHost,
   createProcessApplicationLayer,
+  createProcessHost,
   createProcessHostRuntimeAdapter,
   destroyProcessHost,
+  getProcessHost,
   ProcessHostRuntimeAdapter,
   type ProcessHost,
 } from "../extension/host.js";
@@ -365,6 +368,49 @@ describe("ProcessHost root lifetime", () => {
 
     await expect(effectRuntime.dispose()).rejects.toBeDefined();
     expect(delivery.pendingCount("owner")).toBe(0);
+  });
+});
+
+describe("ProcessHost lifecycle", () => {
+  test("reuses an active host without lifecycle normalization and deletes it after finalization", async () => {
+    const first = createProcessHost();
+    const second = createProcessHost();
+
+    expect(second).toBe(first);
+    expect(
+      (first as ProcessHost & { lifecycle?: "destroying" | "destroyed" })
+        .lifecycle,
+    ).toBeUndefined();
+
+    await destroyProcessHost(first);
+
+    expect(getProcessHost()).toBeUndefined();
+    expect(() => attachProcessHost(first)).toThrow(
+      "Cannot attach to a destroyed process host",
+    );
+
+    const replacement = createProcessHost();
+    expect(replacement).not.toBe(first);
+    await destroyProcessHost(replacement);
+    expect(getProcessHost()).toBeUndefined();
+  });
+
+  test("rejects a malformed globally retained destroyed host instead of recovering it", () => {
+    const processHostKey = Symbol.for("@zachwill/pi-orchestrate/process-host/v3");
+    const globalHosts = globalThis as unknown as Record<symbol, unknown>;
+    const malformed = Object.assign(destructionHost(async () => {}), {
+      lifecycle: "destroyed" as const,
+    });
+    globalHosts[processHostKey] = malformed;
+
+    try {
+      expect(() => createProcessHost()).toThrow(
+        "Cannot create a process host after the current host was destroyed",
+      );
+      expect(globalHosts[processHostKey]).toBe(malformed);
+    } finally {
+      delete globalHosts[processHostKey];
+    }
   });
 });
 

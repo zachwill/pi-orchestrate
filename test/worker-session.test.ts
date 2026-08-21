@@ -33,6 +33,7 @@ import {
   type WorkerSessionDependencies,
   type ChildSessionOptions,
   type WorkerSessionHandle,
+  type WorkerSessionObservation,
 } from "../extension/worker-session.js";
 
 function model(provider: string, id: string): Model<Api> {
@@ -1827,6 +1828,27 @@ describe("worker session handle", () => {
     unsubscribe();
     h.session.finishTurn(assistant("ignored"));
     expect(updates).toHaveLength(2);
+  });
+
+  test("stale unsubscribe cannot remove a later subscription of the same listener", async () => {
+    const h = harness();
+    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
+    const updates: number[] = [];
+    const listener = (observation: WorkerSessionObservation) => {
+      updates.push(observation.usage.turns);
+    };
+
+    const unsubscribeFirst = handle.subscribeObservation(listener);
+    unsubscribeFirst();
+    const unsubscribeSecond = handle.subscribeObservation(listener);
+    unsubscribeFirst();
+
+    h.session.finishTurn(assistant("observed"));
+    expect(updates).toEqual([1]);
+
+    unsubscribeSecond();
+    h.session.finishTurn(assistant("ignored"));
+    expect(updates).toEqual([1]);
   });
 
   test("isolates throwing observation listeners and emits immutable snapshots", async () => {

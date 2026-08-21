@@ -43,9 +43,13 @@ type Handler = (event: any, ctx: ExtensionContext) => unknown;
 
 class FakePi {
   readonly handlers = new Map<string, Handler[]>();
-  readonly tools: ToolDefinition[] = [];
   readonly renderers: string[] = [];
   readonly sent: Array<{ message: unknown; options: unknown }> = [];
+  private readonly toolsByName = new Map<string, ToolDefinition>();
+
+  get tools(): ToolDefinition[] {
+    return [...this.toolsByName.values()];
+  }
 
   readonly sendMessage = (message: unknown, options?: unknown): void => {
     this.sent.push({ message, options });
@@ -58,7 +62,7 @@ class FakePi {
   }
 
   registerTool(tool: ToolDefinition): void {
-    this.tools.push(tool);
+    this.toolsByName.set(tool.name, tool);
   }
 
   registerMessageRenderer(customType: string): void {
@@ -66,7 +70,7 @@ class FakePi {
   }
 
   tool(name: string): ToolDefinition {
-    const tool = this.tools.find((candidate) => candidate.name === name);
+    const tool = this.toolsByName.get(name);
     if (!tool) throw new Error(`Missing tool: ${name}`);
     return tool;
   }
@@ -360,25 +364,24 @@ describe("Pi Orchestrate extension integration", () => {
     expect(shared.runtime.stateListeners.size).toBe(1);
   });
 
-  test("rebinds repeated session starts without duplicating tools or subscriptions", async () => {
+  test("rebinds repeated starts for the same session and replaces registered tools", async () => {
     const pi = new FakePi();
     const { host, runtime } = fakeHost();
     install(pi, host);
-    const first = createContext("owner-first");
-    const second = createContext("owner-second");
+    const parent = createContext("owner-repeated");
 
-    await pi.emit("session_start", { reason: "startup" }, first.ctx);
-    await pi.emit("session_start", { reason: "resume" }, second.ctx);
+    await pi.emit("session_start", { reason: "startup" }, parent.ctx);
+    const firstOrchestrateTool = pi.tool("orchestrate");
+    await pi.emit("session_start", { reason: "reload" }, parent.ctx);
 
     expect(pi.tools.map((tool) => tool.name)).toEqual([...TOOL_NAMES]);
+    expect(pi.tool("orchestrate")).not.toBe(firstOrchestrateTool);
     expect(runtime.unsubscribeStateCalls).toBe(1);
-    expect(runtime.stateListeners.has("owner-first")).toBe(false);
-    expect(runtime.stateListeners.has("owner-second")).toBe(true);
-    expect(host.delivery.accept(workerSettlement("owner-first"))).toBe(true);
-    expect(host.delivery.accept(workerSettlement("owner-second", { sequence: 2 }))).toBe(true);
+    expect(runtime.stateListeners.has("owner-repeated")).toBe(true);
+    expect(host.delivery.accept(workerSettlement("owner-repeated"))).toBe(true);
     expect(pi.sent).toHaveLength(1);
     expect(pi.sent[0]).toMatchObject({
-      message: { details: { ownerSessionId: "owner-second" } },
+      message: { details: { ownerSessionId: "owner-repeated" } },
     });
   });
 

@@ -85,15 +85,14 @@ export class DeliveryCoordinator implements DeliveryService {
   }
 
   markAgentStarted(ownerSessionId: string, generation: ParentBindingGeneration): void {
-    if (!this.matchesBinding(ownerSessionId, generation)) return;
     const parent = this.boundParents.get(ownerSessionId);
-    if (parent) parent.agentRunning = true;
+    if (parent?.binding.generation !== generation) return;
+    parent.agentRunning = true;
   }
 
   markAgentSettled(ownerSessionId: string, generation: ParentBindingGeneration): void {
-    if (!this.matchesBinding(ownerSessionId, generation)) return;
     const parent = this.boundParents.get(ownerSessionId);
-    if (!parent) return;
+    if (parent?.binding.generation !== generation) return;
     parent.agentRunning = false;
     this.flush(ownerSessionId, generation);
   }
@@ -170,19 +169,18 @@ export class DeliveryCoordinator implements DeliveryService {
         (settlement) => settlement.ownerSessionId === ownerSessionId,
       );
       let latestFinalIndex = -1;
-      for (let index = 0; index < queued.length; index += 1) {
-        const settlement = queued[index];
-        if (settlement && this.isFinalBoundary(settlement)) latestFinalIndex = index;
+      for (const [index, settlement] of queued.entries()) {
+        if (this.isFinalBoundary(settlement)) latestFinalIndex = index;
       }
       const flushThrough = latestFinalIndex >= 0 ? latestFinalIndex : queued.length - 1;
       let flushBytesRemaining = MAX_DELIVERY_MARKDOWN_BYTES;
 
-      for (let index = 0; index <= flushThrough; index += 1) {
+      for (const [index, settlement] of queued.entries()) {
+        if (index > flushThrough) break;
         // Synchronous delivery callbacks can change owner, generation, or idle
         // state before the next send.
         if (!this.canDeliver(ownerSessionId, generation)) return;
-        const settlement = queued[index];
-        if (!settlement || !this.pendingSettlements.includes(settlement)) continue;
+        if (!this.pendingSettlements.includes(settlement)) continue;
 
         const messagesRemaining = flushThrough - index + 1;
         const fairFlushBytes = Math.floor(flushBytesRemaining / messagesRemaining);

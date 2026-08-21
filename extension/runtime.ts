@@ -272,9 +272,6 @@ class StatefulOrchestration implements OrchestrationService {
       effect: Effect.Effect<void, never>,
     ) => Fiber.Fiber<void, never>,
     private readonly cleanups: FiberSet.FiberSet<void, never>,
-    private readonly runCleanup: (
-      effect: Effect.Effect<void, never>,
-    ) => Fiber.Fiber<void, never>,
     private readonly clock: Clock.Clock,
     private readonly idFactories: OrchestrateIdFactories,
     private readonly shutdownCompletion: Deferred.Deferred<void>,
@@ -430,34 +427,16 @@ class StatefulOrchestration implements OrchestrationService {
       };
 
       const admission = this.transact((draft) => {
-        const open = openDecision(draft, "sendInteractive");
-        if (open._tag === "rejected") return { value: open };
-        const ownership = ownedWorkerDecision(
+        const ready = readyInteractiveDecision(
           draft,
-          "sendInteractive",
           context.ownerSessionId,
           validatedWorkerId,
         );
-        if (ownership._tag === "rejected") return { value: ownership };
-
-        const worker = ownership.value;
-        if (
-          worker.record.lifecycle !== "interactive" ||
-          worker.record.status !== "ready" ||
-          !worker.session
-        ) {
-          return {
-            value: rejected(
-              "sendInteractive",
-              "worker-state",
-              "interactive_send requires an owned ready interactive worker",
-            ),
-          };
-        }
+        if (ready._tag === "rejected") return { value: ready };
         if (draft.runs.has(runId)) throw new Error(`Duplicate run ID: ${runId}`);
 
+        const { worker, session } = ready.value;
         const generation = worker.generation + 1;
-        const session = worker.session;
         const runningRecord: WorkerRecord = {
           ...transitionWorkerStatus(worker.record, "running"),
           runId,
@@ -1466,7 +1445,7 @@ class StatefulOrchestration implements OrchestrationService {
     const session = worker.session;
     if (session) {
       actions.push(runAction(() => {
-        this.launchCleanupOrJoinAfterClosure(
+        this.launchCleanup(
           Effect.suspend(() => session.dispose()).pipe(
             Effect.catchCause(() => Effect.void),
             Effect.uninterruptible,
@@ -1477,19 +1456,9 @@ class StatefulOrchestration implements OrchestrationService {
     return actions;
   }
 
-  private launchCleanupOrJoinAfterClosure(cleanup: Effect.Effect<void>): void {
-    if (this.cleanups.state._tag === "Closed") {
-      Effect.runFork(cleanup);
-      return;
-    }
-    const fiber = this.runCleanup(cleanup);
-    const exit = fiber.pollUnsafe();
-    if (exit && Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) {
-      // FiberSet.runtime returns an already-interrupted sentinel when closure
-      // wins admission. If admission won and closure interrupted the real fiber,
-      // repeating the cached uninterruptible disposal only joins that cleanup.
-      Effect.runFork(cleanup);
-    }
+  private launchCleanup(cleanup: Effect.Effect<void>): void {
+    const fiber = Effect.runFork(cleanup);
+    FiberSet.addUnsafe(this.cleanups, fiber);
   }
 
   private preflightOpen(
@@ -1505,30 +1474,12 @@ class StatefulOrchestration implements OrchestrationService {
     workerId: WorkerId,
   ): Decision<void> {
     return this.transact((draft) => {
-      const open = openDecision(draft, "sendInteractive");
-      if (open._tag === "rejected") return { value: open };
-      const ownership = ownedWorkerDecision(
-        draft,
-        "sendInteractive",
-        ownerSessionId,
-        workerId,
-      );
-      if (ownership._tag === "rejected") return { value: ownership };
-      const worker = ownership.value;
-      if (
-        worker.record.lifecycle !== "interactive" ||
-        worker.record.status !== "ready" ||
-        !worker.session
-      ) {
-        return {
-          value: rejected(
-            "sendInteractive",
-            "worker-state",
-            "interactive_send requires an owned ready interactive worker",
-          ),
-        };
-      }
-      return { value: accepted(undefined) };
+      const ready = readyInteractiveDecision(draft, ownerSessionId, workerId);
+      return {
+        value: ready._tag === "accepted"
+          ? accepted(undefined)
+          : ready,
+      };
     });
   }
 
@@ -1587,7 +1538,6 @@ export function orchestrationLayer(
       // Scope finalizers run in reverse acquisition order. Keep cleanup open while
       // generation and cancellation interruption settle workers and enqueue disposal.
       const cleanups = yield* FiberSet.make<void, never>();
-      const runCleanup = yield* FiberSet.runtime(cleanups)<never>();
       const cancellations = yield* FiberSet.make<void, never>();
       const runCancellation = yield* FiberSet.runtime(cancellations)<never>();
       const generations = yield* FiberMap.make<WorkerId, void, never>();
@@ -1601,7 +1551,6 @@ export function orchestrationLayer(
         cancellations,
         runCancellation,
         cleanups,
-        runCleanup,
         clock,
         options.idFactories ?? createRandomIdFactories(),
         shutdownCompletion,
@@ -1880,6 +1829,38 @@ function ownedWorkerDecision(
         "Worker is not owned by this session",
       )
     : accepted(worker);
+}
+
+function readyInteractiveDecision(
+  draft: RuntimeState,
+  ownerSessionId: string,
+  workerId: WorkerId,
+): Decision<{
+  readonly worker: RuntimeWorker;
+  readonly session: WorkerSessionHandle;
+}> {
+  const open = openDecision(draft, "sendInteractive");
+  if (open._tag === "rejected") return open;
+  const ownership = ownedWorkerDecision(
+    draft,
+    "sendInteractive",
+    ownerSessionId,
+    workerId,
+  );
+  if (ownership._tag === "rejected") return ownership;
+  const worker = ownership.value;
+  if (
+    worker.record.lifecycle !== "interactive" ||
+    worker.record.status !== "ready" ||
+    !worker.session
+  ) {
+    return rejected(
+      "sendInteractive",
+      "worker-state",
+      "interactive_send requires an owned ready interactive worker",
+    );
+  }
+  return accepted({ worker, session: worker.session });
 }
 
 function accepted<A>(value: A): Decision<A> {

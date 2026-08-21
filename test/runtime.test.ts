@@ -123,8 +123,9 @@ class FakeHandle implements WorkerSessionHandle {
   disposeInvocationFailure: Error | undefined;
   disposeGate: Deferred | undefined;
   subscriptionFailure: Error | undefined;
+  disposeInvocationHook: (() => void) | undefined;
   private disposeStarted = false;
-  private readonly disposeCompleted = new Deferred();
+  readonly disposeCompleted = new Deferred();
   private observation: WorkerSessionObservation = {
     usage: EMPTY_USAGE,
     activity: undefined,
@@ -180,6 +181,7 @@ class FakeHandle implements WorkerSessionHandle {
 
   dispose(): Effect.Effect<void, never> {
     this.disposeInvocations += 1;
+    this.disposeInvocationHook?.();
     if (this.disposeInvocationFailure) throw this.disposeInvocationFailure;
     return Effect.suspend(() => {
       if (this.disposeStarted) {
@@ -1997,7 +1999,7 @@ describe("active-only aborts and bounded lifecycle barriers", () => {
 });
 
 describe("Effect-owned generation and cleanup supervision", () => {
-  test("awaits multiple concurrent session disposals owned by the orchestration FiberSet", async () => {
+  test("tracks open-set session disposals until the orchestration FiberSet is empty", async () => {
     const tracker = new PromptTracker();
     const first = new FakeHandle(
       "concurrent-disposal-first",
@@ -2145,7 +2147,7 @@ describe("Effect-owned generation and cleanup supervision", () => {
     });
   });
 
-  test("disposes a retained session when root closure closes generation and cleanup supervisors before launch", async () => {
+  test("starts disposal once when the cleanup FiberSet is already closed", async () => {
     const tracker = new PromptTracker();
     const handle = new FakeHandle(
       "closed-interactive-generation",
@@ -2206,6 +2208,41 @@ describe("Effect-owned generation and cleanup supervision", () => {
         },
       }],
     });
+  });
+
+  test("completes one uninterruptible disposal when FiberSet closure races registration", async () => {
+    const tracker = new PromptTracker();
+    const handle = new FakeHandle(
+      "cleanup-registration-race",
+      [promptPlan({ status: "ready", assistantText: "ready" }, true)],
+      tracker,
+    );
+    handle.disposeGate = new Deferred();
+    const { effectRuntime, orchestration } = directRuntime(
+      new FakeChildSessions([{ handle }]),
+    );
+    const owner = context("owner", [definition("interactive", "interactive")]);
+    const initial = await effectRuntime.runPromise(
+      orchestration.orchestrate(owner, task("interactive"), "inline"),
+    );
+    let rootClosed = false;
+    handle.disposeInvocationHook = () => {
+      rootClosed = true;
+      Effect.runSync(effectRuntime.disposeEffect);
+    };
+
+    await Effect.runPromise(
+      orchestration.closeInteractive("owner", initial.result.workerId),
+    );
+    expect(rootClosed).toBe(true);
+    expect(handle.disposeInvocations).toBe(1);
+    expect(handle.disposeCalls).toBe(1);
+    await expectPending(handle.disposeCompleted.promise);
+
+    handle.disposeGate.resolve(undefined);
+    await handle.disposeCompleted.promise;
+    expect(handle.disposeInvocations).toBe(1);
+    expect(handle.disposeCalls).toBe(1);
   });
 
   test("a real FiberMap generation defect fails the current worker and completes its run", async () => {

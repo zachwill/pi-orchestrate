@@ -57,7 +57,6 @@ export function createOrchestrationExtension(
     let host: ProcessHost | undefined;
     let hostAttachment: ProcessHostAttachment | undefined;
     let statusController: StatusController | undefined;
-    let toolsRegistered = false;
     let activeBinding: OwnerBinding | undefined;
     let cachedCatalog: WorkerCatalog | undefined;
 
@@ -76,27 +75,16 @@ export function createOrchestrationExtension(
     registerOrchestrationPresentation(pi);
 
     pi.on("session_start", (_event, ctx) => {
-      if (activeBinding && host && statusController) {
-        host.delivery.unbind(
-          activeBinding.ownerSessionId,
-          activeBinding.generation,
-        );
-        statusController.unbind(activeBinding.ownerSessionId);
-      }
-
       host ??= dependencies.getHost?.() ?? createProcessHost();
       statusController ??=
         dependencies.createStatusController?.(host.runtime) ??
         createStatusController(host.runtime);
-      if (!toolsRegistered) {
-        registerOrchestrationTools(pi, {
-          runtime: host.runtime,
-          getCatalog: catalogFor,
-          getDispatchDecision: (toolCallId) =>
-            dispatchDecisions.get(toolCallId) ?? { mode: "inline" },
-        });
-        toolsRegistered = true;
-      }
+      registerOrchestrationTools(pi, {
+        runtime: host.runtime,
+        getCatalog: catalogFor,
+        getDispatchDecision: (toolCallId) =>
+          dispatchDecisions.get(toolCallId) ?? { mode: "inline" },
+      });
       hostAttachment ??= attachProcessHost(host);
 
       dispatchDecisions.clear();

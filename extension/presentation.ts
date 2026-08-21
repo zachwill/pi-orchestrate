@@ -83,8 +83,6 @@ export class StatusController {
   private disposed = false;
   private unsubscribeState: (() => void) | undefined;
   private widget: WorkerStatusComponent | undefined;
-  private widgetInstalled = false;
-  private pendingSnapshot: RuntimeSnapshot | undefined;
 
   constructor(private readonly runtime: PresentationRuntime) {}
 
@@ -114,36 +112,35 @@ export class StatusController {
     ctx.ui.setStatus(ORCHESTRATION_PRESENTATION_KEY, formatFooterStatus(snapshot));
     if (ctx.mode !== "tui") return;
     const active = activeWorkers(snapshot);
-    this.pendingSnapshot = snapshot;
     if (active.length === 0) {
-      if (this.widgetInstalled) ctx.ui.setWidget(ORCHESTRATION_PRESENTATION_KEY, undefined);
-      this.widget = undefined;
-      this.widgetInstalled = false;
+      if (this.widget !== undefined) {
+        ctx.ui.setWidget(ORCHESTRATION_PRESENTATION_KEY, undefined);
+        this.widget = undefined;
+      }
       return;
     }
-    if (this.widget) {
+    if (this.widget !== undefined) {
       this.widget.update(snapshot);
       return;
     }
-    if (this.widgetInstalled) return;
     ctx.ui.setWidget(ORCHESTRATION_PRESENTATION_KEY, (tui, theme) => {
-      this.widget = new WorkerStatusComponent(this.pendingSnapshot ?? snapshot, theme, tui);
-      return this.widget;
+      const widget = new WorkerStatusComponent(snapshot, theme, tui);
+      this.widget = widget;
+      return widget;
     }, { placement: "aboveEditor" });
-    this.widgetInstalled = true;
   }
 
   private clearBinding(): void {
     const unsubscribeState = this.unsubscribeState;
     this.unsubscribeState = undefined;
     unsubscribeState?.();
-    this.widget = undefined;
-    this.pendingSnapshot = undefined;
     const current = this.binding;
     if (!current) return;
     current.ctx.ui.setStatus(ORCHESTRATION_PRESENTATION_KEY, undefined);
-    if (current.ctx.mode === "tui" && this.widgetInstalled) current.ctx.ui.setWidget(ORCHESTRATION_PRESENTATION_KEY, undefined);
-    this.widgetInstalled = false;
+    if (current.ctx.mode === "tui" && this.widget !== undefined) {
+      current.ctx.ui.setWidget(ORCHESTRATION_PRESENTATION_KEY, undefined);
+      this.widget = undefined;
+    }
     this.binding = undefined;
   }
 }
