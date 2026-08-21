@@ -140,7 +140,7 @@ describe("published package resources", () => {
       const packedManifest = await Bun.file(join(packageRoot, "package.json")).json() as PackageManifest;
 
       expect(packedManifest.name).toBe("@zachwill/pi-orchestrate");
-      expect(packedManifest.version).toBe("0.9.0");
+      expect(packedManifest.version).toBe("0.9.1");
       expect(packedManifest.files).toEqual(["extension/", "examples/", "README.md", "LICENSE"]);
       expect(packedManifest.pi).toEqual({ extensions: ["./extension/index.ts"] });
       expect(packedManifest.pi.skills).toBeUndefined();
