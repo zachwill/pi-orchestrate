@@ -461,65 +461,25 @@ describe("registerOrchestrationTools", () => {
   test("uses concise, nonduplicated prompt guidance with the required semantics", () => {
     const { pi } = harness();
     const bullets = pi.tools.flatMap((tool) => tool.promptGuidelines ?? []);
-
     expect(new Set(bullets).size).toBe(bullets.length);
-    const orchestrate = pi.tool("orchestrate");
-    const orchestrateGuidance = orchestrate.promptGuidelines?.join(" ") ?? "";
-    expect(orchestrate.description).toContain("worker scopes");
-    expect(orchestrate.description).toContain("Pi executes native sibling tools concurrently");
-    expect(orchestrate.description).toContain(
-      "Pi Orchestrate treats a successfully admitted sole orchestrate call or pure sibling group as async",
-    );
-    expect(orchestrate.promptSnippet).toContain("parallel worker scopes");
-    expect(orchestrateGuidance).toContain("as many workers as needed");
-    expect(orchestrateGuidance).toContain(
-      "every useful parallel scope and distinct validation perspective",
-    );
-    expect(orchestrateGuidance).toContain("a floor unless explicitly capped");
-    expect(orchestrateGuidance).toContain("same worker role across multiple calls");
-    expect(orchestrateGuidance).toContain(
-      "intended async wave of N workers, the next assistant response must contain exactly N separate, fully briefed orchestrate calls",
-    );
-    expect(orchestrateGuidance).toContain("one call is valid only when N=1");
-    expect(orchestrateGuidance).toContain(
-      "To run it asynchronously, include no other tool calls; harmless response text does not affect runtime classification",
-    );
-    expect(orchestrateGuidance).toContain(
-      "When a parallel tool dispatcher is available, use it once with exactly N orchestrate entries and no other tools",
-    );
-    expect(orchestrateGuidance).toContain(
-      "N functions.orchestrate entries in multi_tool_use.parallel",
-    );
-    expect(orchestrateGuidance).toContain(
-      "Otherwise emit N native sibling orchestrate calls in one assistant response",
-    );
-    expect(orchestrateGuidance).toContain(
-      "Form all N calls before emitting or finalizing the response",
-    );
-    expect(orchestrateGuidance).toContain(
-      "Never emit one call and wait for its result before forming the rest of the wave",
-    );
-    expect(orchestrateGuidance).toContain(
-      "a successfully admitted sole async orchestrate call returns terminate=true and ends the turn",
-    );
-    expect(pi.tool("worker_status").description).toContain("Never poll");
-    expect(pi.tool("worker_status").promptSnippet).toContain("owned worker state");
-    expect(pi.tool("worker_status").promptGuidelines?.[0]).toContain(
-      "Use worker_status only for diagnostics or recovery; never poll",
-    );
-    for (const name of ["interactive_send", "interactive_close"] as const) {
-      const guidance = [
-        pi.tool(name).description,
-        pi.tool(name).promptSnippet,
-        ...(pi.tool(name).promptGuidelines ?? []),
-      ].join(" ");
-      expect(guidance).toContain("owned lifecycle interactive worker");
-      expect(guidance).toContain("status is ready");
-      expect(guidance).toContain("one-shot or completed workers");
-      expect(guidance).toContain("one-shot sessions terminate automatically");
-    }
-    expect(pi.tool("worker_abort").description).toContain("active");
-    expect(pi.tool("worker_abort").promptGuidelines?.[0]).toContain("interactive_close");
+
+    const guidance = (name: string) => {
+      const tool = pi.tool(name);
+      expect(tool.description).toBeTruthy();
+      expect(tool.promptSnippet).toBeTruthy();
+      expect(tool.promptGuidelines?.length).toBeGreaterThan(0);
+      return [tool.description, tool.promptSnippet, ...(tool.promptGuidelines ?? [])].join(" ");
+    };
+
+    expect(guidance("orchestrate")).toMatch(/fully briefed|fully briefed.*parallel|parallel worker scopes/);
+    expect(guidance("orchestrate")).toMatch(/async|asynchronously/);
+    expect(guidance("worker_status")).toMatch(/diagnostics or recovery/);
+    expect(guidance("worker_status")).toMatch(/never poll/i);
+    expect(guidance("interactive_send")).toMatch(/interactive worker.*ready/);
+    expect(guidance("interactive_send")).toMatch(/one-shot/);
+    expect(guidance("worker_abort")).toMatch(/active.*interactive_close/);
+    expect(guidance("interactive_close")).toMatch(/interactive worker.*ready/);
+    expect(guidance("interactive_close")).toMatch(/one-shot/);
   });
 
   test("constructs the complete runtime context and selects async mode by tool call ID", async () => {

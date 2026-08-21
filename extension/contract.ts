@@ -11,6 +11,12 @@ function sortedWorkers(catalog: WorkerCatalog) {
   });
 }
 
+function escapeContractMarkers(value: string): string {
+  return value
+    .replaceAll(CONTRACT_START, "&lt;!-- pi-orchestrate:contract:start --&gt;")
+    .replaceAll(CONTRACT_END, "&lt;!-- pi-orchestrate:contract:end --&gt;");
+}
+
 function formatCatalog(catalog: WorkerCatalog): string {
   const workers = sortedWorkers(catalog);
   if (workers.length === 0) return "- No trusted workers are available for this session.";
@@ -18,9 +24,72 @@ function formatCatalog(catalog: WorkerCatalog): string {
   return workers
     .map(
       (worker) =>
-        `- \`${worker.name}\` [${worker.source.kind}] (${worker.lifecycle}): ${worker.description}`,
+        `- \`${escapeContractMarkers(worker.name)}\` [${worker.source.kind}] (${worker.lifecycle}): ${escapeContractMarkers(worker.description)}`,
     )
     .join("\n");
+}
+
+interface ContractMarker {
+  readonly start: number;
+  readonly end: number;
+  readonly kind: "start" | "end";
+}
+
+function contractMarkers(prompt: string): ContractMarker[] {
+  const markers: ContractMarker[] = [];
+  for (const [value, kind] of [
+    [CONTRACT_START, "start"],
+    [CONTRACT_END, "end"],
+  ] as const) {
+    let offset = 0;
+    while (offset < prompt.length) {
+      const start = prompt.indexOf(value, offset);
+      if (start < 0) break;
+      markers.push({ start, end: start + value.length, kind });
+      offset = start + value.length;
+    }
+  }
+  return markers.sort((left, right) => left.start - right.start);
+}
+
+function removeContractMarkers(prompt: string): {
+  readonly prompt: string;
+  readonly insertionOffset?: number;
+} {
+  const markers = contractMarkers(prompt);
+  if (markers.length === 0) return { prompt };
+
+  const removed: Array<{ start: number; end: number }> = [];
+  const stack: ContractMarker[] = [];
+  for (const marker of markers) {
+    if (marker.kind === "start") {
+      stack.push(marker);
+      continue;
+    }
+    const start = stack.pop();
+    if (start && stack.length === 0) removed.push({ start: start.start, end: marker.end });
+  }
+
+  for (const marker of markers) {
+    if (!removed.some((range) => marker.start >= range.start && marker.end <= range.end)) {
+      removed.push({ start: marker.start, end: marker.end });
+    }
+  }
+  removed.sort((left, right) => left.start - right.start);
+
+  const insertionPoint = markers[0]!.start;
+  let insertionOffset = 0;
+  let cursor = 0;
+  let cleaned = "";
+  for (const range of removed) {
+    if (range.start < cursor) continue;
+    const retained = prompt.slice(cursor, range.start);
+    cleaned += retained;
+    if (range.start <= insertionPoint) insertionOffset = cleaned.length;
+    cursor = range.end;
+  }
+  cleaned += prompt.slice(cursor);
+  return { prompt: cleaned, insertionOffset };
 }
 
 function buildContract(catalog: WorkerCatalog): string {
@@ -60,12 +129,9 @@ export function appendOrchestratorContract(
   catalog: WorkerCatalog,
 ): string {
   const section = buildContract(catalog);
-  const start = systemPrompt.indexOf(CONTRACT_START);
-  if (start >= 0) {
-    const end = systemPrompt.indexOf(CONTRACT_END, start);
-    if (end >= 0) {
-      return `${systemPrompt.slice(0, start)}${section}${systemPrompt.slice(end + CONTRACT_END.length)}`;
-    }
+  const cleaned = removeContractMarkers(systemPrompt);
+  if (cleaned.insertionOffset !== undefined) {
+    return `${cleaned.prompt.slice(0, cleaned.insertionOffset)}${section}${cleaned.prompt.slice(cleaned.insertionOffset)}`;
   }
 
   const separator =

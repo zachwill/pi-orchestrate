@@ -1,27 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { readdir, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, stat, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import {
+  DefaultResourceLoader,
+  SettingsManager,
+} from "@earendil-works/pi-coding-agent";
 import { appendOrchestratorContract } from "../extension/contract.js";
 
 const root = join(import.meta.dir, "..");
 const manifestPath = join(root, "package.json");
 const readmePath = join(root, "README.md");
-const skillsPath = join(root, "skills");
-const extensionDirectory = join(root, "extension");
-const extensionModules = [
-  "catalog.ts",
-  "contract.ts",
-  "delivery.ts",
-  "domain.ts",
-  "host.ts",
-  "index.ts",
-  "presentation.ts",
-  "runtime.ts",
-  "tools.ts",
-  "tui.ts",
-  "worker-session.ts",
-  "worker-settlement.ts",
-] as const;
 const workerDirectory = join(root, "examples", "workers");
 const workerNames = ["investigator", "scout", "web", "worker"] as const;
 const workerPaths = workerNames.map((name) => join(workerDirectory, `${name}.md`));
@@ -78,6 +67,19 @@ async function expectPath(path: string): Promise<void> {
   expect(pathStat.isFile() || pathStat.isDirectory()).toBe(true);
 }
 
+async function run(command: string[], cwd: string): Promise<string> {
+  const process = Bun.spawn(command, { cwd, stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+    process.exited,
+  ]);
+  if (exitCode !== 0) {
+    throw new Error(`${command.join(" ")} failed (${exitCode}): ${stderr.trim()}`);
+  }
+  return stdout;
+}
+
 function markdownSection(markdown: string, heading: string): string {
   const start = markdown.indexOf(`## ${heading}`);
   expect(start).toBeGreaterThanOrEqual(0);
@@ -108,19 +110,82 @@ function parseWorker(markdown: string): ParsedWorker {
 }
 
 describe("published package resources", () => {
-  test("publishes the extension, fallback examples, README, and MIT license without a skill", async () => {
-    const manifest = await readManifest();
+  test("packs the declared Pi extension and package resources into the published artifact", async () => {
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), "pi-orchestrate-package-"));
 
-    expect(manifest.name).toBe("@zachwill/pi-orchestrate");
-    expect(manifest.version).toBe("0.9.0");
-    expect(manifest.files).toEqual(["extension/", "examples/", "README.md", "LICENSE"]);
-    expect(manifest.pi).toEqual({ extensions: ["./extension/index.ts"] });
-    expect(manifest.pi.skills).toBeUndefined();
-    expect(manifest.pi.prompts).toBeUndefined();
+    try {
+      await run(
+        ["bun", "pm", "pack", "--destination", temporaryDirectory, "--ignore-scripts", "--quiet"],
+        root,
+      );
+      const artifacts = (await readdir(temporaryDirectory)).filter((path) => path.endsWith(".tgz"));
+      expect(artifacts).toHaveLength(1);
 
-    for (const publishedPath of manifest.files) await expectPath(join(root, publishedPath));
-    for (const resourcePath of manifest.pi.extensions) await expectPath(join(root, resourcePath));
-    await expect(stat(skillsPath)).rejects.toThrow();
+      const artifactPath = join(temporaryDirectory, artifacts[0] ?? "missing.tgz");
+      const archiveFiles = (await run(["tar", "-tzf", artifactPath], root))
+        .split("\n")
+        .filter(Boolean);
+      expect(archiveFiles).toContain("package/package.json");
+      expect(archiveFiles).toContain("package/README.md");
+      expect(archiveFiles).toContain("package/LICENSE");
+      for (const workerName of workerNames) {
+        expect(archiveFiles).toContain(`package/examples/workers/${workerName}.md`);
+      }
+      expect(archiveFiles.some((path) => path.startsWith("package/skills/"))).toBe(false);
+
+      const extractedDirectory = join(temporaryDirectory, "extracted");
+      await mkdir(extractedDirectory);
+      await run(["tar", "-xzf", artifactPath, "-C", extractedDirectory], root);
+      const packageRoot = join(extractedDirectory, "package");
+      const packedManifest = await Bun.file(join(packageRoot, "package.json")).json() as PackageManifest;
+
+      expect(packedManifest.name).toBe("@zachwill/pi-orchestrate");
+      expect(packedManifest.version).toBe("0.9.0");
+      expect(packedManifest.files).toEqual(["extension/", "examples/", "README.md", "LICENSE"]);
+      expect(packedManifest.pi).toEqual({ extensions: ["./extension/index.ts"] });
+      expect(packedManifest.pi.skills).toBeUndefined();
+      expect(packedManifest.pi.prompts).toBeUndefined();
+      const declaredExtensionPaths = packedManifest.pi.extensions.map((extensionPath) => {
+        const artifactEntry = `package/${extensionPath.replace(/^\.\//, "")}`;
+        expect(archiveFiles).toContain(artifactEntry);
+        return join(packageRoot, extensionPath);
+      });
+      for (const extensionPath of declaredExtensionPaths) {
+        expect((await stat(extensionPath)).isFile()).toBe(true);
+      }
+
+      await symlink(
+        join(root, "node_modules"),
+        join(packageRoot, "node_modules"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const loaderCwd = join(temporaryDirectory, "loader-cwd");
+      const loaderAgentDir = join(temporaryDirectory, "loader-agent");
+      await Promise.all([
+        mkdir(loaderCwd),
+        mkdir(loaderAgentDir),
+      ]);
+      const loader = new DefaultResourceLoader({
+        cwd: loaderCwd,
+        agentDir: loaderAgentDir,
+        settingsManager: SettingsManager.inMemory({}, { projectTrusted: false }),
+        additionalExtensionPaths: [packageRoot],
+        noExtensions: true,
+        noSkills: true,
+        noPromptTemplates: true,
+        noThemes: true,
+        noContextFiles: true,
+      });
+
+      await loader.reload();
+      const loadedExtensions = loader.getExtensions();
+      expect(loadedExtensions.errors).toEqual([]);
+      expect(loadedExtensions.extensions.map((extension) => extension.resolvedPath)).toEqual(
+        declaredExtensionPaths,
+      );
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
   });
 
   test("declares public repository metadata and compatible Pi peers", async () => {
@@ -142,13 +207,6 @@ describe("published package resources", () => {
       expect(manifest.devDependencies[packageName]).toBe("0.80.10");
     }
     expect(manifest.peerDependencies.typebox).toBe("*");
-  });
-
-  test("ships the exact current extension module inventory without the deleted scheduler", async () => {
-    const shippedModules = (await readdir(extensionDirectory)).sort();
-
-    expect(shippedModules).toEqual([...extensionModules].sort());
-    expect(shippedModules).not.toContain("scheduler.ts");
   });
 
   test("includes exactly four fallback worker definitions", async () => {
