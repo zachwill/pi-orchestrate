@@ -455,6 +455,7 @@ describe("registerOrchestrationTools", () => {
     const closeSchema = pi.tool("interactive_close").parameters;
     expect(Value.Check(closeSchema, { worker_id: "worker-1" })).toBe(true);
     expect(Value.Check(closeSchema, { worker_id: "run-1" })).toBe(false);
+    expect(Value.Check(closeSchema, { worker_id: "invalid-placeholder" })).toBe(false);
     expect(Value.Check(closeSchema, { worker_id: "worker- " })).toBe(false);
   });
 
@@ -788,7 +789,7 @@ describe("registerOrchestrationTools", () => {
     expect(runtime.interactiveCloseCalls.at(-1)?.workerId).toBe("\t");
   });
 
-  test("renders incomplete streaming tool arguments without crashing", () => {
+  test("renders incomplete and malformed tool arguments without crashing", () => {
     const { pi } = harness();
     const renderContext = (expanded: boolean) => ({ expanded, argsComplete: false, cwd: "/workspace", state: {}, invalidate() {} }) as never;
 
@@ -801,7 +802,7 @@ describe("registerOrchestrationTools", () => {
     expect(Bun.stripANSI(partialOrchestrate.join("\n"))).toContain("orchestrate scout");
 
     const missingTask = pi.tool("orchestrate").renderCall!(
-      {} as never,
+      null as never,
       themeForRendering(),
       renderContext(true),
     ).render(40);
@@ -814,6 +815,75 @@ describe("registerOrchestrationTools", () => {
     ).render(40);
     expect(partialSend.every((line) => Bun.stringWidth(line) <= 40)).toBe(true);
     expect(Bun.stripANSI(partialSend.join("\n"))).toContain("interactive_send worker-ready");
+
+    for (const [tool, args] of [
+      ["interactive_send", null],
+      ["worker_abort", null],
+      ["worker_abort", { worker_ids: "not-an-array" }],
+      ["interactive_close", null],
+    ] as const) {
+      const rendered = pi.tool(tool).renderCall!(
+        args as never,
+        themeForRendering(),
+        renderContext(false),
+      ).render(40);
+      expect(rendered.every((line) => Bun.stringWidth(line) <= 40)).toBe(true);
+      expect(Bun.stripANSI(rendered.join("\n"))).toContain(tool);
+    }
+  });
+
+  test("uses renderer error context instead of presenting failed tools as successful", () => {
+    const { pi } = harness();
+    const result = {
+      content: [{
+        type: "text",
+        text: "Invalid tool arguments: invalid-placeholder\nExpected worker_id to match ^worker-\\S+$",
+      }],
+      details: undefined,
+    } as AgentToolResult<unknown>;
+    const theme = {
+      fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
+      bg: (_color: string, text: string) => text,
+      bold: (text: string) => text,
+      italic: (text: string) => text,
+      underline: (text: string) => text,
+      inverse: (text: string) => text,
+      strikethrough: (text: string) => text,
+    } as never;
+    const expectedSuccessText = {
+      orchestrate: "Work sent",
+      worker_status: "Diagnostics unavailable",
+      interactive_send: "Work sent",
+      worker_abort: "Worker stop requested",
+      interactive_close: "Worker closed",
+    } as const;
+
+    for (const toolName of Object.keys(expectedSuccessText) as Array<keyof typeof expectedSuccessText>) {
+      const rendered = pi.tool(toolName).renderResult!(
+        result,
+        { isPartial: false, expanded: false },
+        theme,
+        { isError: true, lastComponent: undefined } as never,
+      );
+      const output = Bun.stripANSI(rendered.render(120).join("\n"));
+      expect(output).toContain("<error>Invalid tool arguments: invalid-placeholder</error>");
+      expect(output).not.toContain(expectedSuccessText[toolName]);
+      expect(output).not.toContain("✓");
+    }
+
+    const successResult = {
+      content: [{ type: "text", text: "Closed worker worker-ready." }],
+      details: { worker_id: "worker-ready" },
+    } as AgentToolResult<unknown>;
+    const renderedSuccess = pi.tool("interactive_close").renderResult!(
+      successResult,
+      { isPartial: false, expanded: false },
+      theme,
+      { isError: false } as never,
+    );
+    expect(Bun.stripANSI(renderedSuccess.render(80).join("\n"))).toContain(
+      "<success>✓ Worker closed</success>",
+    );
   });
 
   test("renders and stores one exact expandable outbound message with a safe bounded preview", async () => {

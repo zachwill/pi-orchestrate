@@ -162,7 +162,14 @@ export function registerOrchestrationTools(
       return renderDispatchCall(theme, args, expanded);
     },
     renderResult(result, { isPartial, expanded }, theme, context) {
-      return renderOrchestrationResult(result, isPartial, expanded, theme, context.lastComponent);
+      return renderOrchestrationResult(
+        result,
+        isPartial,
+        expanded,
+        theme,
+        context.isError,
+        context.lastComponent,
+      );
     },
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const decision = deps.getDispatchDecision(toolCallId);
@@ -210,8 +217,8 @@ export function registerOrchestrationTools(
     renderCall(_args, theme) {
       return new Text(theme.fg("toolTitle", theme.bold("worker_status")), 0, 0);
     },
-    renderResult(result, { isPartial }, theme) {
-      return renderDiagnosticsResult(result, isPartial, theme);
+    renderResult(result, { isPartial }, theme, context) {
+      return renderDiagnosticsResult(result, isPartial, context.isError, theme);
     },
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
       const ownerSessionId = ctx.sessionManager.getSessionId();
@@ -236,10 +243,24 @@ export function registerOrchestrationTools(
     ],
     parameters: interactiveSendSchema,
     renderCall(args, theme, { expanded }) {
-      return renderInteractiveMessageCall(theme, "interactive_send", args.worker_id, args.instructions, expanded);
+      const fields = recordFields(args);
+      return renderInteractiveMessageCall(
+        theme,
+        "interactive_send",
+        fields.worker_id,
+        fields.instructions,
+        expanded,
+      );
     },
     renderResult(result, { isPartial, expanded }, theme, context) {
-      return renderOrchestrationResult(result, isPartial, expanded, theme, context.lastComponent);
+      return renderOrchestrationResult(
+        result,
+        isPartial,
+        expanded,
+        theme,
+        context.isError,
+        context.lastComponent,
+      );
     },
     async execute(toolCallId, params, signal, onUpdate, ctx) {
       const workerId = params.worker_id;
@@ -287,13 +308,23 @@ export function registerOrchestrationTools(
     ],
     parameters: workerAbortSchema,
     renderCall(args, theme) {
-      const target = "worker_ids" in args
-        ? `${args.worker_ids.length} worker${args.worker_ids.length === 1 ? "" : "s"}`
-        : "all workers";
+      const fields = recordFields(args);
+      const workerIds = Array.isArray(fields.worker_ids)
+        ? fields.worker_ids
+        : undefined;
+      const target = workerIds
+        ? `${workerIds.length} worker${workerIds.length === 1 ? "" : "s"}`
+        : fields.all === true ? "all workers" : "";
       return renderCompactCall(theme, "worker_abort", target);
     },
-    renderResult(result, { isPartial }, theme) {
-      return renderSimpleResult(result, isPartial ? "Requesting worker stop…" : "Worker stop requested", theme, "warning");
+    renderResult(result, { isPartial }, theme, context) {
+      return renderSimpleResult(
+        result,
+        context.isError,
+        isPartial ? "Requesting worker stop…" : "Worker stop requested",
+        theme,
+        "warning",
+      );
     },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const ownerSessionId = ctx.sessionManager.getSessionId();
@@ -318,10 +349,16 @@ export function registerOrchestrationTools(
     ],
     parameters: interactiveCloseSchema,
     renderCall(args, theme) {
-      return renderCompactCall(theme, "interactive_close", args.worker_id);
+      const fields = recordFields(args);
+      return renderCompactCall(theme, "interactive_close", fields.worker_id);
     },
-    renderResult(result, { isPartial }, theme) {
-      return renderSimpleResult(result, isPartial ? "Closing worker…" : "✓ Worker closed", theme);
+    renderResult(result, { isPartial }, theme, context) {
+      return renderSimpleResult(
+        result,
+        context.isError,
+        isPartial ? "Closing worker…" : "✓ Worker closed",
+        theme,
+      );
     },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const ownerSessionId = ctx.sessionManager.getSessionId();
@@ -531,31 +568,26 @@ function readableDetails(title: string, details: unknown): string {
   return `${truncation.content}\n\n[Output truncated: ${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}. Full structured details remain available.]`;
 }
 
-interface RenderableTask {
-  readonly worker?: unknown;
-  readonly title?: unknown;
-  readonly instructions?: unknown;
-}
-
 function renderDispatchCall(
   theme: Theme,
-  task: RenderableTask,
+  task: unknown,
   expanded: boolean,
 ): Component {
+  const fields = isRecord(task) ? task : {};
   const container = new Container();
   container.addChild(new Text(
-    theme.fg("toolTitle", theme.bold("orchestrate ")) + theme.fg("muted", safeTerminalText(task.worker)),
+    theme.fg("toolTitle", theme.bold("orchestrate ")) + theme.fg("muted", safeTerminalText(fields.worker)),
     0, 0,
   ));
   container.addChild(new Text(
-    `${theme.fg("accent", "→")} ${theme.fg("text", theme.bold(safeTerminalText(task.title)))}`,
+    `${theme.fg("accent", "→")} ${theme.fg("text", theme.bold(safeTerminalText(fields.title)))}`,
     0, 0,
   ));
   if (expanded) {
-    container.addChild(new Text(safeTerminalText(task.instructions), 2, 0));
+    container.addChild(new Text(safeTerminalText(fields.instructions), 2, 0));
     return new WidthBoundComponent(container);
   }
-  container.addChild(new InstructionPreview(task.instructions, theme));
+  container.addChild(new InstructionPreview(fields.instructions, theme));
   container.addChild(new Text(theme.fg("dim", keyHint("app.tools.expand", "to inspect full instructions")), 0, 0));
   return new WidthBoundComponent(container);
 }
@@ -642,8 +674,18 @@ function renderOrchestrationResult(
   isPartial: boolean,
   expanded: boolean,
   theme: Theme,
+  isError: boolean,
   lastComponent: unknown,
 ): Component {
+  if (isError) {
+    return new WidthBoundComponent(renderSimpleResult(
+      result,
+      true,
+      firstResultLine(result) || "Worker operation failed",
+      theme,
+      "warning",
+    ));
+  }
   const details = result.details;
   if (Result.isSuccess(decodeAcceptedRunRenderDetails(details))) {
     return new WidthBoundComponent(new Text(theme.fg("success", "Sent to worker") + theme.fg("dim", " · response arrives when complete"), 0, 0));
@@ -660,7 +702,13 @@ function renderOrchestrationResult(
     return new WidthBoundComponent(new Text(theme.fg("warning", "Worker result details unavailable"), 0, 0));
   }
   if (isPartial) return new WidthBoundComponent(new Text(theme.fg("warning", "Sending work…"), 0, 0));
-  return new WidthBoundComponent(renderSimpleResult(result, firstResultLine(result) || "Work sent", theme, "warning"));
+  return new WidthBoundComponent(renderSimpleResult(
+    result,
+    false,
+    firstResultLine(result) || "Work sent",
+    theme,
+    "warning",
+  ));
 }
 
 interface RenderedInlineSettlement {
@@ -736,7 +784,20 @@ function readInlineResult(details: unknown): RenderedInlineSettlement | undefine
   };
 }
 
-function renderDiagnosticsResult(result: AgentToolResult<unknown>, isPartial: boolean, theme: Theme): Text {
+function renderDiagnosticsResult(
+  result: AgentToolResult<unknown>,
+  isPartial: boolean,
+  isError: boolean,
+  theme: Theme,
+): Text {
+  if (isError) {
+    return renderSimpleResult(
+      result,
+      true,
+      firstResultLine(result) || "Worker diagnostics failed",
+      theme,
+    );
+  }
   if (isPartial) return new Text(theme.fg("muted", "Reading worker diagnostics…"), 0, 0);
   const details = result.details;
   if (isRecord(details) && isRecord(details.state) && Array.isArray(details.state.workers)) {
@@ -752,18 +813,23 @@ function renderDiagnosticsResult(result: AgentToolResult<unknown>, isPartial: bo
 
 function renderSimpleResult(
   result: AgentToolResult<unknown>,
+  isError: boolean,
   message: string,
   theme: Theme,
   normalColor: "success" | "warning" = "success",
 ): Text {
-  const failed = "isError" in result && result.isError === true;
-  return new Text(theme.fg(failed ? "error" : normalColor, failed ? firstResultLine(result) || message : message), 0, 0);
+  const text = isError ? firstResultLine(result) || message : message;
+  return new Text(theme.fg(isError ? "error" : normalColor, text), 0, 0);
 }
 
 function firstResultLine(result: AgentToolResult<unknown>): string | undefined {
   const first = result.content[0];
   if (first?.type !== "text") return undefined;
   return first.text.split("\n").find((line) => line.trim())?.trim();
+}
+
+function recordFields(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
