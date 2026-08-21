@@ -132,6 +132,8 @@ export function createOrchestrationExtension(
       );
       const ownerSessionId = activeBinding?.ownerSessionId;
       if (!ownerSessionId) return;
+      // Sole dispatches and homogeneous orchestrate waves detach; mixed tools stay with the
+      // current parent turn, while a wave shares one boundary for one later synthesis turn.
       const isOrchestrateGroup =
         toolCalls.length > 1 &&
         toolCalls.every((toolCall) => toolCall.name === "orchestrate");

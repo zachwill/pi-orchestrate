@@ -205,6 +205,7 @@ interface RuntimeWorker {
   readonly record: WorkerRecord;
   readonly context: OrchestrationContext;
   readonly definition: WorkerDefinition;
+  // Worker-local authority fence; stale asynchronous callbacks must revalidate it.
   readonly generation: number;
   readonly session?: WorkerSessionHandle;
   readonly observationRelease?: () => void;
@@ -822,6 +823,7 @@ class StatefulOrchestration implements OrchestrationService {
         ),
       );
       const exit = fiber.pollUnsafe();
+      // A closed FiberMap rejects admission with an interrupted sentinel.
       if (exit && Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) {
         this.settleGenerationLaunchFailure(workerId, generation);
       }
@@ -1261,6 +1263,8 @@ class StatefulOrchestration implements OrchestrationService {
     });
   }
 
+  // Commit stopping and one shared completion before post-commit physical abort
+  // and generation interruption; every cancellation caller joins it.
   private markWorkersStopping(
     draft: RuntimeState,
     workers: readonly RuntimeWorker[],
@@ -1305,6 +1309,7 @@ class StatefulOrchestration implements OrchestrationService {
   ): void {
     const fiber = this.runCancellation(this.cancelWorker(workerId, completion));
     const exit = fiber.pollUnsafe();
+    // A closed FiberSet rejects admission with an interrupted sentinel.
     if (!exit || Exit.isSuccess(exit) || !Cause.hasInterruptsOnly(exit.cause)) return;
 
     const worker = this.current().workers.get(workerId);
@@ -1536,6 +1541,7 @@ class StatefulOrchestration implements OrchestrationService {
   ): A {
     const draft = makeDraft(this.state);
     const mutation = reducer(draft);
+    // Commit before action factories capture the snapshot and callbacks can run.
     this.state = Object.freeze(draft);
     this.enqueueActions((mutation.actions ?? []).map((action) => action(
       this.state,
@@ -1546,6 +1552,7 @@ class StatefulOrchestration implements OrchestrationService {
   }
 
   private enqueueActions(actions: readonly CommittedAction[]): void {
+    // Reentrant actions queue behind this drain; drain all before rethrowing the first failure.
     this.actionQueue.push(...actions);
     if (this.drainingActions) return;
 

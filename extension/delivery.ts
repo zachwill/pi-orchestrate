@@ -67,6 +67,8 @@ export class DeliveryCoordinator implements DeliveryService {
   private readonly pendingSettlements: WorkerSettlement[] = [];
   private readonly flushingOwners = new Set<string>();
   private readonly synthesisGroups = new Map<string, SynthesisGroupState>();
+  // Runtime settlement sequences are process-scoped and monotonic across owners,
+  // so one watermark is valid.
   private highestAcceptedSequence = 0;
 
   bind(binding: ParentBinding): void {
@@ -163,6 +165,7 @@ export class DeliveryCoordinator implements DeliveryService {
 
     this.flushingOwners.add(ownerSessionId);
     try {
+      // Deliver a stable owner-ordered prefix, stopping at the latest complete synthesis boundary.
       const queued = this.pendingSettlements.filter(
         (settlement) => settlement.ownerSessionId === ownerSessionId,
       );
@@ -175,6 +178,8 @@ export class DeliveryCoordinator implements DeliveryService {
       let flushBytesRemaining = MAX_DELIVERY_MARKDOWN_BYTES;
 
       for (let index = 0; index <= flushThrough; index += 1) {
+        // Synchronous delivery callbacks can change owner, generation, or idle
+        // state before the next send.
         if (!this.canDeliver(ownerSessionId, generation)) return;
         const settlement = queued[index];
         if (!settlement || !this.pendingSettlements.includes(settlement)) continue;
@@ -186,6 +191,8 @@ export class DeliveryCoordinator implements DeliveryService {
           fairFlushBytes,
           flushBytesRemaining,
         ));
+        // Intermediate results add context; only the completed boundary
+        // transfers work to a parent turn.
         const triggerTurn = latestFinalIndex >= 0 && index === flushThrough;
         const message = this.renderWorkerMessage(settlement, byteLimit);
         const parent = this.boundParents.get(ownerSessionId);
@@ -194,6 +201,7 @@ export class DeliveryCoordinator implements DeliveryService {
         try {
           parent.binding.sendMessage(message, { triggerTurn });
         } catch {
+          // Keep this settlement and the remaining prefix queued for a later retry.
           return;
         }
 
