@@ -6,9 +6,9 @@ import type {
 import {
   discoverWorkerCatalog,
   type DiscoverWorkerCatalogOptions,
-} from "./catalog/discovery.js";
-import type { WorkerCatalog } from "./catalog/definition.js";
-import { applyOrchestratorContract } from "./parent/contract.js";
+} from "./catalog/discovery.ts";
+import type { WorkerCatalog } from "./catalog/definition.ts";
+import { applyOrchestratorContract } from "./parent/contract.ts";
 import {
   attachProcessHost,
   createProcessHost,
@@ -16,18 +16,18 @@ import {
   detachProcessHost,
   type ProcessHost,
   type ProcessHostAttachment,
-} from "./parent/process-host.js";
+} from "./parent/process-host.ts";
 import {
   createStatusController,
   registerOrchestrationPresentation,
   type StatusController,
   type WorkerStateSource,
-} from "./pi/presentation.js";
+} from "./pi/presentation.ts";
 import {
   classifyParentDispatches,
   type DispatchDecision,
-} from "./parent/dispatch-policy.js";
-import { registerOrchestrationTools } from "./pi/tools.js";
+} from "./parent/dispatch-policy.ts";
+import { registerOrchestrationTools } from "./pi/tools.ts";
 
 interface StoredDispatchDecision extends DispatchDecision {
   readonly ownerSessionId: string;
@@ -129,6 +129,8 @@ export function createOrchestrationExtension(
       const decision = dispatchDecisions.get(event.toolCallId);
       dispatchDecisions.delete(event.toolCallId);
       if (!event.isError || !decision?.synthesisGroup) return;
+      // Group size is counted before admission, so a failed member must still be
+      // accounted for as skipped or the final synthesis turn will never trigger.
       host?.delivery.skipSynthesisGroupMember(
         decision.ownerSessionId,
         decision.synthesisGroup.id,

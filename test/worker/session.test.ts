@@ -20,9 +20,9 @@ import {
   SettingsManager,
   type Skill,
 } from "@earendil-works/pi-coding-agent";
-import type { WorkerDefinition } from "../../extension/catalog/definition.js";
+import type { WorkerDefinition } from "../../extension/catalog/definition.ts";
 import { Effect, Fiber, ManagedRuntime } from "effect";
-import { ChildSessions, createChildSessionsLayer } from "../../extension/worker/child-sessions.js";
+import { ChildSessions, createChildSessionsLayer } from "../../extension/worker/child-sessions.ts";
 import {
   isOrchestrationExtensionPath,
   WorkerAgentSessionAcquisitionError,
@@ -33,7 +33,7 @@ import {
   type ChildSessionOptions,
   type WorkerSessionHandle,
   type WorkerSessionObservation,
-} from "../../extension/worker/session.js";
+} from "../../extension/worker/session.ts";
 
 function model(provider: string, id: string): Model<Api> {
   return {

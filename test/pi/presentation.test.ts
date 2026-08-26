@@ -6,8 +6,8 @@ import type {
   WorkerId,
   WorkerRecord,
   WorkerStatus,
-} from "../../extension/orchestration/model.js";
-import type { OwnerSnapshot } from "../../extension/orchestration/service.js";
+} from "../../extension/orchestration/model.ts";
+import type { OwnerSnapshot } from "../../extension/orchestration/service.ts";
 import {
   MAX_RESULT_PREVIEW_LINES,
   MAX_WIDGET_WORKERS,
@@ -17,7 +17,7 @@ import {
   formatFooterStatus,
   registerOrchestrationPresentation,
   type WorkerStateSource,
-} from "../../extension/pi/presentation.js";
+} from "../../extension/pi/presentation.ts";
 
 beforeAll(() => initTheme("dark", false));
 const theme = { fg: (_: string, text: string) => text, bg: (_: string, text: string) => text, bold: (text: string) => text, italic: (text: string) => text, underline: (text: string) => text, inverse: (text: string) => text, strikethrough: (text: string) => text } as Theme;

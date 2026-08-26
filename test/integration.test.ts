@@ -4,13 +4,13 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { DeliveryCoordinator } from "../extension/parent/delivery.js";
+import { DeliveryCoordinator } from "../extension/parent/delivery.ts";
 import {
   createWorkerCatalog,
   type WorkerCatalog,
   type WorkerDefinition,
-} from "../extension/catalog/definition.js";
-import type { RunId, WorkerId } from "../extension/orchestration/model.js";
+} from "../extension/catalog/definition.ts";
+import type { RunId, WorkerId } from "../extension/orchestration/model.ts";
 import {
   attachProcessHost,
   createProcessHost,
@@ -19,14 +19,14 @@ import {
   getProcessHost,
   quitProcessHost,
   type ProcessHost,
-} from "../extension/parent/process-host.js";
+} from "../extension/parent/process-host.ts";
 import {
   createOrchestrationExtension,
   type OrchestrationExtensionDependencies,
-} from "../extension/index.js";
-import type { OrchestrationContext } from "../extension/orchestration/admission.js";
-import type { OwnerSnapshot } from "../extension/orchestration/service.js";
-import type { WorkerSettlement } from "../extension/orchestration/settlement.js";
+} from "../extension/index.ts";
+import type { OrchestrationContext } from "../extension/orchestration/admission.ts";
+import type { OwnerSnapshot } from "../extension/orchestration/service.ts";
+import type { WorkerSettlement } from "../extension/orchestration/settlement.ts";
 
 const TOOL_NAMES = [
   "orchestrate",

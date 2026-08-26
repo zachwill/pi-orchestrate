@@ -11,13 +11,13 @@ import type {
   WorkerCatalog,
   WorkerDefinition,
   WorkerSourceKind,
-} from "./definition.js";
+} from "./definition.ts";
 import {
   createWorkerCatalog,
   isSupportedToolName,
   SUPPORTED_TOOL_NAMES,
-} from "./definition.js";
-import { PACKAGE_ROOT } from "../package-root.js";
+} from "./definition.ts";
+import { PACKAGE_ROOT } from "../package-root.ts";
 
 const MAX_WORKER_BYTES = 64 * 1024;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;

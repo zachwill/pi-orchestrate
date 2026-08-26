@@ -24,13 +24,13 @@ import {
   Schema,
   Scope,
 } from "effect";
-import type { WorkerDefinition } from "../catalog/definition.js";
+import type { WorkerDefinition } from "../catalog/definition.ts";
 import type {
   WorkerMessageDirection,
   WorkerOutcome,
   WorkerUsage,
-} from "../orchestration/model.js";
-import { PACKAGE_ROOT } from "../package-root.js";
+} from "../orchestration/model.ts";
+import { PACKAGE_ROOT } from "../package-root.ts";
 
 const DIRECT_CHILD_BOUNDARY =
   "You are a direct child worker session. Do not spawn, delegate to, or orchestrate descendant Pi worker sessions. Complete the assigned task yourself and return the result directly to the parent orchestrator.";
@@ -385,6 +385,8 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
   ): Effect.Effect<DefaultWorkerSessionHandle> {
     return Effect.gen(function* () {
       const handle = new DefaultWorkerSessionHandle(runtime, interactive, sessionFile);
+      // Cache the disposal Effect so repeated or concurrent callers join the same
+      // uninterruptible Scope.close rather than skipping an in-progress disposal.
       handle.disposeOperation = yield* Effect.cached(
         Effect.sync(() => handle.beginDispose()).pipe(
           Effect.andThen(disposeWorkerSession(scope, cleanupReporter)),
@@ -457,6 +459,8 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
   prompt(instructions: string): Effect.Effect<WorkerOutcome, never> {
     return Effect.fn("WorkerSession.prompt")(function* (this: DefaultWorkerSessionHandle) {
       const completion = yield* Effect.sync(() => this.startPrompt(instructions));
+      // Interrupting this waiter does not cancel Pi's prompt. abort() owns physical
+      // cancellation, and completePrompt releases Active state when it settles.
       const { failureMessage, message, prompt } = yield* Effect.promise(() => completion);
       const text = assistantText(message);
       const assistantPayload = text === undefined ? {} : { assistantText: text };
@@ -556,7 +560,7 @@ class DefaultWorkerSessionHandle implements WorkerSessionHandle {
 }
 
 function safelyNotify(callback: () => void): void {
-  try { callback(); } catch { /* One cleanup/listener cannot block another. */ }
+  try { callback(); } catch { /* One observer cannot block the others. */ }
 }
 
 function subscribe<T>(listeners: Set<(value: T) => void>, listener: (value: T) => void): () => void {
@@ -793,6 +797,8 @@ function agentSessionFinalizer(
     () => ownership.session.dispose(),
   );
   const runtime = ownership.runtime;
+  // The runtime owns normal raw-session disposal after creation. Before that
+  // handoff, or if runtime disposal fails, close the raw session directly.
   return runtime
     ? bestEffortCleanup(reporter, "runtime", () => runtime.dispose(), disposeRawSession)
     : disposeRawSession;
@@ -862,9 +868,9 @@ export const createWorkerSession = Effect.fn("WorkerSession.create")(function* (
     const { selected, modelRuntime } = yield* prepareChildModelRuntime(options, dependencies);
     const services = yield* acquireWorkerServices(options, dependencies, modelRuntime);
 
-    // createAgentSessionServices owns extension-provider registration and refresh, but
-    // Pi 0.80.10 discards that refresh result. Keep this worker-owned probe so provider
-    // errors and aborts remain typed acquisition failures before session creation.
+    // createAgentSessionServices registers extension providers and refreshes, but
+    // discards that result in Pi 0.80.10. Keep this worker-owned probe so provider
+    // errors and aborts remain typed acquisition failures; remove it when Pi surfaces them.
     yield* refreshModelRuntime(modelRuntime, definition);
     const model = yield* Effect.try({
       try: () => {

@@ -1,4 +1,4 @@
-import type { SynthesisGroup } from "../orchestration/model.js";
+import type { SynthesisGroup } from "../orchestration/model.ts";
 
 export interface ParentToolCall {
   readonly id: string;

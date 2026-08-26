@@ -19,12 +19,12 @@ import {
   formatElapsed,
   resultAppearance,
   WidthBoundComponent,
-} from "./tui.js";
+} from "./tui.ts";
 import {
   decodeInlineWorkerToolDetails,
   type InlineWorkerSettlementDetails,
   WorkerSettlement,
-} from "../orchestration/settlement.js";
+} from "../orchestration/settlement.ts";
 
 const MAX_INSTRUCTION_PREVIEW_LINES = 2;
 

@@ -25,8 +25,8 @@ import {
   SettingsManager,
   type CreateAgentSessionRuntimeFactory,
 } from "@earendil-works/pi-coding-agent";
-import { getProcessHost, quitProcessHost } from "../extension/parent/process-host.js";
-import { createOrchestrationExtension } from "../extension/index.js";
+import { getProcessHost, quitProcessHost } from "../extension/parent/process-host.ts";
+import { createOrchestrationExtension } from "../extension/index.ts";
 
 interface WorkerResultDetails {
   title: string;
@@ -661,41 +661,40 @@ describe("Pi 0.80.10 SDK integration", () => {
       expect(initialParent.systemPrompt).toBe(harness.effectivePrompts[0]!);
       expect(initialParent.systemPrompt).toStartWith(BASE_SYSTEM_PROMPT);
       expect(initialParent.systemPrompt).toContain("## Pi Orchestrate Contract");
-      expect(initialParent.systemPrompt).toContain("Pi executes sibling tool calls concurrently");
       expect(initialParent.systemPrompt).toMatch(
-        /proactively identify.*every useful bounded independent scope.*materially distinct.*validation perspective/i,
+        /delegate work that can proceed independently or benefit from independent judgment/i,
       );
       expect(initialParent.systemPrompt).toMatch(
-        /spin up as many workers as needed.*small fixed default/i,
+        /workers or counts named by the user as a floor.*exact cap/i,
       );
       expect(initialParent.systemPrompt).toMatch(
-        /roles and counts named by the user.*minimum requirements, not ceilings.*exact cap/i,
+        /each `orchestrate` call creates a fresh worker session.*same worker definition and identical instructions.*do not vary briefs/i,
       );
       expect(initialParent.systemPrompt).toMatch(
-        /same worker definition can be dispatched in multiple independent calls.*each call creates an independent worker session.*distinct from interactive session continuity.*keeps one worker ID/i,
+        /self-contained brief.*objective.*context.*paths and scope.*forbidden actions.*success criteria.*expected output.*do not receive the parent conversation/i,
+      );
+      expect(initialParent.systemPrompt).toMatch(/form the complete wave before emitting any tool call/i);
+      expect(initialParent.systemPrompt).toMatch(
+        /for one worker.*one fully briefed `orchestrate` call/i,
       );
       expect(initialParent.systemPrompt).toMatch(
-        /Prefer one-shot workers.*interactive_send.*owned lifecycle interactive worker.*status is ready.*interactive_close.*Never use either tool for one-shot or completed workers.*one-shot sessions terminate automatically/i,
-      );
-      expect(initialParent.systemPrompt).toMatch(/enumerate the full first parallel wave.*from the work itself/i);
-      expect(initialParent.systemPrompt).toMatch(
-        /intended asynchronous wave has N workers.*next assistant response must contain exactly N separate, fully briefed `orchestrate` invocations.*single invocation is valid only when N=1/i,
+        /N workers where N > 1.*exactly one `multi_tool_use\.parallel` call.*exactly N `functions\.orchestrate` entries and no other tools/i,
       );
       expect(initialParent.systemPrompt).toMatch(
-        /form all N invocations before emitting or finalizing.*successfully admitted sole async invocation returns.*terminate: true.*ends the parent turn.*omitted siblings cannot be added afterward/i,
+        /if `multi_tool_use\.parallel` is not present.*all N `orchestrate` calls as native siblings in one assistant response/i,
       );
       expect(initialParent.systemPrompt).toMatch(
-        /parallel tool dispatcher is available.*multi_tool_use\.parallel.*exactly N.*functions\.orchestrate.*no other tools.*no parallel dispatcher is available.*N native sibling.*same assistant response/i,
+        /never dispatch a multi-worker wave as separate assistant responses.*sole asynchronous `orchestrate` call ends the parent turn.*omitted workers cannot be added afterward/i,
       );
       expect(initialParent.systemPrompt).toMatch(
-        /to run that wave asynchronously.*resulting expanded tool-call group.*no other tool calls.*harmless response text does not affect runtime classification.*Pi executes sibling tool calls concurrently.*For N=3.*submit together three calls/i,
+        /expanded tool-call group.*only the intended `orchestrate` calls.*mixing another tool.*inline and blocking/i,
       );
       expect(initialParent.systemPrompt).toMatch(
-        /Pi Orchestrate treats a successfully admitted sole `orchestrate` call or pure sibling group as async.*Pi executes native sibling tools concurrently/i,
+        /wait for automatic result delivery instead of polling `worker_status`.*dispatch another complete wave/i,
       );
-      expect(initialParent.systemPrompt).toMatch(/deliberate overlap.*only.*distinct evidence sources.*competing hypotheses.*validation perspectives/i);
-      expect(initialParent.systemPrompt).toMatch(/accidental duplicate assignments are forbidden/i);
-      expect(initialParent.systemPrompt).toMatch(/another full parallel wave before yielding.*adaptive full waves/i);
+      expect(initialParent.systemPrompt).toMatch(
+        /parent reviews and synthesizes worker results.*resolves conflicts.*integrates changes.*relevant verification/i,
+      );
       expect(initialParent.systemPrompt).toContain("Trusted worker catalog");
       expect(initialParent.systemPrompt).toContain("`scout` [package]");
       expect(initialParent.systemPrompt).toContain("`investigator` [package]");

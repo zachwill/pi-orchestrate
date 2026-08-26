@@ -5,7 +5,7 @@ import {
   findWorkerByName,
   type WorkerCatalog,
   type WorkerDefinition,
-} from "../catalog/definition.js";
+} from "../catalog/definition.ts";
 import {
   MAX_WORKER_INSTRUCTIONS_LENGTH,
   MAX_WORKER_TITLE_LENGTH,
@@ -13,7 +13,7 @@ import {
   WorkerId,
   type RunMode,
   type SynthesisGroup,
-} from "./model.js";
+} from "./model.ts";
 
 /** Everything one orchestration request needs from its owning parent session. */
 export interface OrchestrationContext {

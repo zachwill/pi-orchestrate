@@ -7,7 +7,7 @@ import {
   orchestrateToolRenderer,
   workerAbortToolRenderer,
   workerStatusToolRenderer,
-} from "../../extension/pi/tool-renderer.js";
+} from "../../extension/pi/tool-renderer.ts";
 
 beforeAll(() => initTheme("dark", false));
 

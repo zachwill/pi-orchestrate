@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import type { WorkerLifecycle } from "../catalog/definition.js";
+import type { WorkerLifecycle } from "../catalog/definition.ts";
 
 export const MAX_WORKER_TITLE_LENGTH = 200;
 export const MAX_WORKER_INSTRUCTIONS_LENGTH = 100_000;

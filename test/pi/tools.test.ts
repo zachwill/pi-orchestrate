@@ -14,32 +14,32 @@ import {
   createWorkerCatalog,
   type WorkerCatalog,
   type WorkerDefinition,
-} from "../../extension/catalog/definition.js";
+} from "../../extension/catalog/definition.ts";
 import {
   MAX_WORKER_INSTRUCTIONS_LENGTH,
   MAX_WORKER_TITLE_LENGTH,
   type RunId,
   type WorkerId,
   type WorkerUsage,
-} from "../../extension/orchestration/model.js";
+} from "../../extension/orchestration/model.ts";
 import {
   OrchestrationActionRejected,
   type AbortTarget,
   type OrchestrationContext,
-} from "../../extension/orchestration/admission.js";
+} from "../../extension/orchestration/admission.ts";
 import type {
   AcceptedRun,
   CompletedRun,
   OwnerSnapshot,
   SettlementListener,
-} from "../../extension/orchestration/service.js";
-import type { OrchestrationClient } from "../../extension/parent/process-host.js";
+} from "../../extension/orchestration/service.ts";
+import type { OrchestrationClient } from "../../extension/parent/process-host.ts";
 import {
   registerOrchestrationTools,
   type OrchestrationToolDependencies,
-} from "../../extension/pi/tools.js";
-import type { DispatchDecision } from "../../extension/parent/dispatch-policy.js";
-import type { WorkerSettlement } from "../../extension/orchestration/settlement.js";
+} from "../../extension/pi/tools.ts";
+import type { DispatchDecision } from "../../extension/parent/dispatch-policy.ts";
+import type { WorkerSettlement } from "../../extension/orchestration/settlement.ts";
 
 beforeAll(() => initTheme("dark", false));
 

@@ -13,7 +13,7 @@ import type {
   CatalogDiagnostic,
   WorkerCatalog,
   WorkerDefinition,
-} from "../catalog/definition.js";
+} from "../catalog/definition.ts";
 import {
   MAX_WORKER_INSTRUCTIONS_LENGTH,
   MAX_WORKER_TITLE_LENGTH,
@@ -21,32 +21,32 @@ import {
   type WorkerOutcome,
   type WorkerRecord,
   type WorkerUsage,
-} from "../orchestration/model.js";
+} from "../orchestration/model.ts";
 import type {
   AbortTarget,
   OrchestrationContext,
-} from "../orchestration/admission.js";
+} from "../orchestration/admission.ts";
 import type {
   AcceptedRun,
   CompletedRun,
   OwnerSnapshot,
   SettlementListener,
   WorkerRunResult,
-} from "../orchestration/service.js";
-import type { DispatchDecision } from "../parent/dispatch-policy.js";
-import type { OrchestrationClient } from "../parent/process-host.js";
+} from "../orchestration/service.ts";
+import type { DispatchDecision } from "../parent/dispatch-policy.ts";
+import type { OrchestrationClient } from "../parent/process-host.ts";
 import {
   interactiveCloseToolRenderer,
   interactiveSendToolRenderer,
   orchestrateToolRenderer,
   workerAbortToolRenderer,
   workerStatusToolRenderer,
-} from "./tool-renderer.js";
+} from "./tool-renderer.ts";
 import {
   encodeInlineWorkerToolDetails,
   type InlineWorkerSettlementDetails,
   type WorkerSettlement,
-} from "../orchestration/settlement.js";
+} from "../orchestration/settlement.ts";
 
 const STRICT_OBJECT = { additionalProperties: false } as const;
 const shortTextSchema = Type.String({

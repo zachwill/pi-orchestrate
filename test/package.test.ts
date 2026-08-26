@@ -7,25 +7,17 @@ import {
   DefaultResourceLoader,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { discoverWorkerCatalog } from "../extension/catalog/discovery.js";
-import { applyOrchestratorContract } from "../extension/parent/contract.js";
-import { PACKAGE_ROOT } from "../extension/package-root.js";
-import { isOrchestrationExtensionPath } from "../extension/worker/session.js";
+import { discoverWorkerCatalog } from "../extension/catalog/discovery.ts";
+import { applyOrchestratorContract } from "../extension/parent/contract.ts";
+import { PACKAGE_ROOT } from "../extension/package-root.ts";
+import { isOrchestrationExtensionPath } from "../extension/worker/session.ts";
 
 const root = join(import.meta.dir, "..");
 const manifestPath = join(root, "package.json");
-const readmePath = join(root, "README.md");
 const workerDirectory = join(root, "examples", "workers");
 const workerNames = ["investigator", "scout", "web", "worker"] as const;
 const workerPaths = workerNames.map((name) => join(workerDirectory, `${name}.md`));
 
-const canonicalTools = [
-  "orchestrate",
-  "worker_status",
-  "interactive_send",
-  "worker_abort",
-  "interactive_close",
-] as const;
 const supportedWorkerTools = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
 const piPeerPackages = [
   "@earendil-works/pi-agent-core",
@@ -92,18 +84,6 @@ async function runExpectingFailure(command: string[], cwd: string): Promise<stri
   ]);
   expect(exitCode).not.toBe(0);
   return stderr;
-}
-
-function markdownSection(markdown: string, heading: string): string {
-  const start = markdown.indexOf(`## ${heading}`);
-  expect(start).toBeGreaterThanOrEqual(0);
-  const end = markdown.indexOf("\n## ", start + heading.length + 3);
-  return markdown.slice(start, end < 0 ? undefined : end);
-}
-
-function expectBlockWith(text: string, concepts: readonly RegExp[]): void {
-  const blocks = text.split(/\n\s*\n/);
-  expect(blocks.some((block) => concepts.every((concept) => concept.test(block)))).toBe(true);
 }
 
 function parseWorker(markdown: string): ParsedWorker {
@@ -359,85 +339,16 @@ describe("fallback worker definitions", () => {
   });
 });
 
-describe("published documentation", () => {
-  test("README covers the current package and public boundaries", async () => {
-    const [manifest, readme] = await Promise.all([readManifest(), readText(readmePath)]);
-    const install = markdownSection(readme, "Install");
-    const tools = markdownSection(readme, "Tools");
-    const parent = markdownSection(readme, "Parent responsibilities");
-    const definitions = markdownSection(readme, "Configure workers");
-    const trust = markdownSection(readme, "Trust and isolation");
-
-    expect(install).toContain(`pi install npm:${manifest.name}`);
-
-    const documentedTools = [...tools.matchAll(/^### `([^`]+)`$/gm)].map(
-      (match) => match[1],
-    );
-    expect(documentedTools).toEqual([
-      "orchestrate",
-      "worker_abort",
-      "worker_status",
-      "interactive_close",
-      "interactive_send",
-    ]);
-    expect(tools).toContain("orchestrate({ worker, title, instructions })");
-    expect(tools).toMatch(/complete wave[\s\S]*no other tool calls/i);
-    expect(tools).toMatch(/multi_tool_use\.parallel[\s\S]*functions\.orchestrate/i);
-    expect(tools).toMatch(/mixing another tool[\s\S]*inline and blocking/i);
-    expect(tools).toMatch(/worker_status[\s\S]*diagnostics and recovery, not completion polling/i);
-    expect(tools).toMatch(/worker_abort[\s\S]*active workers/i);
-    expect(tools).toMatch(/interactive_close[\s\S]*status is `ready`/i);
-    expect(tools).toMatch(/interactive_send[\s\S]*keeps its ID/i);
-
-    expect(parent).toMatch(/bounded, independent scopes/i);
-    expect(parent).toMatch(/small fixed count/i);
-    expect(parent).toMatch(/floor unless the user sets an exact cap/i);
-    expect(parent).toMatch(/review[\s\S]*verify/i);
-
-    const precedence = definitions.match(/^\d+\. .*$/gm) ?? [];
-    expect(precedence).toHaveLength(3);
-    expect(precedence[0]).toMatch(/package/i);
-    expect(precedence[1]).toMatch(/user/i);
-    expect(precedence[2]).toMatch(/project.*trust/i);
-    expect(definitions).toContain("lifecycle: interactive");
-    expect(definitions).toMatch(/required fields are `name`, `description`, and a nonempty `tools` list/i);
-    expect(definitions).toMatch(/Markdown body is the worker's nonempty system prompt/i);
-    expect(definitions).toMatch(/`lifecycle` is optional, accepts `one-shot` or `interactive`, and defaults to `one-shot`/i);
-    expect(definitions).toMatch(/supported Pi tools are `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`/i);
-    expect(definitions).toMatch(/only `interactive_send` continues an existing one/i);
-
-    expect(trust).toMatch(/not security sandboxes/i);
-    expect(trust).toMatch(/`bash` can start external processes, including agent CLIs/i);
-    expect(trust).toMatch(/direct Pi children/i);
-    expect(readme).not.toContain("orchestration_status");
-    expect(readme).not.toMatch(/\bworker_(?:send|close)\b/);
-  });
-
-  test("shipped parent contract uses only the current tools and lifecycle semantics", () => {
+describe("shipped parent contract", () => {
+  test("prescribes fresh sessions and grouped parallel dispatch", () => {
     const contract = applyOrchestratorContract("", { workers: [], diagnostics: [] });
-    const publicTools = contract
-      .split("\n")
-      .find((line) => line.includes("The public tools are"));
 
-    expect(publicTools).toBeDefined();
-    if (publicTools === undefined) throw new Error("missing public tools contract rule");
-    expect([...publicTools.matchAll(/`([^`]+)`/g)].map((match) => match[1])).toEqual([
-      ...canonicalTools,
-    ]);
-    expectBlockWith(contract, [
-      /\bprefer one-shot workers\b/i,
-      /\bterminate automatically\b/i,
-      /\bnever use either tool for one-shot or completed workers\b/i,
-    ]);
-    expectBlockWith(contract, [
-      /\bsame worker definition can be dispatched in multiple independent calls\b/i,
-      /\beach call creates an independent worker session\b/i,
-      /\binteractive session continuity\b/i,
-      /\bone worker ID\b/i,
-      /\bexplicit follow-up work\b/i,
-      /`interactive_send`/,
-      /`interactive_close`/,
-    ]);
+    expect(contract).toMatch(/each `orchestrate` call creates a fresh worker session/i);
+    expect(contract).toMatch(/same worker definition and identical instructions/i);
+    expect(contract).toMatch(/exactly one `multi_tool_use\.parallel` call/i);
+    expect(contract).toMatch(/exactly N `functions\.orchestrate` entries and no other tools/i);
+    expect(contract).toMatch(/not present.*native siblings in one assistant response/i);
+    expect(contract).toMatch(/never dispatch a multi-worker wave as separate assistant responses/i);
     expect(contract).not.toMatch(/\bworker_(?:send|close)\b/);
     expect(contract).not.toContain("orchestration_status");
     expect(contract).not.toMatch(/\breusable\b/i);

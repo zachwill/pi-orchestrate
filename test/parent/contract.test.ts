@@ -3,19 +3,11 @@ import type {
   WorkerCatalog,
   WorkerDefinition,
   WorkerLifecycle,
-} from "../../extension/catalog/definition.js";
-import { applyOrchestratorContract } from "../../extension/parent/contract.js";
+} from "../../extension/catalog/definition.ts";
+import { applyOrchestratorContract } from "../../extension/parent/contract.ts";
 
 const CONTRACT_START = "<!-- pi-orchestrate:contract:start -->";
 const CONTRACT_END = "<!-- pi-orchestrate:contract:end -->";
-const PUBLIC_TOOLS = [
-  "orchestrate",
-  "worker_status",
-  "interactive_send",
-  "worker_abort",
-  "interactive_close",
-] as const;
-
 function worker(
   name: string,
   source: "package" | "user" | "project",
@@ -84,15 +76,15 @@ describe("orchestrator contract", () => {
     expect(section.indexOf("`alpha`")).toBeLessThan(section.indexOf("`zeta`"));
   });
 
-  test("retains the structural parent lifecycle and orchestration surface", () => {
+  test("retains the structural parent and parallel-dispatch contract", () => {
     const section = expectOneContract(applyOrchestratorContract("", catalog([])));
 
     expect(section).toContain("You are the parent orchestrator and own the task end to end.");
-    expect(section).toContain("exactly N separate, fully briefed `orchestrate` invocations");
-    expect(section).toContain("no other tool calls");
-    expect(section).toContain("The parent synthesizes worker results");
-    expect(section).toContain("status is ready");
-    for (const tool of PUBLIC_TOOLS) expect(section).toContain(`\`${tool}\``);
+    expect(section).toContain("same worker definition and identical instructions");
+    expect(section).toContain("exactly one `multi_tool_use.parallel` call");
+    expect(section).toContain("exactly N `functions.orchestrate` entries and no other tools");
+    expect(section).toContain("native siblings in one assistant response");
+    expect(section).toContain("The parent reviews and synthesizes worker results");
     expect(section).toContain("No trusted workers are available");
   });
 

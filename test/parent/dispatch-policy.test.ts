@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { classifyParentDispatches } from "../../extension/parent/dispatch-policy.js";
+import { classifyParentDispatches } from "../../extension/parent/dispatch-policy.ts";
 
 function call(id: string, name: string) {
   return { id, name };

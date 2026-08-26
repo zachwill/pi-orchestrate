@@ -14,7 +14,7 @@ import {
   type WorkerSessionCreationError,
   type WorkerSessionDependencies,
   type WorkerSessionHandle,
-} from "./session.js";
+} from "./session.ts";
 
 export class WorkerSessionAcquisitionClosedError extends Schema.TaggedError<WorkerSessionAcquisitionClosedError>()(
   "WorkerSession.AcquisitionClosedError",

@@ -63,7 +63,7 @@ The global Sandcastle Doctrine applies. This package is pre-1.0: keep its public
 ## Implementation Rules
 
 - Use Bun for installs, scripts, and tests.
-- Keep TypeScript strict and ESM/NodeNext-compatible. Use `.js` specifiers for relative imports.
+- Keep TypeScript strict and ESM/NodeNext-compatible. Use `.ts` specifiers for relative imports because the package ships and executes raw TypeScript.
 - Keep tool schemas strict. Throw from `execute` to signal failure; an error-shaped return value is still a successful tool result.
 - Keep model-facing `content` concise and put complete machine-readable state in `details`.
 - Do not start timers, watchers, sessions, or other long-lived resources in the extension factory. Bind them on session start or demand and release them on shutdown.

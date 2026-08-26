@@ -5,12 +5,12 @@ import { Cause, Effect, Exit } from "effect";
 import {
   createWorkerCatalog,
   type WorkerDefinition,
-} from "../../extension/catalog/definition.js";
+} from "../../extension/catalog/definition.ts";
 import {
   MAX_WORKER_INSTRUCTIONS_LENGTH,
   MAX_WORKER_TITLE_LENGTH,
   type OrchestrateTaskInput,
-} from "../../extension/orchestration/model.js";
+} from "../../extension/orchestration/model.ts";
 import {
   OrchestrationActionRejected,
   accepted,
@@ -23,7 +23,7 @@ import {
   validateText,
   validateWorkerId,
   type OrchestrationContext,
-} from "../../extension/orchestration/admission.js";
+} from "../../extension/orchestration/admission.ts";
 
 function model(provider: string, id: string): Model<Api> {
   return {

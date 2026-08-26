@@ -5,14 +5,14 @@ import {
   Delivery,
   DeliveryCoordinator,
   deliveryLayer,
-} from "../../extension/parent/delivery.js";
-import { createWorkerCatalog } from "../../extension/catalog/definition.js";
+} from "../../extension/parent/delivery.ts";
+import { createWorkerCatalog } from "../../extension/catalog/definition.ts";
 import {
   createSequentialRunIdFactory,
   createSequentialWorkerIdFactory,
   type OrchestrateTaskInput,
   type RunMode,
-} from "../../extension/orchestration/model.js";
+} from "../../extension/orchestration/model.ts";
 import {
   attachProcessHost,
   createOrchestrationClient,
@@ -22,21 +22,21 @@ import {
   makeProcessHostLayer,
   ManagedOrchestrationClient,
   type ProcessHost,
-} from "../../extension/parent/process-host.js";
+} from "../../extension/parent/process-host.ts";
 import {
   Orchestration,
   SHUTDOWN_CLEANUP_GRACE_MS,
-} from "../../extension/orchestration/service.js";
-import { OrchestrationActionRejected } from "../../extension/orchestration/admission.js";
-import type { WorkerSettlement } from "../../extension/orchestration/settlement.js";
-import type { OrchestrationContext } from "../../extension/orchestration/admission.js";
+} from "../../extension/orchestration/service.ts";
+import { OrchestrationActionRejected } from "../../extension/orchestration/admission.ts";
+import type { WorkerSettlement } from "../../extension/orchestration/settlement.ts";
+import type { OrchestrationContext } from "../../extension/orchestration/admission.ts";
 import type {
   AcceptedRun,
   CompletedRun,
   OrchestrationService,
   OwnerSnapshot,
   SettlementListener,
-} from "../../extension/orchestration/service.js";
+} from "../../extension/orchestration/service.ts";
 
 class TestOrchestration implements OrchestrationService {
   effect: Effect.Effect<

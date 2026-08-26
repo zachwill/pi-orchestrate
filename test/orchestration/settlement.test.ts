@@ -6,7 +6,7 @@ import {
   type RunRecord,
   type SettledWorkerRecord,
   type WorkerUsage,
-} from "../../extension/orchestration/model.js";
+} from "../../extension/orchestration/model.ts";
 import {
   InlineWorkerToolDetails,
   WorkerSettlement,
@@ -15,7 +15,7 @@ import {
   decodePersistedWorkerSettlement,
   encodeInlineWorkerToolDetails,
   type InlineWorkerToolDetails as InlineWorkerToolDetailsValue,
-} from "../../extension/orchestration/settlement.js";
+} from "../../extension/orchestration/settlement.ts";
 
 const usage: WorkerUsage = {
   input: 11,

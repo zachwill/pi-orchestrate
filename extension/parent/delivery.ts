@@ -1,6 +1,6 @@
 import { Context, Effect, Layer } from "effect";
-import { Orchestration } from "../orchestration/service.js";
-import type { WorkerSettlement } from "../orchestration/settlement.js";
+import { Orchestration } from "../orchestration/service.ts";
+import type { WorkerSettlement } from "../orchestration/settlement.ts";
 
 export const MAX_DELIVERY_MARKDOWN_BYTES = 50 * 1024;
 export const MAX_WORKER_DELIVERY_MARKDOWN_BYTES = 16 * 1024;

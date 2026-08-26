@@ -10,7 +10,7 @@ import {
   FiberSet,
   Layer,
 } from "effect";
-import type { WorkerDefinition } from "../catalog/definition.js";
+import type { WorkerDefinition } from "../catalog/definition.ts";
 import {
   CANCELLATION_GRACE_MS,
   EMPTY_WORKER_USAGE,
@@ -30,7 +30,7 @@ import {
   type WorkerOutcome,
   type WorkerRecord,
   type WorkerUsage,
-} from "./model.js";
+} from "./model.ts";
 import {
   OrchestrationActionRejected,
   accepted,
@@ -46,21 +46,21 @@ import {
   type OrchestrationContext,
   type OrchestrationOperation,
   type ValidatedAbortTarget,
-} from "./admission.js";
+} from "./admission.ts";
 import {
   createWorkerSettlement,
   type SettlementFailureStage,
   type WorkerSettlement,
-} from "./settlement.js";
+} from "./settlement.ts";
 import {
   ChildSessions,
   type ChildSessionsService,
-} from "../worker/child-sessions.js";
+} from "../worker/child-sessions.ts";
 import type {
   WorkerSessionAbortError,
   WorkerSessionHandle,
   WorkerSessionObservation,
-} from "../worker/session.js";
+} from "../worker/session.ts";
 
 export const MAX_TERMINAL_WORKER_HISTORY = 100;
 export const MAX_COMPLETED_RUN_HISTORY = 100;
@@ -1479,8 +1479,8 @@ function makeSettlement(
   }
   const sequence = draft.settlementSequence + 1;
   draft.settlementSequence = sequence;
-  // Persisted generation records this authority epoch for reconstruction and
-  // diagnostics.
+  // Persisted generation stores workerEpoch, distinguishes follow-up settlements
+  // for one stable worker ID, and makes event IDs generation-specific.
   const settlement = createWorkerSettlement({
     sequence,
     generation: worker.workerEpoch,
@@ -1514,12 +1514,7 @@ function pruneHistory(draft: OrchestrationState): Set<string> {
     draft.runs.delete(runId);
   }
   while (draft.terminalWorkerOrder.length > MAX_TERMINAL_WORKER_HISTORY) {
-    const index = draft.terminalWorkerOrder.findIndex((workerId) => {
-      const worker = draft.workers.get(workerId);
-      return !worker || isTerminalWorkerStatus(worker.record.status);
-    });
-    if (index < 0) break;
-    const removed = draft.terminalWorkerOrder.splice(index, 1)[0];
+    const removed = draft.terminalWorkerOrder.shift();
     if (!removed) break;
     const worker = draft.workers.get(removed);
     if (worker) owners.add(worker.record.ownerSessionId);

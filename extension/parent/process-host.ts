@@ -3,7 +3,7 @@ import {
   Delivery,
   deliveryLayer,
   type DeliveryService,
-} from "./delivery.js";
+} from "./delivery.ts";
 import {
   Orchestration,
   orchestrationLayer,
@@ -14,14 +14,16 @@ import {
   type OwnerSnapshot,
   type SettlementListener,
   type UnsubscribeSettlement,
-} from "../orchestration/service.js";
+} from "../orchestration/service.ts";
 import type {
   AbortTarget,
   OrchestrationContext,
-} from "../orchestration/admission.js";
-import { createChildSessionsLayer } from "../worker/child-sessions.js";
-import type { OrchestrateTaskInput, RunMode } from "../orchestration/model.js";
+} from "../orchestration/admission.ts";
+import { createChildSessionsLayer } from "../worker/child-sessions.ts";
+import type { OrchestrateTaskInput, RunMode } from "../orchestration/model.ts";
 
+// Bump this key when ProcessHost/OrchestrationClient changes incompatibly.
+// Multiple package copies can coexist in one Pi process and adopt the same host.
 const PROCESS_HOST_KEY = Symbol.for("@zachwill/pi-orchestrate/process-host/v3");
 
 type DispatchResult<M extends RunMode> = M extends "async"
@@ -223,6 +225,8 @@ export class ManagedOrchestrationClient<R = never> implements OrchestrationClien
     if (signal?.aborted) throw abortSignalReason(signal);
     if (!signal) return this.effectRuntime.runPromise(effect);
 
+    // Race with a private sentinel because Effect may transform failures; after
+    // interruption settles, Pi must receive the caller's exact AbortSignal.reason.
     const signalInterruption = {};
     const exit = await this.effectRuntime.runPromiseExit(
       Effect.raceFirst(effect, abortSignalEffect(signal, signalInterruption)),

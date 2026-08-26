@@ -10,7 +10,7 @@ import {
   WorkerUsage,
   type RunRecord,
   type SettledWorkerRecord,
-} from "./model.js";
+} from "./model.ts";
 
 const NonnegativeInteger = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 const PositiveInteger = Schema.Int.check(Schema.isGreaterThan(0));

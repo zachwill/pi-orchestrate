@@ -19,18 +19,18 @@ import type {
   WorkerOutcome,
   WorkerRecord,
   WorkerStatus,
-} from "../orchestration/model.js";
-import type { OwnerSnapshot } from "../orchestration/service.js";
+} from "../orchestration/model.ts";
+import type { OwnerSnapshot } from "../orchestration/service.ts";
 import {
   disposeComponent,
   formatElapsed,
   resultAppearance,
   WidthBoundComponent,
-} from "./tui.js";
+} from "./tui.ts";
 import {
   decodePersistedWorkerSettlement,
   type WorkerSettlement,
-} from "../orchestration/settlement.js";
+} from "../orchestration/settlement.ts";
 
 export const ORCHESTRATION_PRESENTATION_KEY = "pi-orchestrate";
 export const MAX_RESULT_PREVIEW_LINES = 6;
@@ -52,6 +52,10 @@ const WORKER_ANIMATIONS = {
 } as const;
 const ANIMATION_CYCLE_TICKS = 40;
 const SPINNER_INTERVAL_MS = 140;
+const TURN_USAGE_MIN_WIDTH = 12;
+const CONTEXT_USAGE_MIN_WIDTH = 28;
+const WIDE_WORKER_ROW_MIN_WIDTH = 72;
+const WORKER_NAME_SLACK_COLUMNS = 10;
 const ACTIVE_STATUSES: ReadonlySet<WorkerStatus> = new Set(["starting", "running", "stopping"]);
 
 /** Owner-scoped worker state feed consumed by the parent's status presentation. */
@@ -211,12 +215,14 @@ export class WorkerStatusComponent implements Component {
     );
     const turns = formatTurnMarker(worker);
     const context = `${formatContextTokens(numberOrZero(worker.usage?.contextTokens))} ctx`;
-    const usageFields = width >= 28 ? [turns, context] : width >= 12 ? [turns] : [];
+    const usageFields = width >= CONTEXT_USAGE_MIN_WIDTH
+      ? [turns, context]
+      : width >= TURN_USAGE_MIN_WIDTH ? [turns] : [];
     const workerName = this.theme.fg("muted", this.theme.italic(worker.worker));
     const workerNameFits = visibleWidth(
       `⠋  · ${worker.worker} · ${usageFields.join(" · ")}`,
-    ) + 10 <= width;
-    const suffixFields = width >= 72 && workerNameFits
+    ) + WORKER_NAME_SLACK_COLUMNS <= width;
+    const suffixFields = width >= WIDE_WORKER_ROW_MIN_WIDTH && workerNameFits
       ? [workerName, ...usageFields]
       : usageFields;
     const prefix = `${glyph} `;

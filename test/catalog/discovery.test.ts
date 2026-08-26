@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
 import { join } from "node:path";
-import type { WorkerCatalog } from "../../extension/catalog/definition.js";
+import type { WorkerCatalog } from "../../extension/catalog/definition.ts";
 import {
   createWorkerCatalogDiscovery,
   type CatalogFileStat,
   type CatalogFileSystem,
   type DiscoverWorkerCatalogOptions,
-} from "../../extension/catalog/discovery.js";
+} from "../../extension/catalog/discovery.ts";
 
 interface FakeFile {
   readonly content: string;

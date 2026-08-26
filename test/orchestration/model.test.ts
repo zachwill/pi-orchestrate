@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Schema } from "effect";
-import type { WorkerLifecycle } from "../../extension/catalog/definition.js";
+import type { WorkerLifecycle } from "../../extension/catalog/definition.ts";
 import {
   EMPTY_WORKER_USAGE,
   OrchestrateTaskInput,
@@ -17,7 +17,7 @@ import {
   transitionWorkerStatus,
   type WorkerRecord,
   type WorkerStatus,
-} from "../../extension/orchestration/model.js";
+} from "../../extension/orchestration/model.ts";
 
 const workerRecord = (
   id: WorkerId,

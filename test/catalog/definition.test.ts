@@ -5,7 +5,7 @@ import {
   findWorkerByName,
   isSupportedToolName,
   type WorkerDefinition,
-} from "../../extension/catalog/definition.js";
+} from "../../extension/catalog/definition.ts";
 
 const workerDefinition = (name: string): WorkerDefinition => ({
   name,

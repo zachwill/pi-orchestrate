@@ -6,7 +6,7 @@ import { TestClock } from "effect/testing";
 import {
   createWorkerCatalog,
   type WorkerDefinition,
-} from "../../extension/catalog/definition.js";
+} from "../../extension/catalog/definition.ts";
 import {
   MAX_WORKER_INSTRUCTIONS_LENGTH,
   MAX_WORKER_TITLE_LENGTH,
@@ -17,11 +17,11 @@ import {
   type WorkerMessageDirection,
   type WorkerOutcome,
   type WorkerUsage,
-} from "../../extension/orchestration/model.js";
+} from "../../extension/orchestration/model.ts";
 import {
   OrchestrationActionRejected,
   type OrchestrationContext,
-} from "../../extension/orchestration/admission.js";
+} from "../../extension/orchestration/admission.ts";
 import {
   MAX_COMPLETED_RUN_HISTORY,
   MAX_TERMINAL_WORKER_HISTORY,
@@ -30,25 +30,25 @@ import {
   orchestrationLayer,
   type CompletedRun,
   type OrchestrationService,
-} from "../../extension/orchestration/service.js";
-import { DeliveryCoordinator } from "../../extension/parent/delivery.js";
+} from "../../extension/orchestration/service.ts";
+import { DeliveryCoordinator } from "../../extension/parent/delivery.ts";
 import {
   createOrchestrationClient,
   destroyProcessHost,
   type ProcessHost,
-} from "../../extension/parent/process-host.js";
+} from "../../extension/parent/process-host.ts";
 import {
   ChildSessions,
   type ChildSessionsService,
-} from "../../extension/worker/child-sessions.js";
+} from "../../extension/worker/child-sessions.ts";
 import {
   WorkerAgentSessionAcquisitionError,
   WorkerSessionAbortError,
   type ChildSessionOptions,
   type WorkerSessionHandle,
   type WorkerSessionObservation,
-} from "../../extension/worker/session.js";
-import type { WorkerSettlement } from "../../extension/orchestration/settlement.js";
+} from "../../extension/worker/session.ts";
+import type { WorkerSettlement } from "../../extension/orchestration/settlement.ts";
 
 class Deferred<T = void> {
   readonly promise: Promise<T>;
