@@ -693,6 +693,9 @@ describe("Pi 0.80.10 SDK integration", () => {
         /wait for automatic result delivery instead of polling `worker_status`.*dispatch another complete wave/i,
       );
       expect(initialParent.systemPrompt).toMatch(
+        /automatic delivery requires no keepalive activity.*do not call `sleep`.*poll with any tool.*inspect files or processes.*no-op tool calls.*only genuinely independent work.*otherwise end the turn/i,
+      );
+      expect(initialParent.systemPrompt).toMatch(
         /parent reviews and synthesizes worker results.*resolves conflicts.*integrates changes.*relevant verification/i,
       );
       expect(initialParent.systemPrompt).toContain("Trusted worker catalog");

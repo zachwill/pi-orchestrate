@@ -349,6 +349,9 @@ describe("shipped parent contract", () => {
     expect(contract).toMatch(/exactly N `functions\.orchestrate` entries and no other tools/i);
     expect(contract).toMatch(/not present.*native siblings in one assistant response/i);
     expect(contract).toMatch(/never dispatch a multi-worker wave as separate assistant responses/i);
+    expect(contract).toMatch(/automatic delivery requires no keepalive activity/i);
+    expect(contract).toMatch(/do not call `sleep`.*poll with any tool.*inspect files or processes.*no-op tool calls/i);
+    expect(contract).toMatch(/only genuinely independent work.*otherwise end the turn/i);
     expect(contract).not.toMatch(/\bworker_(?:send|close)\b/);
     expect(contract).not.toContain("orchestration_status");
     expect(contract).not.toMatch(/\breusable\b/i);
