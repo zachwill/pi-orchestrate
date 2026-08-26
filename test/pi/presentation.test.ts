@@ -2,8 +2,13 @@ import { beforeAll, describe, expect, test } from "bun:test";
 import { initTheme, type ExtensionAPI, type ExtensionContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
 import { Result, Schema } from "effect";
 import { visibleWidth, type Component } from "@earendil-works/pi-tui";
-import type { RunId, WorkerId, WorkerRecord, WorkerStatus } from "../extension/domain.ts";
-import type { RuntimeSnapshot } from "../extension/runtime.ts";
+import type {
+  RunId,
+  WorkerId,
+  WorkerRecord,
+  WorkerStatus,
+} from "../../extension/orchestration/model.js";
+import type { OwnerSnapshot } from "../../extension/orchestration/service.js";
 import {
   MAX_RESULT_PREVIEW_LINES,
   MAX_WIDGET_WORKERS,
@@ -12,12 +17,12 @@ import {
   WorkerStatusComponent,
   formatFooterStatus,
   registerOrchestrationPresentation,
-  type PresentationRuntime,
-} from "../extension/presentation.ts";
+  type WorkerStateSource,
+} from "../../extension/pi/presentation.js";
 import {
-  WorkerSettlementDetails,
-  decodePersistedWorkerSettlementDetails,
-} from "../extension/worker-settlement.ts";
+  WorkerSettlement,
+  decodePersistedWorkerSettlement,
+} from "../../extension/orchestration/settlement.js";
 
 beforeAll(() => initTheme("dark", false));
 const theme = { fg: (_: string, text: string) => text, bg: (_: string, text: string) => text, bold: (text: string) => text, italic: (text: string) => text, underline: (text: string) => text, inverse: (text: string) => text, strikethrough: (text: string) => text } as Theme;
@@ -26,7 +31,7 @@ const usage = { input: 1200, output: 345, cacheRead: 12, cacheWrite: 3, cost: 0.
 function worker(id: string, status: WorkerStatus, overrides: Partial<WorkerRecord> = {}): WorkerRecord {
   return { id: id as WorkerId, worker: "scout", ownerSessionId: "owner", runId: "run" as RunId, title: `Task ${id}`, instructions: "Do it", lifecycle: status === "ready" ? "interactive" : "one-shot", status, usage, messageDirection: status === "starting" ? "to-model" : "from-model", startedAt: Date.now() - 78_000, ...overrides };
 }
-function snapshot(workers: readonly WorkerRecord[]): RuntimeSnapshot {
+function snapshot(workers: readonly WorkerRecord[]): OwnerSnapshot {
   return {
     workers,
     runs: workers.length === 0 ? [] : [{
@@ -175,10 +180,10 @@ describe("per-worker result messages", () => {
             }
           : {}),
       };
-      const decoded = decodePersistedWorkerSettlementDetails(input);
+      const decoded = decodePersistedWorkerSettlement(input);
       expect(Result.isSuccess(decoded)).toBe(true);
       if (!Result.isSuccess(decoded)) throw new Error("Expected settlement to decode");
-      const encoded = Schema.encodeSync(WorkerSettlementDetails)(decoded.success);
+      const encoded = Schema.encodeSync(WorkerSettlement)(decoded.success);
       const persisted = JSON.parse(JSON.stringify(encoded));
       expect(persisted).toEqual(input);
       expect(persisted).not.toHaveProperty("sessionFile");
@@ -188,7 +193,7 @@ describe("per-worker result messages", () => {
       if (outcome.status === "aborted") {
         expect(persisted.outcome).not.toHaveProperty("message");
       }
-      const roundTrip = decodePersistedWorkerSettlementDetails(persisted);
+      const roundTrip = decodePersistedWorkerSettlement(persisted);
       expect(Result.isSuccess(roundTrip)).toBe(true);
       if (Result.isSuccess(roundTrip)) expect(roundTrip.success).toEqual(decoded.success);
     }
@@ -197,7 +202,7 @@ describe("per-worker result messages", () => {
   test("rejects every invalid persisted usage field and missing required field", () => {
     for (const field of Object.keys(usage)) {
       for (const invalid of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
-        expect(Result.isFailure(decodePersistedWorkerSettlementDetails({
+        expect(Result.isFailure(decodePersistedWorkerSettlement({
           ...settlement(),
           usage: { ...usage, [field]: invalid },
         }))).toBe(true);
@@ -208,7 +213,7 @@ describe("per-worker result messages", () => {
       if (field === "sessionFile") continue;
       const missing = { ...settlement() };
       Reflect.deleteProperty(missing, field);
-      expect(Result.isFailure(decodePersistedWorkerSettlementDetails(missing))).toBe(true);
+      expect(Result.isFailure(decodePersistedWorkerSettlement(missing))).toBe(true);
     }
   });
 
@@ -219,7 +224,7 @@ describe("per-worker result messages", () => {
       synthesisGroupSize: 3,
       currentExtra: "ignored",
     };
-    const decoded = decodePersistedWorkerSettlementDetails(current);
+    const decoded = decodePersistedWorkerSettlement(current);
 
     expect(Result.isSuccess(decoded)).toBe(true);
     if (!Result.isSuccess(decoded)) throw new Error("Expected current settlement to decode");
@@ -235,7 +240,7 @@ describe("per-worker result messages", () => {
     const missingCurrentField = { ...current };
     Reflect.deleteProperty(missingCurrentField, "eventId");
     expect(Result.isFailure(
-      Schema.decodeUnknownResult(WorkerSettlementDetails)(missingCurrentField),
+      Schema.decodeUnknownResult(WorkerSettlement)(missingCurrentField),
     )).toBe(true);
   });
 
@@ -250,7 +255,7 @@ describe("per-worker result messages", () => {
       },
     ];
     for (const details of validSettlements) {
-      expect(Result.isSuccess(decodePersistedWorkerSettlementDetails(details))).toBe(true);
+      expect(Result.isSuccess(decodePersistedWorkerSettlement(details))).toBe(true);
     }
 
     const invalidSettlements = [
@@ -267,7 +272,7 @@ describe("per-worker result messages", () => {
       { ...settlement(), generation: 0 },
     ];
     for (const details of invalidSettlements) {
-      expect(Result.isFailure(decodePersistedWorkerSettlementDetails(details))).toBe(true);
+      expect(Result.isFailure(decodePersistedWorkerSettlement(details))).toBe(true);
       const output = Bun.stripANSI(
         renderResult(details, true, 80, "raw boundary fallback").join("\n"),
       );
@@ -279,11 +284,11 @@ describe("per-worker result messages", () => {
   test("decodes only direct current settlements and falls back with full raw content", () => {
     const withoutSession = settlement();
     Reflect.deleteProperty(withoutSession, "sessionFile");
-    expect(Result.isSuccess(decodePersistedWorkerSettlementDetails(withoutSession))).toBe(true);
-    expect(Result.isFailure(decodePersistedWorkerSettlementDetails({
+    expect(Result.isSuccess(decodePersistedWorkerSettlement(withoutSession))).toBe(true);
+    expect(Result.isFailure(decodePersistedWorkerSettlement({
       settlement: withoutSession,
     }))).toBe(true);
-    expect(Result.isFailure(decodePersistedWorkerSettlementDetails({
+    expect(Result.isFailure(decodePersistedWorkerSettlement({
       ...withoutSession,
       sessionFile: undefined,
     }))).toBe(true);
@@ -453,11 +458,11 @@ describe("active widget", () => {
   });
 });
 
-type StateListener = (snapshot: RuntimeSnapshot) => void;
+type StateListener = (snapshot: OwnerSnapshot) => void;
 
-class RuntimeHarness implements PresentationRuntime {
+class WorkerStateHarness implements WorkerStateSource {
   listeners = new Map<string, Set<StateListener>>();
-  initialSnapshots = new Map<string, RuntimeSnapshot>();
+  initialSnapshots = new Map<string, OwnerSnapshot>();
   subscribeCalls = 0;
   unsubscribeCalls = 0;
 
@@ -477,7 +482,7 @@ class RuntimeHarness implements PresentationRuntime {
     };
   }
 
-  emit(value: RuntimeSnapshot, ownerSessionId = "owner"): void {
+  emit(value: OwnerSnapshot, ownerSessionId = "owner"): void {
     for (const listener of this.listeners.get(ownerSessionId) ?? []) listener(value);
   }
 
@@ -487,7 +492,7 @@ class RuntimeHarness implements PresentationRuntime {
 }
 
 test("controller restores the synchronous initial owner snapshot and applies updates in order", () => {
-  const runtime = new RuntimeHarness();
+  const runtime = new WorkerStateHarness();
   const statuses: unknown[] = [];
   const context = { mode: "non-interactive", ui: {
     setStatus(_key: string, value: unknown) { statuses.push(value); },
@@ -511,7 +516,7 @@ test("controller restores the synchronous initial owner snapshot and applies upd
 });
 
 test("controller rebind synchronously replaces an active widget with retained ready status", () => {
-  const runtime = new RuntimeHarness();
+  const runtime = new WorkerStateHarness();
   runtime.initialSnapshots.set("active-owner", snapshot([worker("active", "running")]));
   runtime.initialSnapshots.set("ready-owner", snapshot([worker("ready", "ready")]));
   let installed: WorkerStatusComponent | undefined;
@@ -548,7 +553,7 @@ test("controller rebind synchronously replaces an active widget with retained re
 });
 
 test("controller bind, unbind, and rebind subscriptions are isolated", () => {
-  const runtime = new RuntimeHarness();
+  const runtime = new WorkerStateHarness();
   const statusValues: unknown[] = [];
   const ctx = { mode: "non-interactive", ui: {
     setStatus(_key: string, value: unknown) { statusValues.push(value); },
@@ -573,7 +578,7 @@ test("controller bind, unbind, and rebind subscriptions are isolated", () => {
 });
 
 test("lets Pi dispose installed widgets exactly once", () => {
-  const runtime = new RuntimeHarness();
+  const runtime = new WorkerStateHarness();
   let installed: WorkerStatusComponent | undefined;
   let disposals = 0;
   const ctx = { mode: "tui", ui: {
@@ -599,7 +604,7 @@ test("lets Pi dispose installed widgets exactly once", () => {
 });
 
 test("controller updates one widget instance, removes terminal rows, and clears at zero", () => {
-  const runtime = new RuntimeHarness();
+  const runtime = new WorkerStateHarness();
   let installed: WorkerStatusComponent | undefined;
   let installs = 0;
   let clears = 0;

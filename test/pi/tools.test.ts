@@ -13,36 +13,40 @@ import { Result } from "effect";
 import type { TSchema } from "typebox";
 import * as Value from "typebox/value";
 import {
-  MAX_WORKER_INSTRUCTIONS_LENGTH,
-  MAX_WORKER_TITLE_LENGTH,
   createWorkerCatalog,
-  type RunId,
   type WorkerCatalog,
   type WorkerDefinition,
+} from "../../extension/catalog/definition.js";
+import {
+  MAX_WORKER_INSTRUCTIONS_LENGTH,
+  MAX_WORKER_TITLE_LENGTH,
+  type RunId,
   type WorkerId,
   type WorkerUsage,
-} from "../extension/domain.js";
-import { OrchestrationActionRejected } from "../extension/runtime.js";
+} from "../../extension/orchestration/model.js";
+import {
+  OrchestrationActionRejected,
+  type AbortTarget,
+  type OrchestrationContext,
+} from "../../extension/orchestration/admission.js";
 import type {
-  AbortTarget,
   AcceptedRun,
   CompletedRun,
-  OrchestrationContext,
-  RuntimeSnapshot,
+  OwnerSnapshot,
   SettlementListener,
-} from "../extension/runtime.js";
-import type { OrchestratorRuntime } from "../extension/host.js";
+} from "../../extension/orchestration/service.js";
+import type { OrchestrationClient } from "../../extension/parent/process-host.js";
 import {
   registerOrchestrationTools,
   type DispatchDecision,
   type OrchestrationToolDependencies,
-} from "../extension/tools.js";
+} from "../../extension/pi/tools.js";
 import {
   decodeInlineWorkerToolDetails,
   encodeInlineWorkerToolDetails,
   type InlineWorkerToolDetails,
   type WorkerSettlement,
-} from "../extension/worker-settlement.js";
+} from "../../extension/orchestration/settlement.js";
 
 beforeAll(() => initTheme("dark", false));
 
@@ -63,7 +67,7 @@ class FakePi {
   }
 }
 
-class FakeRuntime {
+class FakeOrchestrationClient {
   readonly orchestrateCalls: Array<{
     context: OrchestrationContext;
     task: { worker: string; title: string; instructions: string };
@@ -87,7 +91,7 @@ class FakeRuntime {
     workerId: "worker-accepted" as WorkerId,
   };
   completedRun: CompletedRun = completedRun();
-  snapshotResult: RuntimeSnapshot = snapshot();
+  snapshotResult: OwnerSnapshot = snapshot();
   failures: Partial<
     Record<"orchestrate" | "sendInteractive" | "abort" | "closeInteractive" | "snapshot", Error>
   > = {};
@@ -131,7 +135,7 @@ class FakeRuntime {
     if (this.failures.closeInteractive) throw this.failures.closeInteractive;
   }
 
-  async snapshot(ownerSessionId: string): Promise<RuntimeSnapshot> {
+  async snapshot(ownerSessionId: string): Promise<OwnerSnapshot> {
     this.snapshotCalls.push(ownerSessionId);
     if (this.failures.snapshot) throw this.failures.snapshot;
     return this.snapshotResult;
@@ -140,7 +144,7 @@ class FakeRuntime {
 
 interface Harness {
   readonly pi: FakePi;
-  readonly runtime: FakeRuntime;
+  readonly runtime: FakeOrchestrationClient;
   readonly context: ExtensionContext;
   readonly catalog: WorkerCatalog;
   readonly catalogCalls: ExtensionContext[];
@@ -151,7 +155,7 @@ interface Harness {
 
 function harness(): Harness {
   const pi = new FakePi();
-  const runtime = new FakeRuntime();
+  const runtime = new FakeOrchestrationClient();
   const catalog = createWorkerCatalog([definition("scout")], [
     {
       severity: "warning",
@@ -166,7 +170,7 @@ function harness(): Harness {
   const modes = new Map<string, DispatchMode>();
   const synthesisGroups = new Map<string, DispatchDecision["synthesisGroup"]>();
   const deps: OrchestrationToolDependencies = {
-    runtime: runtime as unknown as OrchestratorRuntime,
+    orchestration: runtime as unknown as OrchestrationClient,
     getCatalog(ctx) {
       catalogCalls.push(ctx);
       return catalog;
@@ -330,7 +334,7 @@ function inlineToolDetails() {
   };
 }
 
-function snapshot(): RuntimeSnapshot {
+function snapshot(): OwnerSnapshot {
   return {
     runs: [
       {
@@ -1247,7 +1251,7 @@ describe("registerOrchestrationTools", () => {
         interactive_close: "closeInteractive",
       }[name];
       const error = new Error(`${name} failed`);
-      runtime.failures[runtimeMethod as keyof FakeRuntime["failures"]] = error;
+      runtime.failures[runtimeMethod as keyof FakeOrchestrationClient["failures"]] = error;
       const params = {
         orchestrate: { worker: "scout", title: "Inspect", instructions: "Inspect." },
         worker_status: {},

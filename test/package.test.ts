@@ -1,12 +1,16 @@
 import { describe, expect, test } from "bun:test";
-import { mkdir, mkdtemp, readdir, rm, stat, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, stat, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   DefaultResourceLoader,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
-import { appendOrchestratorContract } from "../extension/contract.js";
+import { discoverWorkerCatalog } from "../extension/catalog/discovery.js";
+import { applyOrchestratorContract } from "../extension/parent/contract.js";
+import { PACKAGE_ROOT } from "../extension/package-root.js";
+import { isOrchestrationExtensionPath } from "../extension/worker/session.js";
 
 const root = join(import.meta.dir, "..");
 const manifestPath = join(root, "package.json");
@@ -29,10 +33,10 @@ const piPeerPackages = [
   "@earendil-works/pi-coding-agent",
   "@earendil-works/pi-tui",
 ] as const;
-
 interface PackageManifest {
   readonly name: string;
   readonly version: string;
+  readonly exports: Record<string, never>;
   readonly files: string[];
   readonly license: string;
   readonly repository: { readonly type: string; readonly url: string };
@@ -80,6 +84,16 @@ async function run(command: string[], cwd: string): Promise<string> {
   return stdout;
 }
 
+async function runExpectingFailure(command: string[], cwd: string): Promise<string> {
+  const process = Bun.spawn(command, { cwd, stdout: "pipe", stderr: "pipe" });
+  const [stderr, exitCode] = await Promise.all([
+    new Response(process.stderr).text(),
+    process.exited,
+  ]);
+  expect(exitCode).not.toBe(0);
+  return stderr;
+}
+
 function markdownSection(markdown: string, heading: string): string {
   const start = markdown.indexOf(`## ${heading}`);
   expect(start).toBeGreaterThanOrEqual(0);
@@ -112,6 +126,13 @@ function parseWorker(markdown: string): ParsedWorker {
 describe("published package resources", () => {
   test("packs the declared Pi extension and package resources into the published artifact", async () => {
     const temporaryDirectory = await mkdtemp(join(tmpdir(), "pi-orchestrate-package-"));
+    const sourceManifest = await readManifest();
+    const expectedPackedSources = (await readdir(join(root, "extension"), {
+      recursive: true,
+    }))
+      .filter((path) => path.endsWith(".ts"))
+      .map((path) => `extension/${path.replaceAll("\\", "/")}`)
+      .sort();
 
     try {
       await run(
@@ -131,8 +152,6 @@ describe("published package resources", () => {
       for (const workerName of workerNames) {
         expect(archiveFiles).toContain(`package/examples/workers/${workerName}.md`);
       }
-      expect(archiveFiles.some((path) => path.startsWith("package/skills/"))).toBe(false);
-
       const extractedDirectory = join(temporaryDirectory, "extracted");
       await mkdir(extractedDirectory);
       await run(["tar", "-xzf", artifactPath, "-C", extractedDirectory], root);
@@ -140,11 +159,18 @@ describe("published package resources", () => {
       const packedManifest = await Bun.file(join(packageRoot, "package.json")).json() as PackageManifest;
 
       expect(packedManifest.name).toBe("@zachwill/pi-orchestrate");
-      expect(packedManifest.version).toBe("0.9.2");
+      expect(packedManifest.version).toBe(sourceManifest.version);
       expect(packedManifest.files).toEqual(["extension/", "examples/", "README.md", "LICENSE"]);
+      expect(packedManifest.exports).toEqual({});
       expect(packedManifest.pi).toEqual({ extensions: ["./extension/index.ts"] });
       expect(packedManifest.pi.skills).toBeUndefined();
       expect(packedManifest.pi.prompts).toBeUndefined();
+
+      const packedSources = archiveFiles
+        .filter((path) => path.startsWith("package/extension/") && path.endsWith(".ts"))
+        .map((path) => path.slice("package/".length))
+        .sort();
+      expect(packedSources).toEqual(expectedPackedSources);
       const declaredExtensionPaths = packedManifest.pi.extensions.map((extensionPath) => {
         const artifactEntry = `package/${extensionPath.replace(/^\.\//, "")}`;
         expect(archiveFiles).toContain(artifactEntry);
@@ -183,6 +209,50 @@ describe("published package resources", () => {
       expect(loadedExtensions.extensions.map((extension) => extension.resolvedPath)).toEqual(
         declaredExtensionPaths,
       );
+      const packedCatalogModule = await import(pathToFileURL(
+        join(packageRoot, "extension", "catalog", "discovery.ts"),
+      ).href);
+      const packedCatalog = packedCatalogModule.discoverWorkerCatalog({
+        cwd: loaderCwd,
+        agentDir: loaderAgentDir,
+        projectTrusted: false,
+      });
+      expect(packedCatalog.diagnostics).toEqual([]);
+      expect(packedCatalog.workers.map((worker: { readonly name: string }) => worker.name)).toEqual(
+        [...workerNames],
+      );
+      const canonicalPackageRoot = await realpath(packageRoot);
+      expect(packedCatalog.workers.every((worker: {
+        readonly source: { readonly kind: string; readonly filePath: string };
+      }) =>
+        worker.source.kind === "package" &&
+        worker.source.filePath.startsWith(join(canonicalPackageRoot, "examples", "workers"))
+      )).toBe(true);
+
+      const consumerRoot = join(temporaryDirectory, "consumer");
+      const packageScope = join(consumerRoot, "node_modules", "@zachwill");
+      await mkdir(packageScope, { recursive: true });
+      await symlink(
+        packageRoot,
+        join(packageScope, "pi-orchestrate"),
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      await Bun.write(join(consumerRoot, "package.json"), JSON.stringify({
+        name: "package-boundary-consumer",
+        private: true,
+        type: "module",
+      }));
+      const blockedSpecifiers = [
+        "@zachwill/pi-orchestrate",
+        "@zachwill/pi-orchestrate/extension/index.ts",
+        "@zachwill/pi-orchestrate/extension/catalog/discovery.ts",
+        "@zachwill/pi-orchestrate/extension/parent/contract.ts",
+      ] as const;
+      for (const [index, specifier] of blockedSpecifiers.entries()) {
+        const scriptName = `blocked-import-${index}.ts`;
+        await Bun.write(join(consumerRoot, scriptName), `import ${JSON.stringify(specifier)};`);
+        await runExpectingFailure(["bun", scriptName], consumerRoot);
+      }
     } finally {
       await rm(temporaryDirectory, { recursive: true, force: true });
     }
@@ -216,6 +286,34 @@ describe("published package resources", () => {
       .filter((path) => path.endsWith(".md"))
       .sort();
     expect(markdownFiles).toEqual(workerNames.map((name) => `${name}.md`).sort());
+  });
+
+  test("shares the actual package root across fallback discovery and extension exclusion", async () => {
+    const temporaryDirectory = await mkdtemp(join(tmpdir(), "pi-orchestrate-package-root-"));
+
+    try {
+      const manifest = await Bun.file(join(PACKAGE_ROOT, "package.json")).json() as PackageManifest;
+      expect(manifest.name).toBe("@zachwill/pi-orchestrate");
+
+      const catalog = discoverWorkerCatalog({
+        cwd: temporaryDirectory,
+        agentDir: temporaryDirectory,
+        projectTrusted: false,
+      });
+      expect(catalog.diagnostics).toEqual([]);
+      expect(catalog.workers.map((worker) => worker.name)).toEqual([...workerNames]);
+      expect(catalog.workers.every((worker) =>
+        worker.source.kind === "package" &&
+        worker.source.filePath.startsWith(join(PACKAGE_ROOT, "examples", "workers"))
+      )).toBe(true);
+
+      expect(isOrchestrationExtensionPath(
+        join(PACKAGE_ROOT, "extension", "worker", "session.ts"),
+      )).toBe(true);
+      expect(isOrchestrationExtensionPath(temporaryDirectory)).toBe(false);
+    } finally {
+      await rm(temporaryDirectory, { recursive: true, force: true });
+    }
   });
 });
 
@@ -316,7 +414,7 @@ describe("published documentation", () => {
   });
 
   test("shipped parent contract uses only the current tools and lifecycle semantics", () => {
-    const contract = appendOrchestratorContract("", { workers: [], diagnostics: [] });
+    const contract = applyOrchestratorContract("", { workers: [], diagnostics: [] });
     const publicTools = contract
       .split("\n")
       .find((line) => line.includes("The public tools are"));

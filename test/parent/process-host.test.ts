@@ -5,38 +5,38 @@ import {
   Delivery,
   DeliveryCoordinator,
   deliveryLayer,
-} from "../extension/delivery.js";
+} from "../../extension/parent/delivery.js";
+import { createWorkerCatalog } from "../../extension/catalog/definition.js";
 import {
   createSequentialRunIdFactory,
   createSequentialWorkerIdFactory,
-  createWorkerCatalog,
   type OrchestrateTaskInput,
   type RunMode,
-} from "../extension/domain.js";
+} from "../../extension/orchestration/model.js";
 import {
   attachProcessHost,
-  createProcessApplicationLayer,
+  createOrchestrationClient,
   createProcessHost,
-  createProcessHostRuntimeAdapter,
   destroyProcessHost,
   getProcessHost,
-  ProcessHostRuntimeAdapter,
+  makeProcessHostLayer,
+  ManagedOrchestrationClient,
   type ProcessHost,
-} from "../extension/host.js";
+} from "../../extension/parent/process-host.js";
 import {
   Orchestration,
-  OrchestrationActionRejected,
   SHUTDOWN_CLEANUP_GRACE_MS,
-} from "../extension/runtime.js";
-import type { WorkerSettlement } from "../extension/worker-settlement.js";
+} from "../../extension/orchestration/service.js";
+import { OrchestrationActionRejected } from "../../extension/orchestration/admission.js";
+import type { WorkerSettlement } from "../../extension/orchestration/settlement.js";
+import type { OrchestrationContext } from "../../extension/orchestration/admission.js";
 import type {
   AcceptedRun,
   CompletedRun,
-  OrchestrationContext,
   OrchestrationService,
-  RuntimeSnapshot,
+  OwnerSnapshot,
   SettlementListener,
-} from "../extension/runtime.js";
+} from "../../extension/orchestration/service.js";
 
 class TestOrchestration implements OrchestrationService {
   effect: Effect.Effect<
@@ -109,7 +109,7 @@ class TestOrchestration implements OrchestrationService {
   readonly subscribeSettlement = () => this.unsubscribeSettlement;
   readonly subscribeState = (
     _ownerSessionId: string,
-    listener: (snapshot: RuntimeSnapshot) => void,
+    listener: (snapshot: OwnerSnapshot) => void,
   ) => {
     listener({ runs: [], workers: [] });
     return () => {};
@@ -145,7 +145,7 @@ function adapterHarness() {
   const effectRuntime = ManagedRuntime.make(
     Layer.succeed(Orchestration, orchestration),
   );
-  const adapter = new ProcessHostRuntimeAdapter(effectRuntime, orchestration);
+  const adapter = new ManagedOrchestrationClient(effectRuntime, orchestration);
   return { adapter, effectRuntime, orchestration };
 }
 
@@ -155,7 +155,7 @@ function destructionHost(
 ): ProcessHost {
   return Object.assign(
     {
-      runtime: { shutdown } as unknown as ProcessHost["runtime"],
+      orchestration: { shutdown } as unknown as ProcessHost["orchestration"],
       delivery: new DeliveryCoordinator(),
     } satisfies ProcessHost,
     { effectRuntime: { dispose } },
@@ -301,7 +301,7 @@ describe("ProcessHost AbortSignal adapter", () => {
 
 describe("ProcessHost root lifetime", () => {
   test("shares one orchestration acquisition across the process application layer", async () => {
-    const effectRuntime = ManagedRuntime.make(createProcessApplicationLayer());
+    const effectRuntime = ManagedRuntime.make(makeProcessHostLayer());
 
     const first = effectRuntime.runSync(Orchestration);
     const second = effectRuntime.runSync(Orchestration);
@@ -313,8 +313,8 @@ describe("ProcessHost root lifetime", () => {
   });
 
   test("keeps retained snapshots readable after disposal while runtime-backed operations fail", async () => {
-    const effectRuntime = ManagedRuntime.make(createProcessApplicationLayer());
-    const adapter = createProcessHostRuntimeAdapter(effectRuntime);
+    const effectRuntime = ManagedRuntime.make(makeProcessHostLayer());
+    const adapter = createOrchestrationClient(effectRuntime);
 
     expect(await adapter.snapshot("owner")).toEqual({ runs: [], workers: [] });
     await effectRuntime.dispose();

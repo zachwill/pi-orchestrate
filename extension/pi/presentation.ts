@@ -15,9 +15,12 @@ import {
   type Component,
 } from "@earendil-works/pi-tui";
 import { Result } from "effect";
-import type { WorkerDeliveryDetails } from "./delivery.js";
-import type { WorkerOutcome, WorkerRecord, WorkerStatus } from "./domain.js";
-import type { RuntimeSnapshot } from "./runtime.js";
+import type {
+  WorkerOutcome,
+  WorkerRecord,
+  WorkerStatus,
+} from "../orchestration/model.js";
+import type { OwnerSnapshot } from "../orchestration/service.js";
 import {
   disposeComponent,
   formatElapsed,
@@ -25,9 +28,9 @@ import {
   WidthBoundComponent,
 } from "./tui.js";
 import {
-  decodePersistedWorkerSettlementDetails,
-  type WorkerSettlementDetails,
-} from "./worker-settlement.js";
+  decodePersistedWorkerSettlement,
+  type WorkerSettlement,
+} from "../orchestration/settlement.js";
 
 export const ORCHESTRATION_PRESENTATION_KEY = "pi-orchestrate";
 export const MAX_RESULT_PREVIEW_LINES = 6;
@@ -51,10 +54,11 @@ const ANIMATION_CYCLE_TICKS = 40;
 const SPINNER_INTERVAL_MS = 140;
 const ACTIVE_STATUSES: ReadonlySet<WorkerStatus> = new Set(["starting", "running", "stopping"]);
 
-export interface PresentationRuntime {
+/** Owner-scoped worker state feed consumed by the parent's status presentation. */
+export interface WorkerStateSource {
   subscribeState(
     ownerSessionId: string,
-    listener: (snapshot: RuntimeSnapshot) => void,
+    listener: (snapshot: OwnerSnapshot) => void,
   ): () => void;
 }
 
@@ -66,14 +70,14 @@ interface StatusBinding {
 interface RenderRequester { requestRender(): void }
 
 export function registerOrchestrationPresentation(pi: ExtensionAPI): void {
-  pi.registerMessageRenderer<WorkerDeliveryDetails>(
+  pi.registerMessageRenderer<WorkerSettlement>(
     "pi-orchestrate-worker-result",
     (message, { expanded }, theme) =>
       new WorkerResultComponent(messageText(message.content), message.details, expanded, theme),
   );
 }
 
-export function formatFooterStatus(snapshot: RuntimeSnapshot): string | undefined {
+export function formatFooterStatus(snapshot: OwnerSnapshot): string | undefined {
   const ready = snapshot.workers.filter((worker) => worker.status === "ready").length;
   return ready > 0 ? `${ready} interactive ready` : undefined;
 }
@@ -84,14 +88,14 @@ export class StatusController {
   private unsubscribeState: (() => void) | undefined;
   private widget: WorkerStatusComponent | undefined;
 
-  constructor(private readonly runtime: PresentationRuntime) {}
+  constructor(private readonly workerState: WorkerStateSource) {}
 
   bind(ownerSessionId: string, ctx: ExtensionContext): void {
     if (this.disposed) return;
     this.clearBinding();
     const binding = { ownerSessionId, ctx };
     this.binding = binding;
-    this.unsubscribeState = this.runtime.subscribeState(ownerSessionId, (snapshot) => {
+    this.unsubscribeState = this.workerState.subscribeState(ownerSessionId, (snapshot) => {
       if (this.binding !== binding) return;
       this.present(binding.ctx, snapshot);
     });
@@ -108,7 +112,7 @@ export class StatusController {
     this.clearBinding();
   }
 
-  private present(ctx: ExtensionContext, snapshot: RuntimeSnapshot): void {
+  private present(ctx: ExtensionContext, snapshot: OwnerSnapshot): void {
     ctx.ui.setStatus(ORCHESTRATION_PRESENTATION_KEY, formatFooterStatus(snapshot));
     if (ctx.mode !== "tui") return;
     const active = activeWorkers(snapshot);
@@ -145,21 +149,23 @@ export class StatusController {
   }
 }
 
-export function createStatusController(runtime: PresentationRuntime): StatusController {
-  return new StatusController(runtime);
+export function createStatusController(
+  workerState: WorkerStateSource,
+): StatusController {
+  return new StatusController(workerState);
 }
 
 export class WorkerStatusComponent implements Component {
   private frameIndex = 0;
-  private snapshot: RuntimeSnapshot;
+  private snapshot: OwnerSnapshot;
   private timer: ReturnType<typeof setInterval> | undefined;
 
-  constructor(snapshot: RuntimeSnapshot, private readonly theme: Theme, private readonly tui?: RenderRequester) {
+  constructor(snapshot: OwnerSnapshot, private readonly theme: Theme, private readonly tui?: RenderRequester) {
     this.snapshot = snapshot;
     this.startTimer();
   }
 
-  update(snapshot: RuntimeSnapshot): void {
+  update(snapshot: OwnerSnapshot): void {
     this.snapshot = snapshot;
     if (activeWorkers(snapshot).length > 0) this.startTimer();
     else this.stopTimer();
@@ -289,8 +295,8 @@ export class WorkerResultComponent implements Component {
   }
 }
 
-function readSettlement(value: unknown): WorkerSettlementDetails | undefined {
-  const decoded = decodePersistedWorkerSettlementDetails(value);
+function readSettlement(value: unknown): WorkerSettlement | undefined {
+  const decoded = decodePersistedWorkerSettlement(value);
   return Result.isSuccess(decoded) ? decoded.success : undefined;
 }
 
@@ -307,7 +313,7 @@ function outcomeText(outcome: WorkerOutcome): string {
   return "Worker session closed.";
 }
 
-function presentedOutcome(result: WorkerSettlementDetails): string {
+function presentedOutcome(result: WorkerSettlement): string {
   const body = outcomeText(result.outcome);
   if (result.status !== "completed" && result.status !== "ready") return body;
 
@@ -322,7 +328,7 @@ function presentedOutcome(result: WorkerSettlementDetails): string {
   return lines.join("\n").trimEnd();
 }
 
-function settlementMetadata(result: WorkerSettlementDetails): string[] {
+function settlementMetadata(result: WorkerSettlement): string[] {
   return [
     `worker ID ${result.workerId} · run ID ${result.runId}`,
     `status ${result.status} · generation ${result.generation}`,
@@ -338,7 +344,7 @@ function messageText(content: unknown): string {
   return content.flatMap((part) => isRecord(part) && part.type === "text" && typeof part.text === "string" ? [part.text] : []).join("\n");
 }
 
-function activeWorkers(snapshot: RuntimeSnapshot): WorkerRecord[] {
+function activeWorkers(snapshot: OwnerSnapshot): WorkerRecord[] {
   return snapshot.workers.filter((worker) => ACTIVE_STATUSES.has(worker.status));
 }
 

@@ -4,14 +4,13 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { DeliveryCoordinator } from "../extension/delivery.js";
+import { DeliveryCoordinator } from "../extension/parent/delivery.js";
 import {
   createWorkerCatalog,
-  type RunId,
   type WorkerCatalog,
   type WorkerDefinition,
-  type WorkerId,
-} from "../extension/domain.js";
+} from "../extension/catalog/definition.js";
+import type { RunId, WorkerId } from "../extension/orchestration/model.js";
 import {
   attachProcessHost,
   createProcessHost,
@@ -20,16 +19,14 @@ import {
   getProcessHost,
   quitProcessHost,
   type ProcessHost,
-} from "../extension/host.js";
+} from "../extension/parent/process-host.js";
 import {
   createOrchestrationExtension,
   type OrchestrationExtensionDependencies,
 } from "../extension/index.js";
-import type {
-  OrchestrationContext,
-  RuntimeSnapshot,
-} from "../extension/runtime.js";
-import type { WorkerSettlement } from "../extension/worker-settlement.js";
+import type { OrchestrationContext } from "../extension/orchestration/admission.js";
+import type { OwnerSnapshot } from "../extension/orchestration/service.js";
+import type { WorkerSettlement } from "../extension/orchestration/settlement.js";
 
 const TOOL_NAMES = [
   "orchestrate",
@@ -84,15 +81,15 @@ class FakePi {
   }
 }
 
-class FakeRuntime {
+class FakeOrchestrationClient {
   readonly orchestrateCalls: Array<{
     context: OrchestrationContext;
     task: unknown;
     mode: string;
   }> = [];
   readonly interactiveSendCalls: Array<{ context: OrchestrationContext; mode: string }> = [];
-  readonly stateListeners = new Map<string, Set<(snapshot: RuntimeSnapshot) => void>>();
-  readonly snapshots = new Map<string, RuntimeSnapshot>();
+  readonly stateListeners = new Map<string, Set<(snapshot: OwnerSnapshot) => void>>();
+  readonly snapshots = new Map<string, OwnerSnapshot>();
   readonly snapshotOwners: string[] = [];
   shutdownCalls = 0;
   unsubscribeStateCalls = 0;
@@ -130,14 +127,14 @@ class FakeRuntime {
   async abort(): Promise<void> {}
   async closeInteractive(): Promise<void> {}
 
-  async snapshot(ownerSessionId: string): Promise<RuntimeSnapshot> {
+  async snapshot(ownerSessionId: string): Promise<OwnerSnapshot> {
     this.snapshotOwners.push(ownerSessionId);
     return { runs: [], workers: [] };
   }
 
   subscribeState(
     ownerSessionId: string,
-    listener: (snapshot: RuntimeSnapshot) => void,
+    listener: (snapshot: OwnerSnapshot) => void,
   ): () => void {
     const listeners = this.stateListeners.get(ownerSessionId) ?? new Set();
     listeners.add(listener);
@@ -251,10 +248,10 @@ function createContext(
   return { ctx, setIdle: (nextIdle) => (idle = nextIdle) };
 }
 
-function fakeHost(runtime = new FakeRuntime()): { host: ProcessHost; runtime: FakeRuntime } {
+function fakeHost(runtime = new FakeOrchestrationClient()): { host: ProcessHost; runtime: FakeOrchestrationClient } {
   return {
     host: {
-      runtime: runtime as unknown as ProcessHost["runtime"],
+      orchestration: runtime as unknown as ProcessHost["orchestration"],
       delivery: new DeliveryCoordinator(),
     },
     runtime,
@@ -393,7 +390,7 @@ describe("Pi Orchestrate extension integration", () => {
       async destroyHost(destroyedHost) {
         expect(destroyedHost).toBe(host);
         destroyCalls += 1;
-        await destroyedHost.runtime.shutdown();
+        await destroyedHost.orchestration.shutdown();
       },
     });
     const { ctx } = createContext("owner-shutdown");
@@ -701,7 +698,7 @@ describe("Pi Orchestrate extension integration", () => {
     const overrides = {
       async destroyHost(host: ProcessHost) {
         destroyCalls += 1;
-        await host.runtime.shutdown();
+        await host.orchestration.shutdown();
       },
     };
     install(ownerPi, shared.host, overrides);
@@ -905,7 +902,7 @@ describe("Pi Orchestrate extension integration", () => {
     const shutdownGate = new Promise<void>((resolve) => {
       releaseShutdown = resolve;
     });
-    Object.assign(first.runtime, {
+    Object.assign(first.orchestration, {
       shutdown: () => shutdownGate,
     });
     const destruction = quitProcessHost();

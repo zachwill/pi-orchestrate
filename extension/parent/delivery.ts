@@ -1,6 +1,6 @@
 import { Context, Effect, Layer } from "effect";
-import { Orchestration } from "./runtime.js";
-import type { WorkerSettlement } from "./worker-settlement.js";
+import { Orchestration } from "../orchestration/service.js";
+import type { WorkerSettlement } from "../orchestration/settlement.js";
 
 export const MAX_DELIVERY_MARKDOWN_BYTES = 50 * 1024;
 export const MAX_WORKER_DELIVERY_MARKDOWN_BYTES = 16 * 1024;
@@ -11,14 +11,11 @@ export const DELIVERY_PARENT_INSTRUCTIONS =
 
 export type ParentBindingGeneration = string | number | symbol;
 
-/** Complete, immutable worker output for presentation and history consumers. */
-export type WorkerDeliveryDetails = WorkerSettlement;
-
 export interface WorkerDeliveryMessage {
   readonly customType: "pi-orchestrate-worker-result";
   readonly content: string;
   readonly display: true;
-  readonly details: WorkerDeliveryDetails;
+  readonly details: WorkerSettlement;
 }
 
 export interface WorkerDeliveryOptions {

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { Layer, ManagedRuntime } from "effect";
-import { createSequentialIdFactories, type WorkerOutcome } from "../extension/domain.ts";
+import { createSequentialIdFactories, type WorkerOutcome } from "../../extension/orchestration/model.js";
 import {
   DELIVERY_PARENT_INSTRUCTIONS,
   DELIVERY_TRUNCATION_MARKER,
@@ -13,13 +13,13 @@ import {
   type ParentBindingGeneration,
   type WorkerDeliveryMessage,
   type WorkerDeliveryOptions,
-} from "../extension/delivery.ts";
+} from "../../extension/parent/delivery.js";
 import {
   Orchestration,
   type OrchestrationService,
   type SettlementListener,
-} from "../extension/runtime.ts";
-import type { WorkerSettlement } from "../extension/worker-settlement.ts";
+} from "../../extension/orchestration/service.js";
+import type { WorkerSettlement } from "../../extension/orchestration/settlement.js";
 
 const usage = {
   input: 10,

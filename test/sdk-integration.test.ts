@@ -25,7 +25,7 @@ import {
   SettingsManager,
   type CreateAgentSessionRuntimeFactory,
 } from "@earendil-works/pi-coding-agent";
-import { getProcessHost, quitProcessHost } from "../extension/host.js";
+import { getProcessHost, quitProcessHost } from "../extension/parent/process-host.js";
 import { createOrchestrationExtension } from "../extension/index.js";
 
 interface WorkerResultDetails {
@@ -784,7 +784,7 @@ describe("Pi 0.80.10 SDK integration", () => {
       expect(harness.childSessionShutdowns.value).toBe(1);
       expect(getProcessHost()).toBeUndefined();
 
-      const snapshot = await host.runtime.snapshot(ownerSessionId);
+      const snapshot = await host.orchestration.snapshot(ownerSessionId);
       expect(snapshot.runs).toHaveLength(1);
       expect(snapshot.runs[0]?.state).toBe("complete");
       expect(snapshot.workers).toHaveLength(1);
@@ -848,7 +848,7 @@ describe("Pi 0.80.10 SDK integration", () => {
       expect(acceptedResults.every((result) => typeof result.details.worker_id === "string")).toBe(true);
 
       const betaSettled = new Deferred();
-      const unsubscribeSettlement = getProcessHost()!.runtime.subscribeSettlement((settlement) => {
+      const unsubscribeSettlement = getProcessHost()!.orchestration.subscribeSettlement((settlement) => {
         if (settlement.title === "Beta task") betaSettled.resolve();
       });
       harness.childGates["child-beta"].resolve();

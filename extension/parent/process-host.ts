@@ -7,33 +7,36 @@ import {
 import {
   Orchestration,
   orchestrationLayer,
-  type AbortTarget,
   type AcceptedRun,
   type CompletedRun,
-  type OrchestrationContext,
   type OrchestrationService,
   SHUTDOWN_CLEANUP_GRACE_MS,
-  type RuntimeSnapshot,
+  type OwnerSnapshot,
   type SettlementListener,
   type UnsubscribeSettlement,
-} from "./runtime.js";
-import { createChildSessionsLayer } from "./worker-session.js";
-import type { OrchestrateTaskInput, RunMode } from "./domain.js";
+} from "../orchestration/service.js";
+import type {
+  AbortTarget,
+  OrchestrationContext,
+} from "../orchestration/admission.js";
+import { createChildSessionsLayer } from "../worker/child-sessions.js";
+import type { OrchestrateTaskInput, RunMode } from "../orchestration/model.js";
 
 const PROCESS_HOST_KEY = Symbol.for("@zachwill/pi-orchestrate/process-host/v3");
 
-type RunResult<M extends RunMode> = M extends "async"
+type DispatchResult<M extends RunMode> = M extends "async"
   ? AcceptedRun
   : CompletedRun;
 
-export interface OrchestratorRuntime {
+/** Promise-facing orchestration API used by Pi tools and presentation. */
+export interface OrchestrationClient {
   orchestrate<M extends RunMode>(
     context: OrchestrationContext,
     task: OrchestrateTaskInput,
     mode: M,
     signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<RunResult<M>>;
+  ): Promise<DispatchResult<M>>;
   sendInteractive<M extends RunMode>(
     context: OrchestrationContext,
     workerId: string,
@@ -41,20 +44,20 @@ export interface OrchestratorRuntime {
     mode: M,
     signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<RunResult<M>>;
+  ): Promise<DispatchResult<M>>;
   abort(ownerSessionId: string, target: AbortTarget): Promise<void>;
   closeInteractive(ownerSessionId: string, workerId: string): Promise<void>;
-  snapshot(ownerSessionId: string): Promise<RuntimeSnapshot>;
+  snapshot(ownerSessionId: string): Promise<OwnerSnapshot>;
   subscribeSettlement(listener: SettlementListener): UnsubscribeSettlement;
   subscribeState(
     ownerSessionId: string,
-    listener: (snapshot: RuntimeSnapshot) => void,
+    listener: (snapshot: OwnerSnapshot) => void,
   ): () => void;
   shutdown(): Promise<void>;
 }
 
 export interface ProcessHost {
-  readonly runtime: OrchestratorRuntime;
+  readonly orchestration: OrchestrationClient;
   readonly delivery: DeliveryService;
 }
 
@@ -100,7 +103,7 @@ export function getProcessHost(): ProcessHost | undefined {
 }
 
 /** Pi-facing adapter. Every Promise operation executes one complete Orchestration Effect. */
-export class ProcessHostRuntimeAdapter<R = never> implements OrchestratorRuntime {
+export class ManagedOrchestrationClient<R = never> implements OrchestrationClient {
   constructor(
     private readonly effectRuntime: ManagedRuntime.ManagedRuntime<Orchestration | R, never>,
     private readonly orchestration: OrchestrationService,
@@ -192,7 +195,7 @@ export class ProcessHostRuntimeAdapter<R = never> implements OrchestratorRuntime
     return this.run(this.orchestration.closeInteractive(ownerSessionId, workerId));
   }
 
-  snapshot(ownerSessionId: string): Promise<RuntimeSnapshot> {
+  snapshot(ownerSessionId: string): Promise<OwnerSnapshot> {
     // Snapshot is dependency-free and remains readable from a retained host reference
     // after the process root has been disposed.
     return Effect.runPromise(this.orchestration.snapshot(ownerSessionId));
@@ -204,7 +207,7 @@ export class ProcessHostRuntimeAdapter<R = never> implements OrchestratorRuntime
 
   subscribeState(
     ownerSessionId: string,
-    listener: (snapshot: RuntimeSnapshot) => void,
+    listener: (snapshot: OwnerSnapshot) => void,
   ): () => void {
     return this.orchestration.subscribeState(ownerSessionId, listener);
   }
@@ -232,15 +235,15 @@ export class ProcessHostRuntimeAdapter<R = never> implements OrchestratorRuntime
   }
 }
 
-export function createProcessHostRuntimeAdapter<R>(
+export function createOrchestrationClient<R>(
   effectRuntime: ManagedRuntime.ManagedRuntime<Orchestration | R, never>,
-): OrchestratorRuntime {
+): OrchestrationClient {
   // Orchestration acquisition is synchronous; subscriptions must remain reentrant.
   const orchestration = effectRuntime.runSync(Orchestration);
-  return new ProcessHostRuntimeAdapter(effectRuntime, orchestration);
+  return new ManagedOrchestrationClient(effectRuntime, orchestration);
 }
 
-export function createProcessApplicationLayer(): Layer.Layer<Orchestration | Delivery> {
+export function makeProcessHostLayer(): Layer.Layer<Orchestration | Delivery> {
   const orchestration = orchestrationLayer().pipe(
     Layer.provide(createChildSessionsLayer()),
   );
@@ -258,11 +261,11 @@ export function createProcessHost(): ProcessHost {
   }
   if (existing) return existing;
 
-  const effectRuntime = ManagedRuntime.make(createProcessApplicationLayer());
-  const runtime = createProcessHostRuntimeAdapter(effectRuntime);
+  const effectRuntime = ManagedRuntime.make(makeProcessHostLayer());
+  const orchestration = createOrchestrationClient(effectRuntime);
   const delivery = effectRuntime.runSync(Delivery);
   const host: OwnedProcessHost = {
-    runtime,
+    orchestration,
     delivery,
     effectRuntime,
     attachments: new Set(),
@@ -315,7 +318,7 @@ export function destroyProcessHost(
   let shutdown: Promise<void>;
   try {
     // shutdown() closes Orchestration admission before returning its bounded teardown Promise.
-    shutdown = ownedHost.runtime.shutdown();
+    shutdown = ownedHost.orchestration.shutdown();
   } catch (error) {
     shutdown = Promise.reject(error);
   }

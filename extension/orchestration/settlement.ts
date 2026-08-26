@@ -8,7 +8,9 @@ import {
   WorkerReadyOutcome,
   WorkerResponseOutcome,
   WorkerUsage,
-} from "./domain.js";
+  type RunRecord,
+  type SettledWorkerRecord,
+} from "./model.js";
 
 const NonnegativeInteger = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 const PositiveInteger = Schema.Int.check(Schema.isGreaterThan(0));
@@ -20,8 +22,8 @@ const FailureStage = Schema.Literals([
   "cancellation",
 ]);
 
-/** Canonical schema for settlement details written by the current runtime. */
-export const WorkerSettlementDetails = Schema.Struct({
+/** Canonical schema for settlements written and persisted by the current runtime. */
+export const WorkerSettlement = Schema.Struct({
   eventId: Schema.String,
   sequence: PositiveInteger,
   ownerSessionId: Schema.String,
@@ -77,23 +79,67 @@ export const WorkerSettlementDetails = Schema.Struct({
   }),
 );
 
-export interface WorkerSettlementDetails
-  extends Schema.Schema.Type<typeof WorkerSettlementDetails> {}
+export interface WorkerSettlement
+  extends Schema.Schema.Type<typeof WorkerSettlement> {}
 
 export type SettlementFailureStage = NonNullable<
-  WorkerSettlementDetails["failureStage"]
->;
-
-export type WorkerSettlement = Schema.Schema.Type<
-  typeof WorkerSettlementDetails
+  WorkerSettlement["failureStage"]
 >;
 
 const decodeCurrentWorkerSettlement = Schema.decodeUnknownResult(
-  WorkerSettlementDetails,
+  WorkerSettlement,
 );
 
-export function decodePersistedWorkerSettlementDetails(value: unknown) {
+export function decodePersistedWorkerSettlement(value: unknown) {
   return decodeCurrentWorkerSettlement(value);
+}
+
+/** Every input a settlement needs; orchestration state entries stay private. */
+export interface WorkerSettlementInput {
+  readonly sequence: number;
+  readonly generation: number;
+  readonly run: RunRecord;
+  readonly worker: SettledWorkerRecord;
+  readonly settledAt: number;
+  readonly failureStage?: SettlementFailureStage;
+}
+
+/** Builds the canonical settlement published to listeners and persisted by Pi. */
+export function createWorkerSettlement({
+  sequence,
+  generation,
+  run,
+  worker,
+  settledAt,
+  failureStage,
+}: WorkerSettlementInput): WorkerSettlement {
+  return Object.freeze({
+    eventId: `${sequence}:${run.id}:${worker.id}:${generation}`,
+    sequence,
+    ownerSessionId: worker.ownerSessionId,
+    runId: run.id,
+    workerId: worker.id,
+    generation,
+    mode: run.mode,
+    worker: worker.worker,
+    title: worker.title,
+    lifecycle: worker.lifecycle,
+    status: worker.status,
+    outcome: Object.freeze({ ...worker.outcome }),
+    ...(failureStage ? { failureStage } : {}),
+    usage: Object.freeze({ ...worker.usage }),
+    startedAt: worker.startedAt,
+    settledAt,
+    ...(run.synthesisGroupId && run.synthesisGroupSize
+      ? {
+          synthesisGroupId: run.synthesisGroupId,
+          synthesisGroupSize: run.synthesisGroupSize,
+        }
+      : {}),
+    ...(worker.sessionFile !== undefined
+      ? { sessionFile: worker.sessionFile }
+      : {}),
+  });
 }
 
 const InlineWorkerOutcome = Schema.Union([
@@ -121,15 +167,15 @@ const InlineWorkerUsage = WorkerUsage.pipe(
 
 /** Tool transport projection derived from the canonical settlement field schemas. */
 export const InlineWorkerSettlementDetails = Schema.Struct({
-  workerId: WorkerSettlementDetails.fields.workerId,
-  worker: WorkerSettlementDetails.fields.worker,
-  title: WorkerSettlementDetails.fields.title,
-  status: WorkerSettlementDetails.fields.status,
+  workerId: WorkerSettlement.fields.workerId,
+  worker: WorkerSettlement.fields.worker,
+  title: WorkerSettlement.fields.title,
+  status: WorkerSettlement.fields.status,
   outcome: InlineWorkerOutcome,
   usage: InlineWorkerUsage,
-  startedAt: WorkerSettlementDetails.fields.startedAt,
-  settledAt: WorkerSettlementDetails.fields.settledAt,
-  sessionFile: WorkerSettlementDetails.fields.sessionFile,
+  startedAt: WorkerSettlement.fields.startedAt,
+  settledAt: WorkerSettlement.fields.settledAt,
+  sessionFile: WorkerSettlement.fields.sessionFile,
 }).pipe(
   Schema.encodeKeys({
     workerId: "worker_id",
@@ -153,9 +199,9 @@ export interface InlineWorkerSettlementDetails
 
 export const InlineWorkerToolDetails = Schema.Struct({
   mode: Schema.Literal("inline"),
-  runId: Schema.optionalKey(WorkerSettlementDetails.fields.runId),
+  runId: Schema.optionalKey(WorkerSettlement.fields.runId),
   ownerSessionId: Schema.optionalKey(
-    WorkerSettlementDetails.fields.ownerSessionId,
+    WorkerSettlement.fields.ownerSessionId,
   ),
   result: InlineWorkerSettlementDetails,
 }).pipe(

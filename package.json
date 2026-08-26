@@ -3,6 +3,7 @@
   "version": "0.9.2",
   "type": "module",
   "description": "Concurrent worker orchestration for Pi",
+  "exports": {},
   "files": ["extension/", "examples/", "README.md", "LICENSE"],
   "keywords": ["pi-package", "pi", "workers", "orchestration"],
   "license": "MIT",

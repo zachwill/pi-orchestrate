@@ -1,4 +1,4 @@
-import type { WorkerCatalog } from "./domain.js";
+import type { WorkerCatalog } from "../catalog/definition.js";
 
 const CONTRACT_START = "<!-- pi-orchestrate:contract:start -->";
 const CONTRACT_END = "<!-- pi-orchestrate:contract:end -->";
@@ -124,7 +124,7 @@ ${formatCatalog(catalog)}
 ${CONTRACT_END}`;
 }
 
-export function appendOrchestratorContract(
+export function applyOrchestratorContract(
   systemPrompt: string,
   catalog: WorkerCatalog,
 ): string {

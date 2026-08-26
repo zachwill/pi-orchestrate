@@ -1,11 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { Schema } from "effect";
+import type { WorkerLifecycle } from "../../extension/catalog/definition.js";
 import {
   EMPTY_WORKER_USAGE,
   OrchestrateTaskInput,
   RunId,
   InvalidTransitionError,
-  SUPPORTED_TOOL_NAMES,
   WorkerId,
   WorkerOutcome,
   WorkerResponseOutcome,
@@ -13,26 +13,11 @@ import {
   canTransitionWorkerStatus,
   createRandomIdFactories,
   createSequentialIdFactories,
-  createWorkerCatalog,
-  findWorkerByName,
-  isSupportedToolName,
   isTerminalWorkerStatus,
   transitionWorkerStatus,
-  type WorkerDefinition,
-  type WorkerLifecycle,
   type WorkerRecord,
   type WorkerStatus,
-} from "../extension/domain.ts";
-
-const workerDefinition = (name: string): WorkerDefinition => ({
-  name,
-  source: { kind: "package", filePath: `/workers/${name}.md` },
-  description: `${name} worker`,
-  systemPrompt: `You are ${name}.`,
-  lifecycle: "one-shot",
-  tools: ["read", "grep"],
-  skills: [],
-});
+} from "../../extension/orchestration/model.js";
 
 const workerRecord = (
   id: WorkerId,
@@ -50,28 +35,6 @@ const workerRecord = (
   status,
   usage: EMPTY_WORKER_USAGE,
   startedAt: 1,
-});
-
-describe("supported tools and worker catalog", () => {
-  test("accepts every exact built-in tool name", () => {
-    for (const toolName of SUPPORTED_TOOL_NAMES) expect(isSupportedToolName(toolName)).toBe(true);
-    expect(isSupportedToolName("Read")).toBe(false);
-    expect(isSupportedToolName("shell")).toBe(false);
-  });
-
-  test("copies and sorts catalog workers", () => {
-    const input = [workerDefinition("worker"), workerDefinition("investigator"), workerDefinition("scout")];
-    const catalog = createWorkerCatalog(input);
-
-    expect(catalog.workers.map((worker) => worker.name)).toEqual([
-      "investigator",
-      "scout",
-      "worker",
-    ]);
-    expect(input.map((worker) => worker.name)).toEqual(["worker", "investigator", "scout"]);
-    expect(findWorkerByName(catalog, "scout")?.description).toBe("scout worker");
-    expect(findWorkerByName(catalog, "missing")).toBeUndefined();
-  });
 });
 
 describe("validated orchestration ingress", () => {

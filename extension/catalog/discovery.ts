@@ -5,19 +5,19 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { lstatSync, readdirSync, readFileSync } from "node:fs";
 import { basename, extname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { Effect, Result, Schema, SchemaGetter, type SchemaIssue } from "effect";
 import type {
   CatalogDiagnostic,
   WorkerCatalog,
   WorkerDefinition,
   WorkerSourceKind,
-} from "./domain.js";
+} from "./definition.js";
 import {
   createWorkerCatalog,
   isSupportedToolName,
   SUPPORTED_TOOL_NAMES,
-} from "./domain.js";
+} from "./definition.js";
+import { PACKAGE_ROOT } from "../package-root.js";
 
 const MAX_WORKER_BYTES = 64 * 1024;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
@@ -302,7 +302,7 @@ function parseWorker(
 }
 
 function sourceDirectories(options: DiscoverWorkerCatalogOptions): CatalogSource[] {
-  const packageRoot = options.packageRoot ?? fileURLToPath(new URL("..", import.meta.url));
+  const packageRoot = options.packageRoot ?? PACKAGE_ROOT;
   const agentDir = options.agentDir ?? getAgentDir();
   const sources: CatalogSource[] = [
     { kind: "package", directory: join(packageRoot, "examples", "workers") },

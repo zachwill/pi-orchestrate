@@ -6,9 +6,9 @@ import type {
 import {
   discoverWorkerCatalog,
   type DiscoverWorkerCatalogOptions,
-} from "./catalog.js";
-import { appendOrchestratorContract } from "./contract.js";
-import type { WorkerCatalog } from "./domain.js";
+} from "./catalog/discovery.js";
+import type { WorkerCatalog } from "./catalog/definition.js";
+import { applyOrchestratorContract } from "./parent/contract.js";
 import {
   attachProcessHost,
   createProcessHost,
@@ -16,23 +16,20 @@ import {
   detachProcessHost,
   type ProcessHost,
   type ProcessHostAttachment,
-} from "./host.js";
+} from "./parent/process-host.js";
 import {
   createStatusController,
   registerOrchestrationPresentation,
   type StatusController,
-} from "./presentation.js";
+  type WorkerStateSource,
+} from "./pi/presentation.js";
 import {
-  registerOrchestrationTools,
-  type DispatchDecision,
-} from "./tools.js";
+  classifyParentDispatches,
+  type ParentDispatchDecision,
+} from "./parent/dispatch-policy.js";
+import { registerOrchestrationTools } from "./pi/tools.js";
 
-const DISPATCH_TOOL_NAMES: ReadonlySet<string> = new Set([
-  "orchestrate",
-  "interactive_send",
-]);
-
-interface StoredDispatchDecision extends DispatchDecision {
+interface StoredDispatchDecision extends ParentDispatchDecision {
   readonly ownerSessionId: string;
 }
 
@@ -45,7 +42,7 @@ export interface OrchestrationExtensionDependencies {
   getHost?(): ProcessHost;
   destroyHost?(host: ProcessHost): Promise<void>;
   discoverCatalog?(options: DiscoverWorkerCatalogOptions): WorkerCatalog;
-  createStatusController?(runtime: ProcessHost["runtime"]): StatusController;
+  createStatusController?(workerState: WorkerStateSource): StatusController;
 }
 
 export function createOrchestrationExtension(
@@ -77,10 +74,10 @@ export function createOrchestrationExtension(
     pi.on("session_start", (_event, ctx) => {
       host ??= dependencies.getHost?.() ?? createProcessHost();
       statusController ??=
-        dependencies.createStatusController?.(host.runtime) ??
-        createStatusController(host.runtime);
+        dependencies.createStatusController?.(host.orchestration) ??
+        createStatusController(host.orchestration);
       registerOrchestrationTools(pi, {
-        runtime: host.runtime,
+        orchestration: host.orchestration,
         getCatalog: catalogFor,
         getDispatchDecision: (toolCallId) =>
           dispatchDecisions.get(toolCallId) ?? { mode: "inline" },
@@ -106,7 +103,7 @@ export function createOrchestrationExtension(
     pi.on("before_agent_start", (event, ctx) => {
       cachedCatalog = discoverCatalogFor(ctx);
       return {
-        systemPrompt: appendOrchestratorContract(
+        systemPrompt: applyOrchestratorContract(
           event.systemPrompt,
           cachedCatalog,
         ),
@@ -120,26 +117,10 @@ export function createOrchestrationExtension(
       );
       const ownerSessionId = activeBinding?.ownerSessionId;
       if (!ownerSessionId) return;
-      // Sole dispatches and homogeneous orchestrate waves detach; mixed tools stay with the
-      // current parent turn, while a wave shares one boundary for one later synthesis turn.
-      const isOrchestrateGroup =
-        toolCalls.length > 1 &&
-        toolCalls.every((toolCall) => toolCall.name === "orchestrate");
-      const synthesisGroup = isOrchestrateGroup
-        ? { id: `orchestrate:${toolCalls[0]?.id ?? "group"}`, size: toolCalls.length }
-        : undefined;
-
-      for (const toolCall of toolCalls) {
-        if (!DISPATCH_TOOL_NAMES.has(toolCall.name)) continue;
-        const mode = isOrchestrateGroup || toolCalls.length === 1
-          ? "async"
-          : "inline";
-        dispatchDecisions.set(toolCall.id, {
-          mode,
+      for (const dispatch of classifyParentDispatches(toolCalls)) {
+        dispatchDecisions.set(dispatch.toolCallId, {
+          ...dispatch.decision,
           ownerSessionId,
-          ...(toolCall.name === "orchestrate" && synthesisGroup
-            ? { synthesisGroup }
-            : {}),
         });
       }
     });

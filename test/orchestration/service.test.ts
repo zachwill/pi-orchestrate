@@ -4,45 +4,51 @@ import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import { Cause, Clock, Effect, Exit, Layer, ManagedRuntime } from "effect";
 import { TestClock } from "effect/testing";
 import {
+  createWorkerCatalog,
+  type WorkerDefinition,
+} from "../../extension/catalog/definition.js";
+import {
   MAX_WORKER_INSTRUCTIONS_LENGTH,
   MAX_WORKER_TITLE_LENGTH,
   createSequentialIdFactories,
-  createWorkerCatalog,
   type OrchestrateTaskInput,
   type RunId,
-  type WorkerDefinition,
   type WorkerId,
   type WorkerMessageDirection,
   type WorkerOutcome,
   type WorkerUsage,
-} from "../extension/domain.ts";
+} from "../../extension/orchestration/model.js";
+import {
+  OrchestrationActionRejected,
+  type OrchestrationContext,
+} from "../../extension/orchestration/admission.js";
 import {
   MAX_COMPLETED_RUN_HISTORY,
   MAX_TERMINAL_WORKER_HISTORY,
   SHUTDOWN_CLEANUP_GRACE_MS,
   Orchestration,
-  OrchestrationActionRejected,
   orchestrationLayer,
   type CompletedRun,
-  type OrchestrationContext,
   type OrchestrationService,
-} from "../extension/runtime.ts";
-import { DeliveryCoordinator } from "../extension/delivery.ts";
+} from "../../extension/orchestration/service.js";
+import { DeliveryCoordinator } from "../../extension/parent/delivery.js";
 import {
-  createProcessHostRuntimeAdapter,
+  createOrchestrationClient,
   destroyProcessHost,
   type ProcessHost,
-} from "../extension/host.ts";
+} from "../../extension/parent/process-host.js";
 import {
   ChildSessions,
+  type ChildSessionsService,
+} from "../../extension/worker/child-sessions.js";
+import {
   WorkerAgentSessionAcquisitionError,
   WorkerSessionAbortError,
   type ChildSessionOptions,
-  type ChildSessionsService,
   type WorkerSessionHandle,
   type WorkerSessionObservation,
-} from "../extension/worker-session.ts";
-import type { WorkerSettlement } from "../extension/worker-settlement.ts";
+} from "../../extension/worker/session.js";
+import type { WorkerSettlement } from "../../extension/orchestration/settlement.js";
 
 class Deferred<T = void> {
   readonly promise: Promise<T>;
@@ -376,7 +382,7 @@ function runtime(
   overrides: TestRuntimeOptions = {},
 ) {
   const { effectRuntime } = directRuntime(sessions, overrides);
-  return createProcessHostRuntimeAdapter(effectRuntime);
+  return createOrchestrationClient(effectRuntime);
 }
 
 async function expectPending(promise: Promise<unknown>): Promise<void> {
@@ -1209,7 +1215,7 @@ describe("per-worker settlement observability", () => {
   });
 });
 
-describe("runtime state observability", () => {
+describe("orchestration state observability", () => {
   test("emits owner-scoped state and snapshots usage and activity despite listener errors", async () => {
     const tracker = new PromptTracker();
     const first = new FakeHandle(
@@ -1321,7 +1327,7 @@ describe("ownership, cancellation, and shutdown", () => {
     await orchestrator.shutdown();
   });
 
-  test("rejected runtime adoption rolls ownership back for one handoff disposal", async () => {
+  test("rejected session adoption rolls ownership back for one handoff disposal", async () => {
     const tracker = new PromptTracker();
     const handle = new FakeHandle(
       "adoption-rejected",
@@ -1856,7 +1862,7 @@ describe("active-only aborts and bounded lifecycle barriers", () => {
         Layer.provideMerge(dependencies),
       ),
     );
-    const orchestrator = createProcessHostRuntimeAdapter(effectRuntime);
+    const orchestrator = createOrchestrationClient(effectRuntime);
 
     await orchestrator.orchestrate(
       context("owner", [definition("worker")]),
@@ -1866,7 +1872,7 @@ describe("active-only aborts and bounded lifecycle barriers", () => {
     await tracker.starts.waitFor(1);
     const host = Object.assign(
       {
-        runtime: orchestrator,
+        orchestration: orchestrator,
         delivery: new DeliveryCoordinator(),
       } satisfies ProcessHost,
       { effectRuntime },
@@ -1910,7 +1916,7 @@ describe("active-only aborts and bounded lifecycle barriers", () => {
         Layer.provideMerge(dependencies),
       ),
     );
-    const orchestrator = createProcessHostRuntimeAdapter(effectRuntime);
+    const orchestrator = createOrchestrationClient(effectRuntime);
     await orchestrator.orchestrate(
       context("owner", [definition("worker")]),
       task("worker"),
@@ -1922,7 +1928,7 @@ describe("active-only aborts and bounded lifecycle barriers", () => {
     const testClock = effectRuntime.runSync(Clock.Clock);
     const host = Object.assign(
       {
-        runtime: orchestrator,
+        orchestration: orchestrator,
         delivery: new DeliveryCoordinator(),
       } satisfies ProcessHost,
       { effectRuntime },
@@ -1977,7 +1983,7 @@ describe("active-only aborts and bounded lifecycle barriers", () => {
         Layer.provideMerge(dependencies),
       ),
     );
-    const orchestrator = createProcessHostRuntimeAdapter(effectRuntime);
+    const orchestrator = createOrchestrationClient(effectRuntime);
 
     await orchestrator.orchestrate(
       context("owner", [definition("worker")]),
@@ -2052,7 +2058,7 @@ describe("Effect-owned generation and cleanup supervision", () => {
         Layer.provideMerge(dependencies),
       ),
     );
-    const orchestrator = createProcessHostRuntimeAdapter(effectRuntime);
+    const orchestrator = createOrchestrationClient(effectRuntime);
 
     const completed = await orchestrator.orchestrate(
       context("owner", [definition("worker")]),
