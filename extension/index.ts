@@ -25,11 +25,11 @@ import {
 } from "./pi/presentation.js";
 import {
   classifyParentDispatches,
-  type ParentDispatchDecision,
+  type DispatchDecision,
 } from "./parent/dispatch-policy.js";
 import { registerOrchestrationTools } from "./pi/tools.js";
 
-interface StoredDispatchDecision extends ParentDispatchDecision {
+interface StoredDispatchDecision extends DispatchDecision {
   readonly ownerSessionId: string;
 }
 

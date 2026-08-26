@@ -38,4 +38,3 @@ describe("supported tools and worker catalog", () => {
     expect(findWorkerByName(catalog, "missing")).toBeUndefined();
   });
 });
-

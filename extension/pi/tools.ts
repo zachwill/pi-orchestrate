@@ -33,6 +33,7 @@ import type {
   SettlementListener,
   WorkerRunResult,
 } from "../orchestration/service.js";
+import type { DispatchDecision } from "../parent/dispatch-policy.js";
 import type { OrchestrationClient } from "../parent/process-host.js";
 import {
   interactiveCloseToolRenderer,
@@ -99,14 +100,6 @@ const interactiveCloseSchema = Type.Object(
   STRICT_OBJECT,
 );
 
-export interface DispatchDecision {
-  readonly mode: "async" | "inline";
-  readonly synthesisGroup?: {
-    readonly id: string;
-    readonly size: number;
-  };
-}
-
 export interface OrchestrationToolDependencies {
   readonly orchestration: OrchestrationClient;
   getCatalog(ctx: ExtensionContext): WorkerCatalog;
@@ -169,7 +162,7 @@ export function registerOrchestrationTools(
     name: "worker_status",
     label: "Worker Status",
     description:
-      "Diagnostics and recovery only: inspect trusted catalog entries, catalog diagnostics, and this session's runtime state. Never poll for completion.",
+      "Diagnostics and recovery only: inspect trusted catalog entries, catalog diagnostics, and this session's orchestration state. Never poll for completion.",
     promptSnippet: "Inspect owned worker state for diagnostics or recovery",
     promptGuidelines: [
       "Use worker_status only for diagnostics or recovery; never poll it for completion.",

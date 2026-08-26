@@ -22,7 +22,7 @@ const FailureStage = Schema.Literals([
   "cancellation",
 ]);
 
-/** Canonical schema for settlements written and persisted by the current runtime. */
+/** Canonical schema for settlements written and persisted by orchestration. */
 export const WorkerSettlement = Schema.Struct({
   eventId: Schema.String,
   sequence: PositiveInteger,

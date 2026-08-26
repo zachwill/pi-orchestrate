@@ -64,8 +64,8 @@ export class DeliveryCoordinator implements DeliveryService {
   private readonly pendingSettlements: WorkerSettlement[] = [];
   private readonly flushingOwners = new Set<string>();
   private readonly synthesisGroups = new Map<string, SynthesisGroupState>();
-  // Runtime settlement sequences are process-scoped and monotonic across owners,
-  // so one watermark is valid.
+  // Orchestration settlement sequences are process-scoped and monotonic across
+  // owners, so one watermark is valid.
   private highestAcceptedSequence = 0;
 
   bind(binding: ParentBinding): void {

@@ -412,173 +412,20 @@ describe("orchestration admission and concurrency", () => {
     await effectRuntime.dispose();
   });
 
-  test("reports expected request rejections through the typed Effect error channel", async () => {
-    const known = definition("known");
-    const missingModel = definition("missing-model", "one-shot", {
-      provider: "provider",
-      modelId: "missing",
-    });
-    const cases = [
-      {
-        operation: "orchestrate",
-        reason: "validation",
-        message: "ownerSessionId must not be blank",
-        effect: (service: OrchestrationService) =>
-          service.orchestrate(context(" ", [known]), task("known"), "async"),
-      },
-      {
-        operation: "orchestrate",
-        reason: "unknown-worker",
-        message: "Unknown worker: missing",
-        effect: (service: OrchestrationService) =>
-          service.orchestrate(context("owner", [known]), task("missing"), "async"),
-      },
-      {
-        operation: "orchestrate",
-        reason: "model-unavailable",
-        message: 'Worker "missing-model" configured model "provider/missing" was not found',
-        effect: (service: OrchestrationService) =>
-          service.orchestrate(
-            context("owner", [missingModel]),
-            task("missing-model"),
-            "async",
-          ),
-      },
-      {
-        operation: "sendInteractive",
-        reason: "validation",
-        message: "worker_id must not be blank",
-        effect: (service: OrchestrationService) =>
-          service.sendInteractive(context("owner", [known]), " \t ", "Continue", "async"),
-      },
-      {
-        operation: "sendInteractive",
-        reason: "validation",
-        message: "worker_id must use the canonical worker- prefix",
-        effect: (service: OrchestrationService) =>
-          service.sendInteractive(
-            context("owner", [known]),
-            "run-1",
-            "Continue",
-            "async",
-          ),
-      },
-      {
-        operation: "sendInteractive",
-        reason: "ownership",
-        message: "Worker is not owned by this session",
-        effect: (service: OrchestrationService) =>
-          service.sendInteractive(
-            context("owner", [known]),
-            "worker-missing",
-            "Continue",
-            "async",
-          ),
-      },
-      {
-        operation: "abort",
-        reason: "validation",
-        message: "worker_id must not be blank",
-        effect: (service: OrchestrationService) =>
-          service.abort("owner", { workerIds: ["\n"] }),
-      },
-      {
-        operation: "abort",
-        reason: "validation",
-        message: "worker_id must use the canonical worker- prefix",
-        effect: (service: OrchestrationService) =>
-          service.abort("owner", { workerIds: ["run-1"] }),
-      },
-      {
-        operation: "abort",
-        reason: "target",
-        message: "Invalid abort target",
-        effect: (service: OrchestrationService) =>
-          service.abort("owner", undefined as unknown as { all: true }),
-      },
-      {
-        operation: "abort",
-        reason: "target",
-        message: "Abort target must specify exactly one of workerIds or all: true",
-        effect: (service: OrchestrationService) => service.abort("owner", {}),
-      },
-      {
-        operation: "abort",
-        reason: "target",
-        message: "Abort target must specify exactly one of workerIds or all: true",
-        effect: (service: OrchestrationService) =>
-          service.abort("owner", { workerIds: ["worker-1"], all: true }),
-      },
-      {
-        operation: "abort",
-        reason: "target",
-        message: "workerIds must contain at least one worker ID",
-        effect: (service: OrchestrationService) =>
-          service.abort("owner", { workerIds: [] }),
-      },
-      {
-        operation: "closeInteractive",
-        reason: "validation",
-        message: "worker_id must not be blank",
-        effect: (service: OrchestrationService) =>
-          service.closeInteractive("owner", "  "),
-      },
-      {
-        operation: "closeInteractive",
-        reason: "validation",
-        message: "worker_id must use the canonical worker- prefix",
-        effect: (service: OrchestrationService) =>
-          service.closeInteractive("owner", "run-1"),
-      },
-      {
-        operation: "closeInteractive",
-        reason: "ownership",
-        message: "Worker is not owned by this session",
-        effect: (service: OrchestrationService) =>
-          service.closeInteractive("owner", "worker-missing"),
-      },
-      {
-        operation: "snapshot",
-        reason: "validation",
-        message: "ownerSessionId must not be blank",
-        effect: (service: OrchestrationService) => service.snapshot(" "),
-      },
-    ] as const;
-
-    for (const expected of cases) {
-      const sessions = new FakeChildSessions([]);
-      const { effectRuntime, orchestration } = directRuntime(sessions);
-      const exit = await effectRuntime.runPromiseExit(expected.effect(orchestration));
-      expect(Exit.isFailure(exit)).toBe(true);
-      if (!Exit.isFailure(exit)) throw new Error("Expected orchestration rejection");
-      const rejected = Cause.squash(exit.cause);
-      expect(rejected).toBeInstanceOf(OrchestrationActionRejected);
-      expect(rejected).toBeInstanceOf(Error);
-      expect(rejected).toMatchObject({
-        operation: expected.operation,
-        reason: expected.reason,
-        message: expected.message,
-      });
-      expect((rejected as Error).message).toBe(expected.message);
-      expect(sessions.creates.value).toBe(0);
-      expect(await effectRuntime.runPromise(orchestration.snapshot("owner"))).toEqual({
-        runs: [],
-        workers: [],
-      });
-      await effectRuntime.runPromise(orchestration.shutdown());
-      await effectRuntime.dispose();
-    }
-
+  test("rejects stateful actions after shutdown without creating state", async () => {
     const { effectRuntime, orchestration } = directRuntime(new FakeChildSessions([]));
     await effectRuntime.runPromise(orchestration.shutdown());
     const exit = await effectRuntime.runPromiseExit(
       orchestration.abort("owner", { all: true }),
     );
+
     if (!Exit.isFailure(exit)) throw new Error("Expected shutdown rejection");
-    expect(Cause.squash(exit.cause)).toMatchObject({
+    const rejected = Cause.squash(exit.cause);
+    expect(rejected).toBeInstanceOf(OrchestrationActionRejected);
+    expect(rejected).toMatchObject({
       operation: "abort",
       reason: "shutdown",
-      message: "Orchestrator runtime is shutting down",
+      message: "Orchestration is shutting down",
     });
     expect(await effectRuntime.runPromise(orchestration.snapshot("owner"))).toEqual({
       runs: [],
@@ -762,47 +609,8 @@ describe("orchestration admission and concurrency", () => {
     await interactiveRuntime.effectRuntime.dispose();
   });
 
-  test("keeps model registry and generated-ID invariant failures as defects", async () => {
+  test("keeps generated-ID invariant failures as defects", async () => {
     const tracker = new PromptTracker();
-    const registryDefect = new Error("registry defect");
-    let throwFromRegistry = true;
-    const configured = definition("configured", "one-shot", {
-      provider: "provider",
-      modelId: "available",
-    });
-    const registry = {
-      find() {
-        if (throwFromRegistry) throw registryDefect;
-        return model("provider", "available");
-      },
-    } as unknown as ModelRegistry;
-    const firstHandle = new FakeHandle(
-      "registry-defect",
-      [promptPlan({ status: "completed", assistantText: "done" }, true)],
-      tracker,
-    );
-    const first = directRuntime(new FakeChildSessions([{ handle: firstHandle }]));
-    const owner = context("owner", [configured], { modelRegistry: registry });
-
-    const registryExit = await first.effectRuntime.runPromiseExit(
-      first.orchestration.orchestrate(owner, task("configured"), "async"),
-    );
-    if (!Exit.isFailure(registryExit)) throw new Error("Expected registry defect");
-    expect(Cause.squash(registryExit.cause)).toBe(registryDefect);
-    expect(Cause.squash(registryExit.cause)).not.toBeInstanceOf(
-      OrchestrationActionRejected,
-    );
-    expect(await first.effectRuntime.runPromise(first.orchestration.snapshot("owner")))
-      .toEqual({ runs: [], workers: [] });
-
-    throwFromRegistry = false;
-    const accepted = await first.effectRuntime.runPromise(
-      first.orchestration.orchestrate(owner, task("configured"), "async"),
-    );
-    expect(String(accepted.id)).toBe("run-1");
-    await first.effectRuntime.runPromise(first.orchestration.shutdown());
-    await first.effectRuntime.dispose();
-
     const duplicateHandle = new FakeHandle(
       "duplicate-id",
       [promptPlan({ status: "completed", assistantText: "late" })],

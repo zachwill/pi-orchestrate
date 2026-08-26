@@ -201,6 +201,12 @@ export interface SettledWorkerRecord extends WorkerRecord {
 export type RunMode = "async" | "inline";
 export type RunState = "running" | "complete";
 
+/** One sibling wave whose settlements share a synthesis boundary. */
+export interface SynthesisGroup {
+  readonly id: string;
+  readonly size: number;
+}
+
 export interface RunRecord {
   readonly id: RunId;
   readonly ownerSessionId: string;

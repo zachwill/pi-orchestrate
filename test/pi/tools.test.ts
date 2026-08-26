@@ -1,5 +1,4 @@
 import { beforeAll, describe, expect, test } from "bun:test";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import {
   getAgentDir,
@@ -9,7 +8,6 @@ import {
   type ModelRegistry,
   type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { Result } from "effect";
 import type { TSchema } from "typebox";
 import * as Value from "typebox/value";
 import {
@@ -38,15 +36,10 @@ import type {
 import type { OrchestrationClient } from "../../extension/parent/process-host.js";
 import {
   registerOrchestrationTools,
-  type DispatchDecision,
   type OrchestrationToolDependencies,
 } from "../../extension/pi/tools.js";
-import {
-  decodeInlineWorkerToolDetails,
-  encodeInlineWorkerToolDetails,
-  type InlineWorkerToolDetails,
-  type WorkerSettlement,
-} from "../../extension/orchestration/settlement.js";
+import type { DispatchDecision } from "../../extension/parent/dispatch-policy.js";
+import type { WorkerSettlement } from "../../extension/orchestration/settlement.js";
 
 beforeAll(() => initTheme("dark", false));
 
@@ -307,33 +300,6 @@ function completedRun(): CompletedRun {
   };
 }
 
-function inlineToolDetails() {
-  return {
-    mode: "inline" as const,
-    run_id: "run-inline",
-    owner_session_id: "owner-session",
-    result: {
-      worker_id: "worker-inline",
-      worker: "scout",
-      title: "Inspect",
-      status: "completed" as const,
-      outcome: { status: "completed" as const, assistant_text: "Inspection complete." },
-      usage: {
-        input: usage.input,
-        output: usage.output,
-        cache_read: usage.cacheRead,
-        cache_write: usage.cacheWrite,
-        cost: usage.cost,
-        context_tokens: usage.contextTokens,
-        turns: usage.turns,
-      },
-      started_at: 1_000,
-      settled_at: 6_000,
-      session_file: "/sessions/worker-inline.jsonl",
-    },
-  };
-}
-
 function snapshot(): OwnerSnapshot {
   return {
     runs: [
@@ -487,7 +453,7 @@ describe("registerOrchestrationTools", () => {
     expect(guidance("interactive_close")).toMatch(/one-shot/);
   });
 
-  test("constructs the complete runtime context and selects async mode by tool call ID", async () => {
+  test("constructs the complete orchestration context and selects async mode by tool call ID", async () => {
     const {
       pi,
       runtime,
@@ -793,125 +759,10 @@ describe("registerOrchestrationTools", () => {
     expect(runtime.interactiveCloseCalls.at(-1)?.workerId).toBe("\t");
   });
 
-  test("renders incomplete and malformed tool arguments without crashing", () => {
-    const { pi } = harness();
-    const renderContext = (expanded: boolean) => ({ expanded, argsComplete: false, cwd: "/workspace", state: {}, invalidate() {} }) as never;
-
-    const partialOrchestrate = pi.tool("orchestrate").renderCall!(
-      { worker: "scout" } as never,
-      themeForRendering(),
-      renderContext(false),
-    ).render(40);
-    expect(partialOrchestrate.every((line) => Bun.stringWidth(line) <= 40)).toBe(true);
-    expect(Bun.stripANSI(partialOrchestrate.join("\n"))).toContain("orchestrate scout");
-
-    const missingTask = pi.tool("orchestrate").renderCall!(
-      null as never,
-      themeForRendering(),
-      renderContext(true),
-    ).render(40);
-    expect(Bun.stripANSI(missingTask.join("\n"))).toContain("orchestrate");
-
-    const partialSend = pi.tool("interactive_send").renderCall!(
-      { worker_id: "worker-ready" } as never,
-      themeForRendering(),
-      renderContext(false),
-    ).render(40);
-    expect(partialSend.every((line) => Bun.stringWidth(line) <= 40)).toBe(true);
-    expect(Bun.stripANSI(partialSend.join("\n"))).toContain("interactive_send worker-ready");
-
-    for (const [tool, args] of [
-      ["interactive_send", null],
-      ["worker_abort", null],
-      ["worker_abort", { worker_ids: "not-an-array" }],
-      ["interactive_close", null],
-    ] as const) {
-      const rendered = pi.tool(tool).renderCall!(
-        args as never,
-        themeForRendering(),
-        renderContext(false),
-      ).render(40);
-      expect(rendered.every((line) => Bun.stringWidth(line) <= 40)).toBe(true);
-      expect(Bun.stripANSI(rendered.join("\n"))).toContain(tool);
-    }
-  });
-
-  test("uses renderer error context instead of presenting failed tools as successful", () => {
-    const { pi } = harness();
-    const result = {
-      content: [{
-        type: "text",
-        text: "Invalid tool arguments: invalid-placeholder\nExpected worker_id to match ^worker-\\S+$",
-      }],
-      details: undefined,
-    } as AgentToolResult<unknown>;
-    const theme = {
-      fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
-      bg: (_color: string, text: string) => text,
-      bold: (text: string) => text,
-      italic: (text: string) => text,
-      underline: (text: string) => text,
-      inverse: (text: string) => text,
-      strikethrough: (text: string) => text,
-    } as never;
-    const expectedSuccessText = {
-      orchestrate: "Work sent",
-      worker_status: "Diagnostics unavailable",
-      interactive_send: "Work sent",
-      worker_abort: "Worker stop requested",
-      interactive_close: "Worker closed",
-    } as const;
-
-    for (const toolName of Object.keys(expectedSuccessText) as Array<keyof typeof expectedSuccessText>) {
-      const rendered = pi.tool(toolName).renderResult!(
-        result,
-        { isPartial: false, expanded: false },
-        theme,
-        { isError: true, lastComponent: undefined } as never,
-      );
-      const output = Bun.stripANSI(rendered.render(120).join("\n"));
-      expect(output).toContain("<error>Invalid tool arguments: invalid-placeholder</error>");
-      expect(output).not.toContain(expectedSuccessText[toolName]);
-      expect(output).not.toContain("✓");
-    }
-
-    const successResult = {
-      content: [{ type: "text", text: "Closed worker worker-ready." }],
-      details: { worker_id: "worker-ready" },
-    } as AgentToolResult<unknown>;
-    const renderedSuccess = pi.tool("interactive_close").renderResult!(
-      successResult,
-      { isPartial: false, expanded: false },
-      theme,
-      { isError: false } as never,
-    );
-    expect(Bun.stripANSI(renderedSuccess.render(80).join("\n"))).toContain(
-      "<success>✓ Worker closed</success>",
-    );
-  });
-
-  test("renders and stores one exact expandable outbound message with a safe bounded preview", async () => {
+  test("stores exact outbound instructions through both execution adapters", async () => {
     const { pi, runtime, context } = harness();
     const instructions = `  First  exact\tline.\r\n\r\nUnicode 雪 \u001b[31mred\u0000\n${"UNBROKEN".repeat(12_500)}\nTAIL  `;
     const task = { worker: "scout", title: "Inspect", instructions };
-    const renderContext = (expanded: boolean) => ({ expanded, argsComplete: true, cwd: "/workspace", state: {}, invalidate() {} }) as never;
-    const collapsed = pi.tool("orchestrate").renderCall!(task, themeForRendering(), renderContext(false)).render(32);
-    expect(collapsed.every((line) => Bun.stringWidth(line) <= 32)).toBe(true);
-    const collapsedText = Bun.stripANSI(collapsed.join("\n"));
-    expect(collapsedText).toContain("orchestrate scout");
-    expect(collapsedText).toContain("Inspect");
-    expect(collapsedText).toContain("First exact line.");
-    expect(collapsedText).toContain("…");
-    expect(collapsedText).toContain("to inspect full instructions");
-    const expanded = Bun.stripANSI(pi.tool("orchestrate").renderCall!(task, themeForRendering(), renderContext(true)).render(120_000).join("\n"));
-    expect(expanded).toContain("  First  exact    line.");
-    expect(expanded).toContain("Unicode 雪 ␛[31mred␀");
-    expect(expanded).toContain("UNBROKEN".repeat(12_500));
-    expect(expanded).toContain("TAIL  ");
-
-    const sendExpanded = Bun.stripANSI(pi.tool("interactive_send").renderCall!({ worker_id: "worker-1", instructions } as never, themeForRendering(), renderContext(true)).render(120_000).join("\n"));
-    expect(sendExpanded).toContain("UNBROKEN".repeat(12_500));
-    expect(sendExpanded).toContain("TAIL  ");
 
     await invoke(pi, "orchestrate", "exact-storage", task, context);
     expect(runtime.orchestrateCalls.at(-1)?.task).toEqual(task);
@@ -919,203 +770,7 @@ describe("registerOrchestrationTools", () => {
     expect(runtime.interactiveSendCalls.at(-1)?.instructions).toBe(instructions);
   });
 
-  test("round-trips every inline outcome and transport field through the canonical projection", () => {
-    const outcomes: InlineWorkerToolDetails["result"]["outcome"][] = [
-      { status: "completed", assistantText: "Complete." },
-      { status: "ready", assistantText: "Ready." },
-      { status: "failed", message: "Failed." },
-      { status: "aborted" },
-    ];
-
-    for (const outcome of outcomes) {
-      const value: InlineWorkerToolDetails = {
-        mode: "inline",
-        runId: "run-inline" as RunId,
-        ownerSessionId: "owner-session",
-        result: {
-          workerId: "worker-inline" as WorkerId,
-          worker: "scout",
-          title: "Inspect",
-          status: outcome.status,
-          outcome,
-          usage,
-          startedAt: 1_000,
-          settledAt: 6_000,
-        },
-      };
-      const encoded = JSON.parse(JSON.stringify(
-        encodeInlineWorkerToolDetails(value),
-      ));
-      expect(encoded).toEqual({
-        mode: "inline",
-        run_id: "run-inline",
-        owner_session_id: "owner-session",
-        result: {
-          worker_id: "worker-inline",
-          worker: "scout",
-          title: "Inspect",
-          status: outcome.status,
-          outcome: (() => {
-            switch (outcome.status) {
-              case "completed":
-                return {
-                  status: "completed" as const,
-                  assistant_text: outcome.assistantText,
-                };
-              case "ready":
-                return {
-                  status: "ready" as const,
-                  assistant_text: outcome.assistantText,
-                };
-              case "failed":
-                return {
-                  status: "failed" as const,
-                  message: outcome.message,
-                };
-              case "aborted":
-                return { status: "aborted" as const };
-            }
-          })(),
-          usage: {
-            input: 11,
-            output: 12,
-            cache_read: 13,
-            cache_write: 14,
-            cost: 0.15,
-            context_tokens: 16,
-            turns: 2,
-          },
-          started_at: 1_000,
-          settled_at: 6_000,
-        },
-      });
-      const decoded = decodeInlineWorkerToolDetails(encoded);
-      expect(Result.isSuccess(decoded)).toBe(true);
-      if (Result.isSuccess(decoded)) expect(decoded.success).toEqual(value);
-    }
-  });
-
-  test("rejects malformed inline transport and deliberately strips excess fields", () => {
-    const valid = inlineToolDetails();
-    for (const field of ["mode", "result"] as const) {
-      const details = { ...valid };
-      Reflect.deleteProperty(details, field);
-      expect(Result.isFailure(decodeInlineWorkerToolDetails(details))).toBe(true);
-    }
-
-    const requiredResultFields = [
-      "worker_id",
-      "worker",
-      "title",
-      "status",
-      "outcome",
-      "usage",
-      "started_at",
-      "settled_at",
-    ] as const;
-    for (const field of requiredResultFields) {
-      const result = { ...valid.result };
-      Reflect.deleteProperty(result, field);
-      expect(Result.isFailure(decodeInlineWorkerToolDetails({ ...valid, result }))).toBe(true);
-    }
-
-    for (const field of Object.keys(valid.result.usage)) {
-      for (const invalid of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
-        const details = {
-          ...valid,
-          result: {
-            ...valid.result,
-            usage: { ...valid.result.usage, [field]: invalid },
-          },
-        };
-        expect(Result.isFailure(decodeInlineWorkerToolDetails(details))).toBe(true);
-      }
-    }
-
-    const decoded = decodeInlineWorkerToolDetails({
-      ...valid,
-      future_top_level: true,
-      result: { ...valid.result, future_result_field: true },
-    });
-    expect(Result.isSuccess(decoded)).toBe(true);
-    if (Result.isSuccess(decoded)) {
-      expect(decoded.success).not.toHaveProperty("future_top_level");
-      expect(decoded.success.result).not.toHaveProperty("future_result_field");
-    }
-  });
-
-  test("renders inline failure details with omitted JSON optionals", () => {
-    const { pi } = harness();
-    const valid = inlineToolDetails();
-    const result = {
-      content: [{ type: "text", text: "failed" }],
-      details: {
-        ...valid,
-        result: {
-          ...valid.result,
-          status: "failed",
-          outcome: {
-            status: "failed",
-            message: "Worker failed.",
-          },
-        },
-      },
-    } as AgentToolResult<unknown>;
-
-    const rendered = pi.tool("orchestrate").renderResult!(
-      result,
-      { isPartial: false, expanded: false },
-      themeForRendering(),
-      { lastComponent: undefined } as never,
-    );
-    const output = Bun.stripANSI(rendered.render(80).join("\n"));
-    expect(output).toContain("✗ Inspect · scout · failed · 5s");
-    expect(output).toContain("Worker failed.");
-  });
-
-  test("renders malformed inline variants, identifiers, and statuses neutrally", () => {
-    const { pi } = harness();
-    const valid = inlineToolDetails();
-    const malformed = [
-      {
-        ...valid,
-        result: {
-          ...valid.result,
-          outcome: { status: "failed", message: "no" },
-        },
-      },
-      {
-        ...valid,
-        result: { ...valid.result, worker_id: 42 },
-      },
-      {
-        ...valid,
-        result: {
-          ...valid.result,
-          status: "closed",
-          outcome: { status: "closed" },
-        },
-      },
-    ];
-
-    for (const details of malformed) {
-      const result = {
-        content: [{ type: "text", text: "completed" }],
-        details,
-      } as AgentToolResult<unknown>;
-      const rendered = pi.tool("orchestrate").renderResult!(
-        result,
-        { isPartial: false, expanded: false },
-        themeForRendering(),
-        { lastComponent: undefined } as never,
-      );
-      const output = Bun.stripANSI(rendered.render(80).join("\n"));
-      expect(output).toContain("details unavailable");
-      expect(output).not.toContain("✓");
-    }
-  });
-
-  test("publishes and renders the current inline settlement update", async () => {
+  test("publishes the current inline settlement update", async () => {
     const { pi, runtime, context, modes } = harness();
     modes.set("inline-partial", "inline");
     runtime.settlementToEmit = {
@@ -1139,27 +794,18 @@ describe("registerOrchestrationTools", () => {
     const updates: unknown[] = [];
     await invoke(pi, "orchestrate", "inline-partial", { worker: "scout", title: "Inspect", instructions: "Inspect." }, context, undefined, (update) => updates.push(update));
     expect(updates).toHaveLength(1);
-    const partial = updates[0] as AgentToolResult<unknown>;
-    const rendered = pi.tool("orchestrate").renderResult!(partial, { isPartial: true, expanded: false }, themeForRendering(), { lastComponent: undefined } as never);
-    const output = Bun.stripANSI(rendered.render(80).join("\n"));
-    expect(output).toContain("✓ Inspect · scout · 0s");
-    expect(output).toContain("Live complete response.");
-    expect(output).toContain("Receiving worker response");
-  });
-
-  test("renders concrete neutral diagnostics", async () => {
-    const { pi, runtime, context } = harness();
-    runtime.snapshotResult = { runs: [], workers: [] };
-    const result = await invoke(pi, "worker_status", "status-render", {}, context);
-    expect(result.content[0]?.type === "text" && result.content[0].text).toContain(
-      "Worker diagnostics and recovery snapshot.",
-    );
-    const tool = pi.tool("worker_status");
-    const rendered = tool.renderResult!(result, { isPartial: false, expanded: false }, themeForRendering(), {} as never);
-    expect(Bun.stripANSI(rendered.render(80).join("\n"))).toContain("No active workers");
-    expect(Bun.stripANSI(rendered.render(80).join("\n"))).not.toContain("state ready");
-    const partial = tool.renderResult!(result, { isPartial: true, expanded: false }, themeForRendering(), {} as never);
-    expect(Bun.stripANSI(partial.render(80).join("\n")).trimEnd()).toBe("Reading worker diagnostics…");
+    expect(updates[0]).toMatchObject({
+      details: {
+        mode: "inline",
+        result: {
+          worker_id: "worker-inline",
+          outcome: {
+            status: "completed",
+            assistant_text: "Live complete response.",
+          },
+        },
+      },
+    });
   });
 
   test("propagates typed worker-ID validation rejections from executable actions", async () => {

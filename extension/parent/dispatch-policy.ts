@@ -1,19 +1,18 @@
+import type { SynthesisGroup } from "../orchestration/model.js";
+
 export interface ParentToolCall {
   readonly id: string;
   readonly name: string;
 }
 
-export interface ParentDispatchDecision {
+export interface DispatchDecision {
   readonly mode: "async" | "inline";
-  readonly synthesisGroup?: {
-    readonly id: string;
-    readonly size: number;
-  };
+  readonly synthesisGroup?: SynthesisGroup;
 }
 
 export interface ClassifiedParentDispatch {
   readonly toolCallId: string;
-  readonly decision: ParentDispatchDecision;
+  readonly decision: DispatchDecision;
 }
 
 const DISPATCH_TOOL_NAMES: ReadonlySet<string> = new Set([
@@ -21,6 +20,10 @@ const DISPATCH_TOOL_NAMES: ReadonlySet<string> = new Set([
   "interactive_send",
 ]);
 
+// Sole dispatches and homogeneous orchestrate waves detach so the parent turn can
+// end while work continues. Mixed tools stay inline because their shared parent
+// turn still has sibling work; one wave boundary defers one synthesis turn until
+// every admitted member has settled.
 export function classifyParentDispatches(
   toolCalls: readonly ParentToolCall[],
 ): readonly ClassifiedParentDispatch[] {

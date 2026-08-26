@@ -1479,6 +1479,8 @@ function makeSettlement(
   }
   const sequence = draft.settlementSequence + 1;
   draft.settlementSequence = sequence;
+  // Persisted generation records this authority epoch for reconstruction and
+  // diagnostics.
   const settlement = createWorkerSettlement({
     sequence,
     generation: worker.workerEpoch,
@@ -1659,7 +1661,7 @@ function openDecision(
     : rejected(
         operation,
         "shutdown",
-        "Orchestrator runtime is shutting down",
+        "Orchestration is shutting down",
       );
 }
 

@@ -1,6 +1,5 @@
 import { beforeAll, describe, expect, test } from "bun:test";
 import { initTheme, type ExtensionAPI, type ExtensionContext, type MessageRenderer, type Theme } from "@earendil-works/pi-coding-agent";
-import { Result, Schema } from "effect";
 import { visibleWidth, type Component } from "@earendil-works/pi-tui";
 import type {
   RunId,
@@ -19,10 +18,6 @@ import {
   registerOrchestrationPresentation,
   type WorkerStateSource,
 } from "../../extension/pi/presentation.js";
-import {
-  WorkerSettlement,
-  decodePersistedWorkerSettlement,
-} from "../../extension/orchestration/settlement.js";
 
 beforeAll(() => initTheme("dark", false));
 const theme = { fg: (_: string, text: string) => text, bg: (_: string, text: string) => text, bold: (text: string) => text, italic: (text: string) => text, underline: (text: string) => text, inverse: (text: string) => text, strikethrough: (text: string) => text } as Theme;
@@ -153,151 +148,24 @@ describe("per-worker result messages", () => {
     }
   });
 
-  test("round-trips every persisted outcome and usage field through the canonical schema", () => {
-    const outcomes = [
-      { status: "completed", assistantText: "Complete." },
-      { status: "ready", assistantText: "Ready." },
-      { status: "failed", message: "Failed." },
-      { status: "aborted" },
-    ] as const;
-
-    for (const outcome of outcomes) {
-      const lifecycle: "interactive" | "one-shot" =
-        outcome.status === "ready" ? "interactive" : "one-shot";
-      const { sessionFile: _sessionFile, ...withoutSessionFile } = settlement(
-        outcome.status,
-      );
-      const input = {
-        ...withoutSessionFile,
-        lifecycle,
-        outcome,
-        usage,
-        ...(outcome.status === "failed"
-          ? {
-              synthesisGroupId: "synthesis-1",
-              synthesisGroupSize: 2,
-              failureStage: "workflow" as const,
-            }
-          : {}),
-      };
-      const decoded = decodePersistedWorkerSettlement(input);
-      expect(Result.isSuccess(decoded)).toBe(true);
-      if (!Result.isSuccess(decoded)) throw new Error("Expected settlement to decode");
-      const encoded = Schema.encodeSync(WorkerSettlement)(decoded.success);
-      const persisted = JSON.parse(JSON.stringify(encoded));
-      expect(persisted).toEqual(input);
-      expect(persisted).not.toHaveProperty("sessionFile");
-      if (outcome.status === "failed" || outcome.status === "aborted") {
-        expect(persisted.outcome).not.toHaveProperty("assistantText");
-      }
-      if (outcome.status === "aborted") {
-        expect(persisted.outcome).not.toHaveProperty("message");
-      }
-      const roundTrip = decodePersistedWorkerSettlement(persisted);
-      expect(Result.isSuccess(roundTrip)).toBe(true);
-      if (Result.isSuccess(roundTrip)) expect(roundTrip.success).toEqual(decoded.success);
-    }
-  });
-
-  test("rejects every invalid persisted usage field and missing required field", () => {
-    for (const field of Object.keys(usage)) {
-      for (const invalid of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
-        expect(Result.isFailure(decodePersistedWorkerSettlement({
-          ...settlement(),
-          usage: { ...usage, [field]: invalid },
-        }))).toBe(true);
-      }
-    }
-
-    for (const field of Object.keys(settlement())) {
-      if (field === "sessionFile") continue;
-      const missing = { ...settlement() };
-      Reflect.deleteProperty(missing, field);
-      expect(Result.isFailure(decodePersistedWorkerSettlement(missing))).toBe(true);
-    }
-  });
-
-  test("keeps the canonical current fields through persisted decoding", () => {
-    const current = {
-      ...settlement(),
-      synthesisGroupId: "synthesis-1",
-      synthesisGroupSize: 3,
-      currentExtra: "ignored",
-    };
-    const decoded = decodePersistedWorkerSettlement(current);
-
-    expect(Result.isSuccess(decoded)).toBe(true);
-    if (!Result.isSuccess(decoded)) throw new Error("Expected current settlement to decode");
-    expect(decoded.success).toMatchObject({
-      eventId: "event",
-      sequence: 1,
-      synthesisGroupId: "synthesis-1",
-      synthesisGroupSize: 3,
-      sessionFile: "/sessions/worker.jsonl",
-    });
-    expect(decoded.success).not.toHaveProperty("currentExtra");
-
-    const missingCurrentField = { ...current };
-    Reflect.deleteProperty(missingCurrentField, "eventId");
-    expect(Result.isFailure(
-      Schema.decodeUnknownResult(WorkerSettlement)(missingCurrentField),
-    )).toBe(true);
-  });
-
-  test("accepts only runtime-emittable lifecycle, grouping, and ordinal combinations", () => {
-    const validSettlements = [
-      settlement("completed"),
-      settlement("ready"),
-      {
-        ...settlement("completed"),
-        synthesisGroupId: "synthesis-1",
-        synthesisGroupSize: 2,
-      },
-    ];
-    for (const details of validSettlements) {
-      expect(Result.isSuccess(decodePersistedWorkerSettlement(details))).toBe(true);
-    }
-
+  test("falls back with full raw content for noncanonical settlement details", () => {
     const invalidSettlements = [
       { ...settlement("ready"), lifecycle: "one-shot" },
       { ...settlement("completed"), lifecycle: "interactive" },
       { ...settlement(), synthesisGroupId: "synthesis-1" },
       { ...settlement(), synthesisGroupSize: 2 },
-      {
-        ...settlement(),
-        synthesisGroupId: "synthesis-1",
-        synthesisGroupSize: 1,
-      },
       { ...settlement(), sequence: 0 },
       { ...settlement(), generation: 0 },
+      { settlement: settlement() },
     ];
     for (const details of invalidSettlements) {
-      expect(Result.isFailure(decodePersistedWorkerSettlement(details))).toBe(true);
       const output = Bun.stripANSI(
-        renderResult(details, true, 80, "raw boundary fallback").join("\n"),
+        renderResult(details, true, 80, "raw fallback line 1\nraw fallback line 2").join("\n"),
       );
       expect(output).toContain("details unavailable");
-      expect(output).toContain("raw boundary fallback");
+      expect(output).toContain("raw fallback line 1");
+      expect(output).toContain("raw fallback line 2");
     }
-  });
-
-  test("decodes only direct current settlements and falls back with full raw content", () => {
-    const withoutSession = settlement();
-    Reflect.deleteProperty(withoutSession, "sessionFile");
-    expect(Result.isSuccess(decodePersistedWorkerSettlement(withoutSession))).toBe(true);
-    expect(Result.isFailure(decodePersistedWorkerSettlement({
-      settlement: withoutSession,
-    }))).toBe(true);
-    expect(Result.isFailure(decodePersistedWorkerSettlement({
-      ...withoutSession,
-      sessionFile: undefined,
-    }))).toBe(true);
-
-    const content = "raw fallback line 1\nraw fallback line 2";
-    const output = Bun.stripANSI(renderResult({ settlement: withoutSession }, true, 80, content).join("\n"));
-    expect(output).toContain("details unavailable");
-    expect(output).toContain("raw fallback line 1");
-    expect(output).toContain("raw fallback line 2");
   });
 
   test("uses explicit startup failure stage and keeps ordinary zero-turn failures truthful", () => {

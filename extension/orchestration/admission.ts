@@ -12,6 +12,7 @@ import {
   OrchestrateTaskInput,
   WorkerId,
   type RunMode,
+  type SynthesisGroup,
 } from "./model.js";
 
 /** Everything one orchestration request needs from its owning parent session. */
@@ -24,10 +25,7 @@ export interface OrchestrationContext {
   readonly catalog: WorkerCatalog;
   readonly parentModel?: Model<Api>;
   readonly modelRegistry: ModelRegistry;
-  readonly synthesisGroup?: {
-    readonly id: string;
-    readonly size: number;
-  };
+  readonly synthesisGroup?: SynthesisGroup;
 }
 
 export interface AbortTarget {
