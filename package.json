@@ -1,6 +1,6 @@
 {
   "name": "@zachwill/pi-orchestrate",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "type": "module",
   "description": "Concurrent worker orchestration for Pi",
   "exports": {},
