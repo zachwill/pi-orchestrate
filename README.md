@@ -1,8 +1,10 @@
 # Pi Orchestrate
 
-[`@zachwill/pi-orchestrate`](https://www.npmjs.com/package/@zachwill/pi-orchestrate) gives a Pi session direct child sessions it can delegate work to. The parent remains responsible for the task while workers receive bounded briefs, run independently, and return their results to that parent.
+[`@zachwill/pi-orchestrate`](https://www.npmjs.com/package/@zachwill/pi-orchestrate) lets a Pi session delegate work to direct child sessions.
 
-The parent is the orchestration boundary. Workers do not coordinate with each other or create descendant Pi workers.
+- Each worker gets a focused brief and a separate conversation.
+- Workers run independently and return their results to the parent.
+- Only the parent can delegate; workers cannot create more workers.
 
 ## The model
 
