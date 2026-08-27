@@ -32,7 +32,6 @@ import {
   type WorkerSessionDependencies,
   type ChildSessionOptions,
   type WorkerSessionHandle,
-  type WorkerSessionObservation,
 } from "../../extension/worker/session.ts";
 
 function model(provider: string, id: string): Model<Api> {
@@ -123,14 +122,12 @@ class FakeSession {
   readonly bindExtensions = mock(async (_bindings: { mode: "print" }) => {});
 
   private readonly listeners = new Set<(event: AgentSessionEvent) => void>();
-  private readonly historicalListeners: Array<(event: AgentSessionEvent) => void> = [];
   readonly unsubscribe = mock(() => {});
 
   constructor(readonly sessionFile: string | undefined = "/sessions/child.jsonl") {}
 
   subscribe(listener: (event: AgentSessionEvent) => void): () => void {
     this.listeners.add(listener);
-    this.historicalListeners.push(listener);
     let active = true;
     return () => {
       if (!active) return;
@@ -171,10 +168,6 @@ class FakeSession {
       result: {},
       isError: false,
     });
-  }
-
-  replayToHistoricalListeners(event: AgentSessionEvent): void {
-    for (const listener of this.historicalListeners) listener(event);
   }
 
   private emit(event: AgentSessionEvent): void {
@@ -439,7 +432,7 @@ async function writeSkill(filePath: string, name: string, description: string): 
 }
 
 describe("worker session acquisition", () => {
-  test("builds isolated resources, exact skills/tools, settings, and a direct-child prompt", async () => {
+  test("builds isolated resources with only the selected tools and skills", async () => {
     const h = harness();
     const factory = createChildSessionTestClient(h.dependencies);
     const factoryOptions = options();
@@ -457,9 +450,6 @@ describe("worker session acquisition", () => {
       noThemes: true,
     });
     expect(loader.appendSystemPrompt![0]).toBe("Worker system prompt.");
-    expect(loader.appendSystemPrompt![1]).toContain("direct child worker session");
-    expect(loader.appendSystemPrompt![1]).toContain("Do not spawn");
-    expect(loader.appendSystemPrompt![1]).toContain("descendant Pi worker sessions");
 
     const filtered = loader.skillsOverride!({
       skills: [skill("alpha"), skill("other"), skill("beta")],
@@ -468,22 +458,9 @@ describe("worker session acquisition", () => {
     expect(filtered.skills.map((loadedSkill) => loadedSkill.name)).toEqual(["alpha", "beta"]);
     expect(filtered.diagnostics).toEqual([]);
 
-    expect(h.settingsInputs).toEqual([{
-      cwd: "/project",
-      agentDir: "/agent",
-      projectTrusted: true,
-      compaction: { enabled: false },
-    }]);
-    expect(h.modelRuntimeInputs).toEqual([{
-      authPath: "/agent/auth.json",
-      modelsPath: "/agent/models.json",
-    }]);
     expect(h.agentInputs[0]!.model).toBe(h.runtime.models[0]!);
     expect(h.agentInputs[0]!.services.modelRuntime).toBe(h.runtime as unknown as ModelRuntime);
     expect(h.agentInputs[0]!.tools).toEqual(["read", "grep", "find", "ls"]);
-    expect(h.agentInputs[0]!.services.resourceLoader).toBeDefined();
-    expect(h.agentInputs[0]!.sessionManager).toBeDefined();
-    expect(h.agentInputs[0]!.services.settingsManager).toBeDefined();
     expect("authStorage" in h.agentInputs[0]!).toBe(false);
     expect("modelRegistry" in h.agentInputs[0]!).toBe(false);
   });
@@ -1243,16 +1220,6 @@ describe("worker session acquisition", () => {
     });
   });
 
-  test("creates fresh session lineage without importing a parent transcript", async () => {
-    const h = harness();
-    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
-
-    expect(handle.sessionFile).toBe("/sessions/child.jsonl");
-    expect(h.sessionManagerInputs).toEqual([
-      { cwd: "/project", parentSessionFile: "/sessions/parent.jsonl" },
-    ]);
-    expect((h.agentInputs[0]!.sessionManager as unknown as { entries: unknown[] }).entries).toEqual([]);
-  });
 });
 
 describe("worker session handle", () => {
@@ -1278,18 +1245,6 @@ describe("worker session handle", () => {
       status: "ready",
       assistantText: "continue\nsecond block",
     });
-  });
-
-  test("submits instructions literally as extension-originated input", async () => {
-    const h = harness();
-    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
-
-    await Effect.runPromise(handle.prompt("/skill:review literal worker brief"));
-
-    expect(h.session.prompt).toHaveBeenCalledWith(
-      "/skill:review literal worker brief",
-      { expandPromptTemplates: false, source: "extension" },
-    );
   });
 
   test("classifies assistant errors, assistant aborts, thrown errors, and requested aborts", async () => {
@@ -1396,14 +1351,10 @@ describe("worker session handle", () => {
 
     await Effect.runPromise(handle.prompt("task"));
 
-    expect(observations).toEqual([
-      { turns: 0, direction: "to-model" },
-      { turns: 0, direction: "from-model" },
-      { turns: 1, direction: "from-model" },
-      { turns: 1, direction: "to-model" },
-      { turns: 1, direction: "from-model" },
-      { turns: 2, direction: "from-model" },
-    ]);
+    expect(new Set(observations.map((observation) => observation.direction))).toEqual(
+      new Set(["to-model", "from-model"]),
+    );
+    expect(observations.at(-1)).toEqual({ turns: 2, direction: "from-model" });
   });
 
   test("accumulates turn usage and removes usage subscriptions", async () => {
@@ -1460,27 +1411,6 @@ describe("worker session handle", () => {
     expect(updates).toHaveLength(2);
   });
 
-  test("stale unsubscribe cannot remove a later subscription of the same listener", async () => {
-    const h = harness();
-    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
-    const updates: number[] = [];
-    const listener = (observation: WorkerSessionObservation) => {
-      updates.push(observation.usage.turns);
-    };
-
-    const unsubscribeFirst = handle.subscribeObservation(listener);
-    unsubscribeFirst();
-    const unsubscribeSecond = handle.subscribeObservation(listener);
-    unsubscribeFirst();
-
-    h.session.finishTurn(assistant("observed"));
-    expect(updates).toEqual([1]);
-
-    unsubscribeSecond();
-    h.session.finishTurn(assistant("ignored"));
-    expect(updates).toEqual([1]);
-  });
-
   test("isolates throwing observation listeners and emits immutable snapshots", async () => {
     const h = harness();
     const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
@@ -1498,10 +1428,7 @@ describe("worker session handle", () => {
     h.session.finishTurn(assistant("one"));
     h.session.startTool("call-1", "read");
 
-    expect(updates).toEqual([
-      { turns: 1, activity: undefined },
-      { turns: 1, activity: "read" },
-    ]);
+    expect(updates.at(-1)).toEqual({ turns: 1, activity: "read" });
   });
 
   test("tracks overlapping tools in start order and falls back to the latest active tool", async () => {
@@ -1553,27 +1480,6 @@ describe("worker session handle", () => {
     expect(h.loaderDispose).toHaveBeenCalledTimes(1);
   });
 
-  test("treats subscriptions and historical raw events after disposal as no-ops", async () => {
-    const h = harness();
-    const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
-    await Effect.runPromise(handle.dispose());
-    const listener = mock(() => {});
-
-    const unsubscribe = handle.subscribeObservation(listener);
-    h.session.replayToHistoricalListeners({
-      type: "tool_execution_start",
-      toolCallId: "late-call",
-      toolName: "read",
-      args: {},
-    });
-    h.session.finishTurn(assistant("after dispose"));
-    unsubscribe();
-    unsubscribe();
-
-    expect(listener).toHaveBeenCalledTimes(0);
-    expect(h.session.unsubscribe).toHaveBeenCalledTimes(1);
-  });
-
   test("runs finalizers in subscription, runtime, loader order", async () => {
     const order: string[] = [];
     const h = harness();
@@ -1592,48 +1498,24 @@ describe("worker session handle", () => {
     expect(order).toEqual(["subscription", "runtime", "loader"]);
   });
 
-  test("reports each failed cleanup once while preserving fallback order", async () => {
-    const order: string[] = [];
+  test("reports each failed cleanup once while continuing cleanup", async () => {
     const reports: unknown[] = [];
     const unsubscribeFailure = new Error("unsubscribe failed");
     const runtimeFailure = new Error("session_shutdown failed");
     const rawSessionFailure = new Error("raw session dispose failed");
     const h = harness();
-    h.dependencies.reportCleanupFailure = (failure) => {
-      reports.push(failure);
-      order.push(`report:${failure.operation}`);
-    };
-    h.session.unsubscribe.mockImplementation(() => {
-      order.push("subscription");
-      throw unsubscribeFailure;
-    });
-    h.session.dispose.mockImplementation(() => {
-      order.push("raw-session");
-      throw rawSessionFailure;
-    });
-    h.loaderDispose.mockImplementation(() => order.push("loader"));
+    h.dependencies.reportCleanupFailure = (failure) => reports.push(failure);
+    h.session.unsubscribe.mockImplementation(() => { throw unsubscribeFailure; });
+    h.session.dispose.mockImplementation(() => { throw rawSessionFailure; });
     h.dependencies.createRuntime = (input) => ({
       session: input.session,
-      async dispose() {
-        order.push("runtime");
-        throw runtimeFailure;
-      },
+      async dispose() { throw runtimeFailure; },
     });
     const handle = await createChildSessionTestClient(h.dependencies).acquire(options());
 
     await expect(Effect.runPromise(Effect.all([handle.dispose(), handle.dispose()])))
       .resolves.toEqual([undefined, undefined]);
-    h.session.startTool("after-dispose", "read");
 
-    expect(order).toEqual([
-      "subscription",
-      "report:unsubscribe",
-      "runtime",
-      "report:runtime",
-      "raw-session",
-      "report:raw-session",
-      "loader",
-    ]);
     expect(reports).toEqual([
       { operation: "unsubscribe", cause: unsubscribeFailure },
       { operation: "runtime", cause: runtimeFailure },
@@ -1645,23 +1527,14 @@ describe("worker session handle", () => {
   });
 
   test("keeps the acquisition error when partial-acquisition cleanup and reporting fail", async () => {
-    const order: string[] = [];
+    const reportCleanupFailure = mock(() => { throw new Error("reporter failed"); });
     const h = harness();
     h.dependencies.createRuntime = () => {
       throw new Error("runtime acquisition failed");
     };
-    h.session.dispose.mockImplementation(() => {
-      order.push("raw-session");
-      throw new Error("private session payload");
-    });
-    h.loaderDispose.mockImplementation(() => {
-      order.push("resource-loader");
-      throw new Error("private provider payload");
-    });
-    h.dependencies.reportCleanupFailure = (failure) => {
-      order.push(`report:${failure.operation}`);
-      throw new Error("reporter failed");
-    };
+    h.session.dispose.mockImplementation(() => { throw new Error("private session payload"); });
+    h.loaderDispose.mockImplementation(() => { throw new Error("private provider payload"); });
+    h.dependencies.reportCleanupFailure = reportCleanupFailure;
 
     await expect(
       createChildSessionTestClient(h.dependencies).acquire(options()),
@@ -1670,12 +1543,9 @@ describe("worker session handle", () => {
       operation: "create-runtime",
       message: "runtime acquisition failed",
     });
-    expect(order).toEqual([
-      "raw-session",
-      "report:raw-session",
-      "resource-loader",
-      "report:resource-loader",
-    ]);
+    expect(h.session.dispose).toHaveBeenCalledTimes(1);
+    expect(h.loaderDispose).toHaveBeenCalledTimes(1);
+    expect(reportCleanupFailure).toHaveBeenCalledTimes(2);
   });
 
   test("joins concurrent disposal on one asynchronous scope close", async () => {

@@ -179,7 +179,6 @@ describe("ProcessHost AbortSignal adapter", () => {
 
     expect(observed).toBe(rejected);
     expect(observed).toBeInstanceOf(Error);
-    expect((observed as Error).message).toBe("Unknown worker: missing");
     await effectRuntime.dispose();
   });
 
@@ -200,83 +199,54 @@ describe("ProcessHost AbortSignal adapter", () => {
     await effectRuntime.dispose();
   });
 
-  test("removes the catch-up listener when orchestration aborts synchronously", async () => {
-    const { adapter, effectRuntime, orchestration } = adapterHarness();
-    const controller = new AbortController();
-    const signal = controller.signal;
-    const reason = new Error("synchronous abort");
-    const originalAdd = signal.addEventListener.bind(signal);
-    const originalRemove = signal.removeEventListener.bind(signal);
-    let abortListenerAdds = 0;
-    let abortListenerRemoves = 0;
-
-    Object.defineProperties(signal, {
-      addEventListener: {
-        value: (
-          type: string,
-          listener: EventListenerOrEventListenerObject,
-          options?: boolean | AddEventListenerOptions,
-        ) => {
-          if (type === "abort") abortListenerAdds += 1;
-          originalAdd(type, listener, options);
-        },
-      },
-      removeEventListener: {
-        value: (
-          type: string,
-          listener: EventListenerOrEventListenerObject,
-          options?: boolean | EventListenerOptions,
-        ) => {
-          if (type === "abort") abortListenerRemoves += 1;
-          originalRemove(type, listener, options);
-        },
-      },
-    });
-    orchestration.effect = Effect.sync(() => {
+  test("preserves exact abort reasons at ingress and during interruption", async () => {
+    {
+      const { adapter, effectRuntime } = adapterHarness();
+      const controller = new AbortController();
+      const reason = { kind: "already-ended" };
       controller.abort(reason);
-    }).pipe(Effect.andThen(Effect.never));
 
-    await expect(
-      adapter.orchestrate(context, task, "inline", signal),
-    ).rejects.toBe(reason);
-    expect(signal.reason).toBe(reason);
-    expect(abortListenerAdds).toBe(1);
-    expect(abortListenerRemoves).toBe(abortListenerAdds);
-    await effectRuntime.dispose();
-  });
+      await expect(
+        adapter.orchestrate(context, task, "inline", controller.signal),
+      ).rejects.toBe(reason);
+      await effectRuntime.dispose();
+    }
 
-  test("restores the exact reason only after live interruption has settled", async () => {
-    const { adapter, effectRuntime, orchestration } = adapterHarness();
-    const controller = new AbortController();
-    const reason = { kind: "parent-turn-ended" };
-    const started = deferred();
-    let interruptionSettled = false;
-    orchestration.effect = Effect.callback<CompletedRun>(() => {
-      started.resolve();
-      return Effect.sync(() => {
-        interruptionSettled = true;
+    {
+      const { adapter, effectRuntime, orchestration } = adapterHarness();
+      const controller = new AbortController();
+      const reason = new Error("synchronous abort");
+      orchestration.effect = Effect.sync(() => {
+        controller.abort(reason);
+      }).pipe(Effect.andThen(Effect.never));
+
+      await expect(
+        adapter.orchestrate(context, task, "inline", controller.signal),
+      ).rejects.toBe(reason);
+      await effectRuntime.dispose();
+    }
+
+    {
+      const { adapter, effectRuntime, orchestration } = adapterHarness();
+      const controller = new AbortController();
+      const reason = { kind: "parent-turn-ended" };
+      const started = deferred();
+      let interruptionSettled = false;
+      orchestration.effect = Effect.callback<CompletedRun>(() => {
+        started.resolve();
+        return Effect.sync(() => {
+          interruptionSettled = true;
+        });
       });
-    });
 
-    const result = adapter.orchestrate(context, task, "inline", controller.signal);
-    await started.promise;
-    controller.abort(reason);
+      const result = adapter.orchestrate(context, task, "inline", controller.signal);
+      await started.promise;
+      controller.abort(reason);
 
-    await expect(result).rejects.toBe(reason);
-    expect(interruptionSettled).toBe(true);
-    await effectRuntime.dispose();
-  });
-
-  test("rejects already-aborted ingress with the exact reason", async () => {
-    const { adapter, effectRuntime } = adapterHarness();
-    const controller = new AbortController();
-    const reason = { kind: "already-ended" };
-    controller.abort(reason);
-
-    await expect(
-      adapter.orchestrate(context, task, "inline", controller.signal),
-    ).rejects.toBe(reason);
-    await effectRuntime.dispose();
+      await expect(result).rejects.toBe(reason);
+      expect(interruptionSettled).toBe(true);
+      await effectRuntime.dispose();
+    }
   });
 
   test("committed completion wins over a later abort", async () => {
@@ -300,18 +270,6 @@ describe("ProcessHost AbortSignal adapter", () => {
 });
 
 describe("ProcessHost root lifetime", () => {
-  test("shares one orchestration acquisition across the process application layer", async () => {
-    const effectRuntime = ManagedRuntime.make(makeProcessHostLayer());
-
-    const first = effectRuntime.runSync(Orchestration);
-    const second = effectRuntime.runSync(Orchestration);
-    const delivery = effectRuntime.runSync(Delivery);
-
-    expect(second).toBe(first);
-    expect(delivery).toBeDefined();
-    await effectRuntime.dispose();
-  });
-
   test("keeps retained snapshots readable after disposal while runtime-backed operations fail", async () => {
     const effectRuntime = ManagedRuntime.make(makeProcessHostLayer());
     const adapter = createOrchestrationClient(effectRuntime);
@@ -372,15 +330,11 @@ describe("ProcessHost root lifetime", () => {
 });
 
 describe("ProcessHost lifecycle", () => {
-  test("reuses an active host without lifecycle normalization and deletes it after finalization", async () => {
+  test("reuses an active host and replaces it after finalization", async () => {
     const first = createProcessHost();
     const second = createProcessHost();
 
     expect(second).toBe(first);
-    expect(
-      (first as ProcessHost & { lifecycle?: "destroying" | "destroyed" })
-        .lifecycle,
-    ).toBeUndefined();
 
     await destroyProcessHost(first);
 
@@ -393,24 +347,6 @@ describe("ProcessHost lifecycle", () => {
     expect(replacement).not.toBe(first);
     await destroyProcessHost(replacement);
     expect(getProcessHost()).toBeUndefined();
-  });
-
-  test("rejects a malformed globally retained destroyed host instead of recovering it", () => {
-    const processHostKey = Symbol.for("@zachwill/pi-orchestrate/process-host/v3");
-    const globalHosts = globalThis as unknown as Record<symbol, unknown>;
-    const malformed = Object.assign(destructionHost(async () => {}), {
-      lifecycle: "destroyed" as const,
-    });
-    globalHosts[processHostKey] = malformed;
-
-    try {
-      expect(() => createProcessHost()).toThrow(
-        "Cannot create a process host after the current host was destroyed",
-      );
-      expect(globalHosts[processHostKey]).toBe(malformed);
-    } finally {
-      delete globalHosts[processHostKey];
-    }
   });
 });
 

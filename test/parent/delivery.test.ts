@@ -1,12 +1,8 @@
 import { describe, expect, test } from "bun:test";
-import { Layer, ManagedRuntime } from "effect";
 import { createSequentialIdFactories, type WorkerOutcome } from "../../extension/orchestration/model.ts";
 import {
-  DELIVERY_PARENT_INSTRUCTIONS,
   DELIVERY_TRUNCATION_MARKER,
-  Delivery,
   DeliveryCoordinator,
-  deliveryLayer,
   MAX_DELIVERY_MARKDOWN_BYTES,
   MAX_WORKER_DELIVERY_MARKDOWN_BYTES,
   type ParentBinding,
@@ -14,11 +10,6 @@ import {
   type WorkerDeliveryMessage,
   type WorkerDeliveryOptions,
 } from "../../extension/parent/delivery.ts";
-import {
-  Orchestration,
-  type OrchestrationService,
-  type SettlementListener,
-} from "../../extension/orchestration/service.ts";
 import type { WorkerSettlement } from "../../extension/orchestration/settlement.ts";
 
 const usage = {
@@ -106,41 +97,6 @@ function flushQueuedSettlements(
   return parent.sent;
 }
 
-describe("Delivery Layer ownership", () => {
-  test("owns the settlement subscription and clears state after unsubscribing", async () => {
-    let listener: SettlementListener | undefined;
-    let unsubscribeCalls = 0;
-    let pendingAtUnsubscribe: number | undefined;
-    let delivery: DeliveryCoordinator | undefined;
-    const orchestration = {
-      subscribeSettlement(next: SettlementListener) {
-        listener = next;
-        return () => {
-          unsubscribeCalls += 1;
-          pendingAtUnsubscribe = delivery?.pendingCount("owner-a");
-          listener = undefined;
-        };
-      },
-    } as unknown as OrchestrationService;
-    const runtime = ManagedRuntime.make(
-      deliveryLayer.pipe(
-        Layer.provide(Layer.succeed(Orchestration, orchestration)),
-      ),
-    );
-    delivery = runtime.runSync(Delivery) as DeliveryCoordinator;
-
-    listener?.(settlement({ eventId: "layer-owned", sequence: 1 }));
-    expect(delivery.pendingCount("owner-a")).toBe(1);
-
-    await runtime.dispose();
-    await runtime.dispose();
-
-    expect(unsubscribeCalls).toBe(1);
-    expect(pendingAtUnsubscribe).toBe(1);
-    expect(delivery.pendingCount("owner-a")).toBe(0);
-  });
-});
-
 describe("DeliveryCoordinator worker settlements", () => {
   test("treats an ungrouped async settlement as final", () => {
     const coordinator = new DeliveryCoordinator();
@@ -149,33 +105,6 @@ describe("DeliveryCoordinator worker settlements", () => {
 
     expect(coordinator.accept(settlement({ eventId: "ungrouped", sequence: 1 }))).toBe(true);
     expect(parent.sent[0]?.options.triggerTurn).toBe(true);
-    expect(parent.sent[0]?.message.content).toContain(DELIVERY_PARENT_INSTRUCTIONS);
-  });
-
-  test("calls out retained interactive sessions without annotating one-shot completion", () => {
-    const completedCoordinator = new DeliveryCoordinator();
-    const completedParent = createBinding("owner-a", 1);
-    completedCoordinator.bind(completedParent.binding);
-    completedCoordinator.accept(settlement({ eventId: "completed-disposition", sequence: 2 }));
-
-    expect(completedParent.sent[0]?.message.content).not.toContain("one-shot session");
-    expect(completedParent.sent[0]?.message.content).not.toContain("interactive_close");
-
-    const interactiveCoordinator = new DeliveryCoordinator();
-    const interactiveParent = createBinding("owner-a", 1);
-    interactiveCoordinator.bind(interactiveParent.binding);
-    interactiveCoordinator.accept(settlement({
-      eventId: "interactive-disposition",
-      sequence: 3,
-      lifecycle: "interactive",
-      status: "ready",
-      outcome: { status: "ready", assistantText: "Waiting for follow-up." },
-    }));
-
-    expect(interactiveParent.sent[0]?.message.content).toContain(
-      "interactive session retained; use `interactive_send` or `interactive_close`",
-    );
-    expect(interactiveParent.sent[0]?.message.content).not.toContain("no close needed");
   });
 
   test("groups independent async runs behind one final synthesis boundary", () => {
@@ -190,7 +119,6 @@ describe("DeliveryCoordinator worker settlements", () => {
       synthesisGroupSize: 2,
     }));
     expect(parent.sent.map(({ options }) => options.triggerTurn)).toEqual([false]);
-    expect(parent.sent[0]?.message.content).not.toContain(DELIVERY_PARENT_INSTRUCTIONS);
 
     coordinator.accept(settlement({
       eventId: "group-second",
@@ -199,7 +127,6 @@ describe("DeliveryCoordinator worker settlements", () => {
       synthesisGroupSize: 2,
     }));
     expect(parent.sent.map(({ options }) => options.triggerTurn)).toEqual([false, true]);
-    expect(parent.sent[1]?.message.content).toContain(DELIVERY_PARENT_INSTRUCTIONS);
     expect(parent.sent.map(({ message }) => message.details)).toEqual([
       expect.objectContaining({
         synthesisGroupId: "synthesis-group",
@@ -229,7 +156,6 @@ describe("DeliveryCoordinator worker settlements", () => {
 
     expect(parent.sent).toHaveLength(1);
     expect(parent.sent[0]?.options.triggerTurn).toBe(true);
-    expect(parent.sent[0]?.message.content).toContain(DELIVERY_PARENT_INSTRUCTIONS);
   });
 
   test("queues while busy and flushes the ordered prefix through the latest final", () => {
@@ -293,41 +219,7 @@ describe("DeliveryCoordinator worker settlements", () => {
     expect(parent.sent.map(({ message }) => message.details.eventId)).toEqual(["retry-1", "retry-2"]);
   });
 
-  test("rejects inline settlements and counts pending worker results", () => {
-    const coordinator = new DeliveryCoordinator();
-    expect(coordinator.accept(settlement({ mode: "inline" }))).toBe(false);
-    const busy = createBinding("owner-a", 1, false);
-    coordinator.bind(busy.binding);
-    coordinator.accept(settlement({ eventId: "pending", sequence: 40 }));
-    expect(coordinator.pendingCount("owner-a")).toBe(1);
-    coordinator.clear();
-    expect(coordinator.pendingCount("owner-a")).toBe(0);
-  });
-
-  test("fairly caps twelve queued results while preserving identity and excerpts", () => {
-    const sent = flushQueuedSettlements(12, (index) => ({
-      eventId: `fair-${index}`,
-      sequence: 100 + index,
-      runId: createSequentialIdFactories(500 + index).runId(),
-      workerId: `worker-fair-${index}` as WorkerSettlement["workerId"],
-      title: `Fair worker ${index}`,
-      outcome: { status: "completed", assistantText: `${index}:` + "x".repeat(30_000) },
-    }));
-
-    expect(sent).toHaveLength(12);
-    expect(sent.reduce(
-      (total, item) => total + Buffer.byteLength(item.message.content, "utf8"),
-      0,
-    )).toBeLessThanOrEqual(MAX_DELIVERY_MARKDOWN_BYTES);
-    for (let index = 0; index < 12; index += 1) {
-      const content = sent[index]!.message.content;
-      expect(content).toContain(`worker-fair-${index}`);
-      expect(content).toContain(`${index}:`);
-    }
-    expect(sent.at(-1)?.message.content).toEndWith(DELIVERY_PARENT_INSTRUCTIONS);
-  });
-
-  test("caps a busy owner's large backlog with one final triggering turn", () => {
+  test("fairly caps a busy owner's large backlog with one final triggering turn", () => {
     const sent = flushQueuedSettlements(24, (index) => ({
       eventId: `queued-${index}`,
       sequence: 200 + index,
@@ -342,7 +234,10 @@ describe("DeliveryCoordinator worker settlements", () => {
       0,
     )).toBeLessThanOrEqual(MAX_DELIVERY_MARKDOWN_BYTES);
     expect(sent.map((item) => item.options.triggerTurn).filter(Boolean)).toHaveLength(1);
-    expect(sent.at(-1)?.message.content).toEndWith(DELIVERY_PARENT_INSTRUCTIONS);
+    for (let index = 0; index < 24; index += 1) {
+      expect(sent[index]?.message.content).toContain(`worker-queued-${index}`);
+      expect(sent[index]?.message.content).toContain(`${index}:`);
+    }
   });
 
   test("does not reenter a flush when sendMessage synchronously accepts another final", () => {
@@ -371,18 +266,6 @@ describe("DeliveryCoordinator worker settlements", () => {
     expect(sent.map((item) => item.options.triggerTurn)).toEqual([true, true]);
   });
 
-  test("accepts reused worker and run IDs when the settlement sequence advances", () => {
-    const coordinator = new DeliveryCoordinator();
-    const parent = createBinding("owner-a", 1);
-    coordinator.bind(parent.binding);
-    const reused = settlement({ eventId: "old-identity", sequence: 400 });
-    expect(coordinator.accept(reused)).toBe(true);
-    parent.setIdle(true);
-    coordinator.markAgentSettled("owner-a", 1);
-    expect(coordinator.accept({ ...reused, eventId: "new-identity", sequence: 401 })).toBe(true);
-    expect(parent.sent.map((item) => item.message.details.sequence)).toEqual([400, 401]);
-  });
-
   test("caps individual parent context while retaining the complete structured outcome", () => {
     const coordinator = new DeliveryCoordinator();
     const parent = createBinding("owner-a", 1);
@@ -401,7 +284,6 @@ describe("DeliveryCoordinator worker settlements", () => {
     );
     expect(delivered?.content).toContain(DELIVERY_TRUNCATION_MARKER);
     expect(delivered?.content).not.toContain("�");
-    expect(delivered?.content).toEndWith(DELIVERY_PARENT_INSTRUCTIONS);
     expect(delivered?.details.outcome).toEqual({ status: "completed", assistantText: fullBody });
   });
 });

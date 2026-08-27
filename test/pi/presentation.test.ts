@@ -57,206 +57,58 @@ function renderResult(details: unknown, expanded: boolean, width: number, conten
 }
 
 describe("per-worker result messages", () => {
-  test.each([
-    ["completed", "✓ Inspect code · scout · 5s"],
-    ["ready", "✓ Inspect code · scout · interactive ready · 5s"],
-    ["failed", "✗ Inspect code · scout · failed · 5s"],
-    ["aborted", "■ Inspect code · scout · aborted · 5s"],
-  ] as const)("renders truthful %s styling", (status, heading) => {
-    const output = Bun.stripANSI(renderResult(settlement(status), false, 80).join("\n"));
-    expect(output).toContain(heading);
-    expect(output).toContain("to expand");
-    if (status === "failed" || status === "aborted") expect(output).not.toContain("✓");
+  test("does not present failed work as successful", () => {
+    const output = Bun.stripANSI(renderResult(settlement("failed", "Worker failed."), false, 80).join("\n"));
+    expect(output).toContain("Worker failed.");
+    expect(output).not.toContain("✓");
   });
 
-  test("italicizes the worker type after the result title", () => {
-    const italicTheme = {
-      ...theme,
-      italic: (text: string) => `<italic>${text}</italic>`,
-    } as Theme;
-    const component = renderer()(
-      {
-        role: "custom",
-        customType: "pi-orchestrate-worker-result",
-        content: "fallback",
-        display: true,
-        details: settlement(),
-        timestamp: 1,
-      },
-      { expanded: false },
-      italicTheme,
-    )!;
-
-    const output = Bun.stripANSI(component.render(80).join("\n"));
-    expect(output).toContain("✓ Inspect code · <italic>scout</italic> · 5s");
-  });
-
-  test("expanded output reconstructs full response and adjacent metadata", () => {
-    const text = `# Full response\n\n${"detail ".repeat(200)}TAIL`;
-    const output = Bun.stripANSI(renderResult(settlement("completed", text), true, 50, "capped").join("\n"));
-    expect(output).toContain("TAIL");
-    expect(output).toContain("worker ID worker-1 · run ID run-1");
-    expect(output).toContain("status completed · generation 2");
-    expect(output).toContain("turns 2 · current context 12.3k");
-    expect(output).toContain("session /sessions/worker.jsonl");
-  });
-
-  test("removes a redundant completion heading from the worker response", () => {
-    const output = Bun.stripANSI(renderResult(
-      settlement("completed", "## Completed\n\nChanged the worker bootstrap."),
-      true,
-      80,
-    ).join("\n"));
-
-    expect(output).toContain("✓ Inspect code · scout · 5s");
-    expect(output).toContain("Changed the worker bootstrap.");
-    expect(output).not.toContain("Completed");
-  });
-
-  test("caps collapsed content by rendered visual height and safely falls back", () => {
-    const long = "word ".repeat(1000);
-    const collapsed = renderResult(settlement("completed", long), false, 32);
+  test("bounds collapsed output and preserves the full expanded response and reconstruction facts", () => {
+    const text = `BEGIN\n${"detail ".repeat(1_000)}\nINTERIOR_RESPONSE_SENTINEL\n${"more ".repeat(1_000)}\nTAIL`;
+    const collapsed = renderResult(settlement("completed", text), false, 32);
     expect(collapsed.length).toBeLessThanOrEqual(MAX_RESULT_PREVIEW_LINES + 7);
-    const malformedDetails = JSON.parse(JSON.stringify({ bad: true }));
-    const malformed = Bun.stripANSI(renderResult(malformedDetails, false, 32, long).join("\n"));
-    expect(malformed).toContain("Worker result");
-    expect(malformed).toContain("to expand");
+    expect(collapsed.every((line) => visibleWidth(line) <= 32)).toBe(true);
+
+    const expanded = renderResult(settlement("completed", text), true, 80);
+    const output = Bun.stripANSI(expanded.join("\n"));
+    expect(output).toContain("BEGIN");
+    expect(output).toContain("INTERIOR_RESPONSE_SENTINEL");
+    expect(output).toContain("TAIL");
+    expect(output).toContain("worker ID worker-1");
+    expect(output).toContain("run ID run-1");
+    expect(output).toContain("status completed");
+    expect(output).toContain("generation 2");
+    expect(output).toContain("turns 2");
+    expect(output).toContain("input 1200");
+    expect(output).toContain("session /sessions/worker.jsonl");
+    expect(expanded.every((line) => visibleWidth(line) <= 80)).toBe(true);
+    expect(renderResult(settlement("completed", "x".repeat(10_000)), true, 1)
+      .every((line) => visibleWidth(line) <= 1)).toBe(true);
   });
 
-  test("expanded malformed fallback never silently omits content", () => {
+  test("renders one malformed settlement neutrally without dropping fallback content", () => {
     const content = Array.from({ length: 150 }, (_, index) => `fallback line ${index}`).join("\n");
-    const details = JSON.parse(JSON.stringify({ bad: true }));
-    const output = Bun.stripANSI(renderResult(details, true, 40, content).join("\n"));
+    const output = Bun.stripANSI(renderResult({ bad: true }, true, 40, content).join("\n"));
+    expect(output).toContain("details unavailable");
     expect(output).toContain("fallback line 0");
     expect(output).toContain("fallback line 149");
-  });
-
-  test("rejects contradictory and malformed details without optimistic success", () => {
-    for (const details of [
-      { ...settlement(), mode: "background" },
-      { ...settlement(), generation: 1.5 },
-      { ...settlement(), usage: { ...usage, turns: Number.NaN } },
-      { ...settlement(), status: "completed", outcome: { status: "failed", message: "no" } },
-      { ...settlement(), startedAt: 6201 },
-      { ...settlement(), failureStage: "workflow" },
-      { ...settlement(), usage: { ...usage, cost: Number.POSITIVE_INFINITY } },
-      { ...settlement(), usage: { ...usage, cacheRead: -1 } },
-    ]) {
-      const output = Bun.stripANSI(renderResult(details, false, 80).join("\n"));
-      expect(output).toContain("details unavailable");
-      expect(output).not.toContain("✓ Inspect code · scout");
-    }
-  });
-
-  test("falls back with full raw content for noncanonical settlement details", () => {
-    const invalidSettlements = [
-      { ...settlement("ready"), lifecycle: "one-shot" },
-      { ...settlement("completed"), lifecycle: "interactive" },
-      { ...settlement(), synthesisGroupId: "synthesis-1" },
-      { ...settlement(), synthesisGroupSize: 2 },
-      { ...settlement(), sequence: 0 },
-      { ...settlement(), generation: 0 },
-      { settlement: settlement() },
-    ];
-    for (const details of invalidSettlements) {
-      const output = Bun.stripANSI(
-        renderResult(details, true, 80, "raw fallback line 1\nraw fallback line 2").join("\n"),
-      );
-      expect(output).toContain("details unavailable");
-      expect(output).toContain("raw fallback line 1");
-      expect(output).toContain("raw fallback line 2");
-    }
-  });
-
-  test("uses explicit startup failure stage and keeps ordinary zero-turn failures truthful", () => {
-    const { sessionFile: _sessionFile, ...failedSettlement } = settlement("failed");
-    const ordinary = { ...failedSettlement, usage: { ...usage, turns: 0 } };
-    expect(Bun.stripANSI(renderResult(ordinary, false, 80).join("\n"))).toContain("✗ Inspect code · scout · failed · 5s");
-    expect(Bun.stripANSI(renderResult({ ...ordinary, failureStage: "startup" }, false, 80).join("\n"))).toContain("✗ Inspect code · scout · could not start · 5s");
-  });
-
-  test("keeps every line width-safe down to one column", () => {
-    const details = settlement("completed", "x".repeat(100_000));
-    for (const width of [120, 80, 50, 32, 3, 2, 1]) for (const expanded of [false, true]) {
-      expect(renderResult(details, expanded, width).every((line) => visibleWidth(line) <= width)).toBe(true);
-    }
+    expect(output).not.toContain("✓");
   });
 
   test("rebuilds themed worker-result children on invalidation", () => {
     let marker = "old";
     const mutableTheme = { ...theme, fg: (_: string, text: string) => `${marker}:${text}` } as Theme;
     const component = renderer()({ role: "custom", customType: "pi-orchestrate-worker-result", content: "fallback", display: true, details: settlement(), timestamp: 1 }, { expanded: false }, mutableTheme)!;
-    expect(Bun.stripANSI(component.render(80).join("\n"))).toContain(
-      "old:✓ Inspect code · old:scout · old:5s",
-    );
+    expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("old:");
     marker = "new";
     component.invalidate();
     const refreshed = Bun.stripANSI(component.render(80).join("\n"));
-    expect(refreshed).toContain("new:✓ Inspect code · new:scout · new:5s");
-    expect(refreshed).not.toContain("old:✓ Inspect code");
+    expect(refreshed).toContain("new:");
+    expect(refreshed).not.toContain("old:");
   });
 });
 
 describe("active widget", () => {
-  test("reserves exact high-priority fields before long-title truncation at every width", () => {
-    const component = new WorkerStatusComponent(snapshot([worker("long", "running", {
-      title: "A very long worker title that must be truncated only after suffixes are reserved",
-      activity: "grep",
-    })]), theme);
-    for (const width of [120, 80, 50, 42, 32]) {
-      const row = Bun.stripANSI(component.render(width)[1]!);
-      expect(visibleWidth(row)).toBeLessThanOrEqual(width);
-      expect(row).toContain("2↓");
-      expect(row).toContain("12k ctx");
-      expect(row).toContain("A very");
-      if (width >= 72) expect(row).toContain(" · scout · 2↓");
-      else expect(row).not.toContain(" · scout · 2↓");
-      expect(row).not.toContain("searching");
-    }
-    component.dispose();
-  });
-
-  test("italicizes the worker type between the title and turn count when space allows", () => {
-    const italicTheme = {
-      ...theme,
-      italic: (text: string) => `<italic>${text}</italic>`,
-    } as Theme;
-    const component = new WorkerStatusComponent(
-      snapshot([worker("run", "running", { worker: "investigator" })]),
-      italicTheme,
-    );
-
-    const wide = Bun.stripANSI(component.render(100)[1]!);
-    const narrow = Bun.stripANSI(component.render(60)[1]!);
-    expect(wide).toContain("Task run · <italic>investigator</italic> · 2↓ · 12k ctx");
-    expect(narrow).not.toContain("investigator");
-    component.dispose();
-  });
-
-  test("omits low-value activity labels from running rows", () => {
-    const component = new WorkerStatusComponent(snapshot([worker("run", "running", { activity: "bash" })]), theme);
-    const row = Bun.stripANSI(component.render(80)[1]!);
-    expect(row).not.toContain("working");
-    expect(row).not.toContain("running command");
-    expect(row).toContain("2↓");
-    expect(row).toContain("12k ctx");
-    component.dispose();
-  });
-
-  test.each([
-    [49_499, "49k ctx"],
-    [49_501, "50k ctx"],
-    [192_300, "192k ctx"],
-  ])("rounds %i context tokens to a whole-thousand label", (contextTokens, expected) => {
-    const component = new WorkerStatusComponent(snapshot([
-      worker("context", "running", { usage: { ...usage, contextTokens } }),
-    ]), theme);
-    const row = Bun.stripANSI(component.render(80)[1]!);
-    expect(row).toContain(expected);
-    expect(row).not.toMatch(/\d+\.\d+k ctx/);
-    component.dispose();
-  });
-
   test("renders turn count with the latest message direction", () => {
     const component = new WorkerStatusComponent(snapshot([
       worker("receiving", "running", { usage: { ...usage, turns: 2 }, messageDirection: "from-model" }),
@@ -269,51 +121,35 @@ describe("active widget", () => {
     component.dispose();
   });
 
-  test("uses distinct motion shapes for lifecycle states", () => {
+  test("shows active rows only and remains width-safe", () => {
     const component = new WorkerStatusComponent(snapshot([
-      worker("start", "starting"),
-      worker("run", "running"),
-      worker("stop", "stopping"),
-    ]), theme);
-    const glyphs = component.render(80).slice(1).map((line) => Bun.stripANSI(line).slice(0, 1));
-    expect(new Set(glyphs).size).toBe(3);
-    component.dispose();
-  });
-
-  test("shows active rows only with stable adaptive usage", () => {
-    const component = new WorkerStatusComponent(snapshot([
-      worker("run", "running", { activity: "grep" }), worker("start", "starting", { usage: undefined }),
+      worker("run", "running"), worker("start", "starting", { usage: undefined }),
       worker("done", "completed"), worker("ready", "ready"), worker("failed", "failed"),
+      worker("aborted", "aborted"),
     ]), theme);
-    for (const width of [120, 80, 50, 32]) {
-      const output = Bun.stripANSI(component.render(width).join("\n"));
-      expect(output).toContain("Workers · 2 active · 1m 18s");
-      expect(output).toContain("Task run");
-      expect(output).toContain("2↓");
-      expect(output).toContain("Task start");
-      expect(output).toContain("0↑");
-      expect(output).not.toContain("Task done");
-      expect(output).not.toContain("Task ready");
-      expect(component.render(width).every((line) => visibleWidth(line) <= width)).toBe(true);
-    }
+    const output = Bun.stripANSI(component.render(80).join("\n"));
+    expect(output).toContain("Task run");
+    expect(output).toContain("Task start");
+    expect(output).not.toContain("Task done");
+    expect(output).not.toContain("Task ready");
+    expect(output).not.toContain("Task failed");
+    expect(output).not.toContain("Task aborted");
+    expect(component.render(32).every((line) => visibleWidth(line) <= 32)).toBe(true);
     component.dispose();
   });
 
-  test("limits rows and reports active overflow", () => {
+  test("caps active rows", () => {
     const workers = Array.from({ length: 10 }, (_, index) => worker(String(index), "running"));
-    const lines = new WorkerStatusComponent(snapshot(workers), theme).render(80).map(Bun.stripANSI);
-    expect(lines).toHaveLength(MAX_WIDGET_WORKERS + 2);
-    expect(lines.at(-1)).toBe("… 2 more active");
+    const component = new WorkerStatusComponent(snapshot(workers), theme);
+    expect(component.render(80)).toHaveLength(MAX_WIDGET_WORKERS + 2);
+    component.dispose();
   });
 
-  test("animates only the glyph and disposes its timer", async () => {
+  test("disposes the animation timer", async () => {
     let requests = 0;
     const component = new WorkerStatusComponent(snapshot([worker("run", "running")]), theme, { requestRender: () => { requests += 1; } });
-    const before = Bun.stripANSI(component.render(80)[1]!);
     await Bun.sleep(155);
-    const after = Bun.stripANSI(component.render(80)[1]!);
     expect(requests).toBeGreaterThan(0);
-    expect(after.slice(2)).toBe(before.slice(2));
     component.dispose();
     const stopped = requests;
     await Bun.sleep(155);

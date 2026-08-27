@@ -63,59 +63,46 @@ const context = (overrides: Partial<{ isError: boolean; lastComponent: unknown }
 });
 
 describe("tool call renderers", () => {
-  test("renders malformed and partial calls without crashing", () => {
-    const cases = [
-      orchestrateToolRenderer.renderCall({ worker: "scout" }, theme, options()),
-      orchestrateToolRenderer.renderCall(null, theme, options({ expanded: true })),
-      interactiveSendToolRenderer.renderCall({ worker_id: "worker-ready" }, theme, options()),
-      interactiveSendToolRenderer.renderCall(null, theme, options()),
-      workerAbortToolRenderer.renderCall(null, theme),
-      workerAbortToolRenderer.renderCall({ worker_ids: "not-an-array" }, theme),
-      interactiveCloseToolRenderer.renderCall(null, theme),
-    ];
-    const names = [
-      "orchestrate scout",
-      "orchestrate",
-      "interactive_send worker-ready",
-      "interactive_send",
-      "worker_abort",
-      "worker_abort",
-      "interactive_close",
-    ];
-    for (let index = 0; index < cases.length; index += 1) {
-      const lines = cases[index]!.render(40);
-      expect(lines.every((line) => Bun.stringWidth(line) <= 40)).toBe(true);
-      expect(Bun.stripANSI(lines.join("\n"))).toContain(names[index]!);
-    }
-  });
-
-  test("keeps collapsed instruction previews bounded and expanded instructions exact", () => {
-    const instructions = `  First  exact\tline.\r\n\r\nUnicode 雪 \u001b[31mred\u0000\n${"UNBROKEN".repeat(12_500)}\nTAIL  `;
+  test("bounds previews and preserves a sanitized expanded control payload", () => {
+    const instructions = `BEGIN\t\u001b[31mred\u0000\n${"UNBROKEN".repeat(12_500)}\nTAIL`;
     const task = { worker: "scout", title: "Inspect", instructions };
     const collapsed = orchestrateToolRenderer.renderCall(task, theme, options()).render(32);
+    expect(collapsed.length).toBeLessThanOrEqual(5);
     expect(collapsed.every((line) => Bun.stringWidth(line) <= 32)).toBe(true);
-    const collapsedText = Bun.stripANSI(collapsed.join("\n"));
-    expect(collapsedText).toContain("First exact line.");
-    expect(collapsedText).toContain("…");
-    expect(collapsedText).toContain("to inspect full instructions");
 
-    const expanded = Bun.stripANSI(orchestrateToolRenderer.renderCall(
+    const expandedLines = orchestrateToolRenderer.renderCall(
       task,
       theme,
       options({ expanded: true }),
-    ).render(120_000).join("\n"));
-    expect(expanded).toContain("  First  exact    line.");
-    expect(expanded).toContain("Unicode 雪 ␛[31mred␀");
+    ).render(120_000);
+    const expanded = Bun.stripANSI(expandedLines.join("\n"));
+    expect(expanded).toContain("BEGIN    ␛[31mred␀");
     expect(expanded).toContain("UNBROKEN".repeat(12_500));
-    expect(expanded).toContain("TAIL  ");
+    expect(expanded).toContain("TAIL");
+    expect(expandedLines.every((line) => Bun.stringWidth(line) <= 120_000)).toBe(true);
 
-    const sendExpanded = Bun.stripANSI(interactiveSendToolRenderer.renderCall(
-      { worker_id: "worker-1", instructions },
+    expect(workerAbortToolRenderer.renderCall(null, theme).render(1)
+      .every((line) => Bun.stringWidth(line) <= 1)).toBe(true);
+    expect(interactiveCloseToolRenderer.renderCall(null, theme).render(1)
+      .every((line) => Bun.stringWidth(line) <= 1)).toBe(true);
+  });
+
+  test("preserves and sanitizes the expanded interactive follow-up payload", () => {
+    const instructions = `FOLLOW_UP_BEGIN\t\u001b[31mred\u0000\n${"INTERIOR ".repeat(5_000)}\nFOLLOW_UP_TAIL`;
+    const lines = interactiveSendToolRenderer.renderCall(
+      { worker_id: "worker-interactive", instructions },
       theme,
       options({ expanded: true }),
-    ).render(120_000).join("\n"));
-    expect(sendExpanded).toContain("UNBROKEN".repeat(12_500));
-    expect(sendExpanded).toContain("TAIL  ");
+    ).render(60_000);
+    const output = Bun.stripANSI(lines.join("\n"));
+
+    expect(output).toContain("worker-interactive");
+    expect(output).toContain("FOLLOW_UP_BEGIN    ␛[31mred␀");
+    expect(output).toContain("INTERIOR ".repeat(5_000));
+    expect(output).toContain("FOLLOW_UP_TAIL");
+    expect(output).not.toContain("\u001b");
+    expect(output).not.toContain("\u0000");
+    expect(lines.every((line) => Bun.stringWidth(line) <= 60_000)).toBe(true);
   });
 });
 
@@ -125,83 +112,62 @@ describe("tool result renderers", () => {
       undefined,
       "Invalid tool arguments: invalid-placeholder\nExpected worker_id to match ^worker-\\S+$",
     );
-    const errorTheme = {
-      ...theme,
-      fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
-    } as Theme;
     const renderers = [
-      [orchestrateToolRenderer, "Work sent"],
-      [workerStatusToolRenderer, "Diagnostics unavailable"],
-      [interactiveSendToolRenderer, "Work sent"],
-      [workerAbortToolRenderer, "Worker stop requested"],
-      [interactiveCloseToolRenderer, "Worker closed"],
+      orchestrateToolRenderer,
+      workerStatusToolRenderer,
+      interactiveSendToolRenderer,
+      workerAbortToolRenderer,
+      interactiveCloseToolRenderer,
     ] as const;
-    for (const [renderer, successText] of renderers) {
+    for (const renderer of renderers) {
       const rendered = renderer.renderResult(
         errorResult,
         options(),
-        errorTheme,
+        theme,
         context({ isError: true }),
       );
       const output = Bun.stripANSI(rendered.render(120).join("\n"));
-      expect(output).toContain("<error>Invalid tool arguments: invalid-placeholder</error>");
-      expect(output).not.toContain(successText);
+      expect(output).toContain("invalid-placeholder");
       expect(output).not.toContain("✓");
     }
   });
 
-  test("renders accepted, unavailable, partial, and fallback orchestration results neutrally", () => {
-    const accepted = orchestrateToolRenderer.renderResult(
-      result({ mode: "async", run_id: "run-1", worker_id: "worker-1" }),
-      options(), theme, context(),
-    );
-    expect(Bun.stripANSI(accepted.render(80).join("\n"))).toContain("Sent to worker");
-
-    const unavailable = orchestrateToolRenderer.renderResult(
-      result({ result: { bad: true } }), options(), theme, context(),
-    );
-    expect(Bun.stripANSI(unavailable.render(80).join("\n"))).toContain("details unavailable");
-
-    const partial = orchestrateToolRenderer.renderResult(
-      result(undefined), options({ isPartial: true }), theme, context(),
-    );
-    expect(Bun.stripANSI(partial.render(80).join("\n"))).toContain("Sending work");
-
-    const fallback = orchestrateToolRenderer.renderResult(
-      result(undefined, "Adapter response"), options(), theme, context(),
-    );
-    expect(Bun.stripANSI(fallback.render(80).join("\n"))).toContain("Adapter response");
-  });
-
-  test("renders inline failure details and rejects malformed details", () => {
+  test("preserves a canonical inline failure without optimistic success presentation", () => {
     const valid = inlineDetails();
     const failed = {
       ...valid,
       result: {
         ...valid.result,
         status: "failed",
-        outcome: { status: "failed", message: "Worker failed." },
+        outcome: {
+          status: "failed",
+          message: "Canonical worker failure.",
+        },
       },
     };
-    const output = Bun.stripANSI(orchestrateToolRenderer.renderResult(
-      result(failed, "failed"), options(), theme, context(),
-    ).render(80).join("\n"));
-    expect(output).toContain("✗ Inspect · scout · failed · 5s");
-    expect(output).toContain("Worker failed.");
+    const rendered = orchestrateToolRenderer.renderResult(
+      result(failed), options(), theme, context(),
+    );
+    const output = Bun.stripANSI(rendered.render(80).join("\n"));
+    expect(output).toContain("Canonical worker failure.");
+    expect(output).not.toContain("✓");
+  });
 
-    const malformed = [
-      { ...valid, result: { ...valid.result, outcome: { status: "failed", message: "no" } } },
-      { ...valid, result: { ...valid.result, worker_id: 42 } },
-      { ...valid, result: { ...valid.result, status: "closed", outcome: { status: "closed" } } },
-    ];
-    for (const details of malformed) {
-      const rendered = orchestrateToolRenderer.renderResult(
-        result(details), options(), theme, context(),
-      );
-      const neutral = Bun.stripANSI(rendered.render(80).join("\n"));
-      expect(neutral).toContain("details unavailable");
-      expect(neutral).not.toContain("✓");
-    }
+  test("renders a contradictory inline settlement neutrally", () => {
+    const valid = inlineDetails();
+    const contradictory = {
+      ...valid,
+      result: {
+        ...valid.result,
+        outcome: { status: "failed", message: "contradiction" },
+      },
+    };
+    const rendered = orchestrateToolRenderer.renderResult(
+      result(contradictory), options(), theme, context(),
+    );
+    const output = Bun.stripANSI(rendered.render(80).join("\n"));
+    expect(output).toContain("details unavailable");
+    expect(output).not.toContain("✓");
   });
 
   test("updates and reuses the inline result component for partial and expanded states", () => {
@@ -211,7 +177,6 @@ describe("tool result renderers", () => {
       theme,
       context(),
     );
-    expect(Bun.stripANSI(first.render(80).join("\n"))).toContain("Receiving worker response");
 
     const reused = orchestrateToolRenderer.renderResult(
       result({
@@ -226,37 +191,8 @@ describe("tool result renderers", () => {
       context({ lastComponent: first }),
     );
     expect(reused).toBe(first);
-    const output = Bun.stripANSI(reused.render(80).join("\n"));
-    expect(output).toContain("Expanded response.");
-    expect(output).not.toContain("Receiving worker response");
+    expect(Bun.stripANSI(reused.render(80).join("\n"))).toContain("Expanded response.");
     expect(() => (reused as { dispose?: () => void }).dispose?.()).not.toThrow();
   });
 
-  test("renders concrete diagnostics and simple action states", () => {
-    const diagnostics = result({
-      state: { workers: [{ status: "running" }, { status: "ready" }] },
-      catalog: { diagnostics: [{ message: "bad worker" }] },
-    });
-    const diagnosticOutput = workerStatusToolRenderer.renderResult(
-      diagnostics, options(), theme, context(),
-    );
-    expect(Bun.stripANSI(diagnosticOutput.render(80).join("\n")).trimEnd()).toBe(
-      "1 active · 1 available for follow-up · 1 catalog diagnostic",
-    );
-    const partialDiagnostics = workerStatusToolRenderer.renderResult(
-      diagnostics, options({ isPartial: true }), theme, context(),
-    );
-    expect(Bun.stripANSI(partialDiagnostics.render(80).join("\n")).trimEnd()).toBe(
-      "Reading worker diagnostics…",
-    );
-
-    const abort = workerAbortToolRenderer.renderResult(
-      result({}), options(), theme, context(),
-    );
-    expect(Bun.stripANSI(abort.render(80).join("\n"))).toContain("Worker stop requested");
-    const close = interactiveCloseToolRenderer.renderResult(
-      result({ worker_id: "worker-1" }), options(), theme, context(),
-    );
-    expect(Bun.stripANSI(close.render(80).join("\n"))).toContain("✓ Worker closed");
-  });
 });

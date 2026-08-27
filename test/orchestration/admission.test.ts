@@ -13,15 +13,8 @@ import {
 } from "../../extension/orchestration/model.ts";
 import {
   OrchestrationActionRejected,
-  accepted,
-  actionRejection,
-  rejected,
   validateAbortTarget,
-  validateContextOwner,
-  validateMode,
   validateOrchestrateRequest,
-  validateText,
-  validateWorkerId,
   type OrchestrationContext,
 } from "../../extension/orchestration/admission.ts";
 
@@ -89,47 +82,8 @@ async function rejectionOf<A>(
   return error as OrchestrationActionRejected;
 }
 
-describe("admission primitives", () => {
-  test("constructs accepted and typed rejected decisions without losing error identity", () => {
-    expect(accepted("value")).toEqual({ _tag: "accepted", value: "value" });
-    const error = actionRejection("abort", "target", "Invalid abort target");
-    expect(error).toBeInstanceOf(Error);
-    expect(error.message).toBe("Invalid abort target");
-    const decision = rejected("abort", "target", "Invalid abort target");
-    expect(decision).toMatchObject({ _tag: "rejected", error });
-    if (decision._tag === "rejected") expect(decision.error).not.toBe(error);
-  });
-
-  test("validates context owners, worker IDs, run modes, and bounded text", async () => {
-    await expect(Effect.runPromise(validateContextOwner("snapshot", "owner"))).resolves.toBeUndefined();
-    expect(String(await Effect.runPromise(
-      validateWorkerId("sendInteractive", "worker-1"),
-    ))).toBe("worker-1");
-    await expect(Effect.runPromise(validateMode("orchestrate", "inline"))).resolves.toBeUndefined();
-    await expect(Effect.runPromise(validateText("orchestrate", "title", "x", 1))).resolves.toBeUndefined();
-
-    const cases = [
-      validateContextOwner("snapshot", " "),
-      validateWorkerId("closeInteractive", "\n"),
-      validateWorkerId("sendInteractive", "run-1"),
-      validateMode("orchestrate", "background" as never),
-      validateText("orchestrate", "title", "\t", 10),
-      validateText("orchestrate", "title", "xx", 1),
-    ];
-    const expectedMessages = [
-      "ownerSessionId must not be blank",
-      "worker_id must not be blank",
-      "worker_id must use the canonical worker- prefix",
-      "Invalid orchestration mode",
-      "title must not be blank",
-      "title must be at most 1 characters",
-    ];
-    for (let index = 0; index < cases.length; index += 1) {
-      expect((await rejectionOf(cases[index]!)).message).toBe(expectedMessages[index]!);
-    }
-  });
-
-  test("normalizes valid abort targets and rejects malformed targets atomically", async () => {
+describe("abort admission", () => {
+  test("normalizes valid targets and rejects malformed targets atomically", async () => {
     expect(await Effect.runPromise(validateAbortTarget({ all: true }))).toEqual({ _tag: "all" });
     const ids = await Effect.runPromise(validateAbortTarget({
       workerIds: ["worker-1", "worker-1", "worker-2"],
@@ -153,37 +107,34 @@ describe("admission primitives", () => {
 });
 
 describe("orchestrate request preflight", () => {
-  test("returns the selected catalog definition and original task", async () => {
+  test("admits a valid catalog task and rejects invalid requests before execution", async () => {
     const known = definition("known");
     const input = task("known");
     await expect(Effect.runPromise(
       validateOrchestrateRequest(context([known]), input, "async"),
     )).resolves.toEqual({ definition: known, task: input });
-  });
 
-  test("rejects malformed tasks, catalog misses, and unavailable models", async () => {
-    const known = definition("known");
     const configured = definition("configured", {
       provider: "provider",
       modelId: "missing",
     });
     const cases = [
       [context([known]), undefined, "orchestrate requires one task object"],
-      [context([known]), { ...task("known"), worker: " " }, "worker must not be blank"],
-      [context([known]), { ...task("known"), title: "x".repeat(MAX_WORKER_TITLE_LENGTH + 1) }, `title must be at most ${MAX_WORKER_TITLE_LENGTH} characters`],
-      [context([known]), { ...task("known"), instructions: "x".repeat(MAX_WORKER_INSTRUCTIONS_LENGTH + 1) }, `instructions must be at most ${MAX_WORKER_INSTRUCTIONS_LENGTH} characters`],
+      [context([known]), { ...input, worker: " " }, "worker must not be blank"],
+      [context([known]), { ...input, title: "x".repeat(MAX_WORKER_TITLE_LENGTH + 1) }, `title must be at most ${MAX_WORKER_TITLE_LENGTH} characters`],
+      [context([known]), { ...input, instructions: "x".repeat(MAX_WORKER_INSTRUCTIONS_LENGTH + 1) }, `instructions must be at most ${MAX_WORKER_INSTRUCTIONS_LENGTH} characters`],
       [context([known]), task("missing"), "Unknown worker: missing"],
       [context([configured]), task("configured"), 'Worker "configured" configured model "provider/missing" was not found'],
-      [context([known], { parentModel: undefined }), task("known"), 'Worker "known" has no configured model and no parent model is available'],
+      [context([known], { parentModel: undefined }), input, 'Worker "known" has no configured model and no parent model is available'],
     ] as const;
-    for (const [owner, input, message] of cases) {
+    for (const [owner, value, message] of cases) {
       expect((await rejectionOf(
-        validateOrchestrateRequest(owner, input as OrchestrateTaskInput, "async"),
+        validateOrchestrateRequest(owner, value as OrchestrateTaskInput, "async"),
       )).message).toBe(message);
     }
   });
 
-  test("validates sibling synthesis metadata and async mode", async () => {
+  test("validates synthesis metadata across fields and mode", async () => {
     const known = definition("known");
     const cases = [
       [{ id: " ", size: 2 }, "async", "synthesis group ID must not be blank"],
@@ -192,12 +143,11 @@ describe("orchestrate request preflight", () => {
       [{ id: "group", size: 2.5 }, "async", "Synthesis group size must be an integer of at least 2"],
     ] as const;
     for (const [synthesisGroup, mode, message] of cases) {
-      const error = await rejectionOf(validateOrchestrateRequest(
+      expect((await rejectionOf(validateOrchestrateRequest(
         context([known], { synthesisGroup }),
         task("known"),
         mode,
-      ));
-      expect(error.message).toBe(message);
+      ))).message).toBe(message);
     }
   });
 

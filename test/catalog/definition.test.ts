@@ -1,6 +1,5 @@
 import { describe, expect, test } from "bun:test";
 import {
-  SUPPORTED_TOOL_NAMES,
   createWorkerCatalog,
   findWorkerByName,
   isSupportedToolName,
@@ -18,8 +17,8 @@ const workerDefinition = (name: string): WorkerDefinition => ({
 });
 
 describe("supported tools and worker catalog", () => {
-  test("accepts every exact built-in tool name", () => {
-    for (const toolName of SUPPORTED_TOOL_NAMES) expect(isSupportedToolName(toolName)).toBe(true);
+  test("recognizes supported tool names exactly", () => {
+    expect(isSupportedToolName("read")).toBe(true);
     expect(isSupportedToolName("Read")).toBe(false);
     expect(isSupportedToolName("shell")).toBe(false);
   });

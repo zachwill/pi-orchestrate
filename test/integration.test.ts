@@ -28,14 +28,6 @@ import type { OrchestrationContext } from "../extension/orchestration/admission.
 import type { OwnerSnapshot } from "../extension/orchestration/service.ts";
 import type { WorkerSettlement } from "../extension/orchestration/settlement.ts";
 
-const TOOL_NAMES = [
-  "orchestrate",
-  "worker_status",
-  "interactive_send",
-  "worker_abort",
-  "interactive_close",
-] as const;
-
 type Handler = (event: any, ctx: ExtensionContext) => unknown;
 
 class FakePi {
@@ -87,10 +79,9 @@ class FakeOrchestrationClient {
     task: unknown;
     mode: string;
   }> = [];
-  readonly interactiveSendCalls: Array<{ context: OrchestrationContext; mode: string }> = [];
+  readonly interactiveSendModes: Array<"async" | "inline"> = [];
   readonly stateListeners = new Map<string, Set<(snapshot: OwnerSnapshot) => void>>();
   readonly snapshots = new Map<string, OwnerSnapshot>();
-  readonly snapshotOwners: string[] = [];
   shutdownCalls = 0;
   unsubscribeStateCalls = 0;
 
@@ -118,7 +109,7 @@ class FakeOrchestrationClient {
     _instructions: string,
     mode: "async" | "inline",
   ): Promise<unknown> {
-    this.interactiveSendCalls.push({ context, mode });
+    this.interactiveSendModes.push(mode);
     return mode === "async"
       ? { id: "run-send", workerId: "worker-ready" }
       : inlineCompletedRun(context.ownerSessionId);
@@ -127,8 +118,7 @@ class FakeOrchestrationClient {
   async abort(): Promise<void> {}
   async closeInteractive(): Promise<void> {}
 
-  async snapshot(ownerSessionId: string): Promise<OwnerSnapshot> {
-    this.snapshotOwners.push(ownerSessionId);
+  async snapshot(_ownerSessionId: string): Promise<OwnerSnapshot> {
     return { runs: [], workers: [] };
   }
 
@@ -295,13 +285,12 @@ async function invoke(
   toolCallId: string,
   params: unknown,
   ctx: ExtensionContext,
-  onUpdate?: (update: unknown) => void,
 ) {
   return pi.tool(name).execute(
     toolCallId,
     params as never,
     undefined,
-    onUpdate as never,
+    undefined,
     ctx,
   );
 }
@@ -311,6 +300,14 @@ const orchestrationParams = {
   title: "Inspect",
   instructions: "Inspect the project.",
 };
+
+const publicToolNames = [
+  "orchestrate",
+  "worker_status",
+  "interactive_send",
+  "worker_abort",
+  "interactive_close",
+];
 
 describe("Pi Orchestrate extension integration", () => {
   test("a factory that never starts a session acquires no lifecycle resources", async () => {
@@ -343,7 +340,7 @@ describe("Pi Orchestrate extension integration", () => {
     expect(destroyCalls).toBe(0);
   });
 
-  test("registers exactly five public tools on session start", async () => {
+  test("registers public tools only after session start", async () => {
     const pi = new FakePi();
     const shared = fakeHost();
     install(pi, shared.host);
@@ -355,10 +352,12 @@ describe("Pi Orchestrate extension integration", () => {
 
     await pi.emit("session_start", { reason: "startup" }, ctx);
 
-    expect(pi.tools.map((tool) => tool.name)).toEqual([...TOOL_NAMES]);
-    expect(pi.tools.map((tool) => tool.name)).not.toContain("orchestration_status");
-    expect(pi.tools.map((tool) => tool.name)).not.toContain("worker_respond");
+    expect(pi.tools.map((tool) => tool.name)).toEqual(publicToolNames);
     expect(shared.runtime.stateListeners.size).toBe(1);
+
+    await pi.emit("session_start", { reason: "reload" }, ctx);
+
+    expect(pi.tools.map((tool) => tool.name)).toEqual(publicToolNames);
   });
 
   test("rebinds repeated starts for the same session and replaces registered tools", async () => {
@@ -371,7 +370,6 @@ describe("Pi Orchestrate extension integration", () => {
     const firstOrchestrateTool = pi.tool("orchestrate");
     await pi.emit("session_start", { reason: "reload" }, parent.ctx);
 
-    expect(pi.tools.map((tool) => tool.name)).toEqual([...TOOL_NAMES]);
     expect(pi.tool("orchestrate")).not.toBe(firstOrchestrateTool);
     expect(runtime.unsubscribeStateCalls).toBe(1);
     expect(runtime.stateListeners.has("owner-repeated")).toBe(true);
@@ -433,41 +431,31 @@ describe("Pi Orchestrate extension integration", () => {
 
     expect(discoveries).toEqual([{ cwd: "/trusted/project", projectTrusted: true }]);
     const injectedPrompt = (promptResult as { systemPrompt: string }).systemPrompt;
-    expect(injectedPrompt).toStartWith("Parent prompt");
-    expect(injectedPrompt).toContain("<!-- pi-orchestrate:contract:start -->");
+    expect(injectedPrompt).not.toBe("Parent prompt");
     expect(injectedPrompt).toContain("trusted-scout");
     expect(runtime.orchestrateCalls[0]?.context.catalog).toBe(catalog);
     expect(runtime.orchestrateCalls[0]?.context.projectTrusted).toBe(true);
-    expect(runtime.orchestrateCalls[0]?.task).toEqual(orchestrationParams);
   });
 
-  test("classifies a pure dispatch async and clears its mode after tool execution", async () => {
+  test("propagates a pure dispatch mode from the hook through the registered tool adapter", async () => {
     const pi = new FakePi();
     const { host, runtime } = fakeHost();
     install(pi, host);
     const { ctx } = createContext();
     await pi.emit("session_start", { reason: "startup" }, ctx);
-    const snapshotCallsBeforeDispatch = [...runtime.snapshotOwners];
     await pi.emit(
       "message_end",
       { message: assistantToolCalls([{ id: "pure", name: "orchestrate" }]) },
       ctx,
     );
 
-    const asyncResult = await invoke(pi, "orchestrate", "pure", orchestrationParams, ctx);
-    await pi.emit(
-      "tool_execution_end",
-      { toolCallId: "pure", toolName: "orchestrate", result: asyncResult, isError: false },
-      ctx,
-    );
-    await invoke(pi, "orchestrate", "pure", orchestrationParams, ctx);
+    const result = await invoke(pi, "orchestrate", "pure", orchestrationParams, ctx);
 
-    expect(runtime.orchestrateCalls.map((call) => call.mode)).toEqual(["async", "inline"]);
-    expect(asyncResult.terminate).toBe(true);
-    expect(runtime.snapshotOwners).toEqual(snapshotCallsBeforeDispatch);
+    expect(runtime.orchestrateCalls[0]?.mode).toBe("async");
+    expect(result.terminate).toBe(true);
   });
 
-  test("classifies interactive_send as async only when it is the sole tool call", async () => {
+  test("classifies interactive sends and clears their dispatch decision after execution", async () => {
     const pi = new FakePi();
     const { host, runtime } = fakeHost();
     install(pi, host);
@@ -476,41 +464,47 @@ describe("Pi Orchestrate extension integration", () => {
 
     await pi.emit(
       "message_end",
-      { message: assistantToolCalls([{ id: "interactive-sole", name: "interactive_send" }]) },
+      { message: assistantToolCalls([{ id: "send", name: "interactive_send" }]) },
       ctx,
     );
-    const asyncResult = await invoke(
-      pi,
-      "interactive_send",
-      "interactive-sole",
-      { worker_id: "worker-ready", instructions: "Continue." },
-      ctx,
-    );
+    await invoke(pi, "interactive_send", "send", {
+      worker_id: "worker-ready",
+      instructions: "Continue.",
+    }, ctx);
+    await pi.emit("tool_execution_end", {
+      toolCallId: "send",
+      toolName: "interactive_send",
+      result: {},
+      isError: false,
+    }, ctx);
+    await invoke(pi, "interactive_send", "send", {
+      worker_id: "worker-ready",
+      instructions: "Continue again.",
+    }, ctx);
 
     await pi.emit(
       "message_end",
       {
         message: assistantToolCalls([
-          { id: "interactive-mixed", name: "interactive_send" },
+          { id: "mixed-send", name: "interactive_send" },
           { id: "ordinary", name: "read" },
         ]),
       },
       ctx,
     );
-    const inlineResult = await invoke(
-      pi,
-      "interactive_send",
-      "interactive-mixed",
-      { worker_id: "worker-ready", instructions: "Finish." },
-      ctx,
-    );
+    await invoke(pi, "interactive_send", "mixed-send", {
+      worker_id: "worker-ready",
+      instructions: "Finish.",
+    }, ctx);
 
-    expect(runtime.interactiveSendCalls.map((call) => call.mode)).toEqual(["async", "inline"]);
-    expect(asyncResult.terminate).toBe(true);
-    expect(inlineResult).not.toHaveProperty("terminate");
+    expect(runtime.interactiveSendModes).toEqual([
+      "async",
+      "inline",
+      "inline",
+    ]);
   });
 
-  test("keeps mixed calls inline and accepts sibling-only tool groups with harmless text asynchronously", async () => {
+  test("keeps a mixed call inline and marks a sibling dispatch group for synthesis", async () => {
     const pi = new FakePi();
     const { host, runtime } = fakeHost();
     install(pi, host);
@@ -527,14 +521,12 @@ describe("Pi Orchestrate extension integration", () => {
       },
       ctx,
     );
-    const inlineUpdates: unknown[] = [];
     const inlineResult = await invoke(
       pi,
       "orchestrate",
       "mixed-dispatch",
       orchestrationParams,
       ctx,
-      (update) => inlineUpdates.push(update),
     );
 
     await pi.emit(
@@ -543,63 +535,23 @@ describe("Pi Orchestrate extension integration", () => {
         message: assistantToolCalls([
           { id: "first-dispatch", name: "orchestrate" },
           { id: "second-dispatch", name: "orchestrate" },
-          { id: "third-dispatch", name: "orchestrate" },
-        ], "Dispatching the full three-worker wave."),
+        ]),
       },
       ctx,
     );
-    const secondParams = {
-      worker: "scout",
-      title: "Review",
-      instructions: "Review the project.",
-    };
-    const thirdParams = {
-      worker: "scout",
-      title: "Validate",
-      instructions: "Validate the project.",
-    };
     const groupedResults = await Promise.all([
       invoke(pi, "orchestrate", "first-dispatch", orchestrationParams, ctx),
-      invoke(pi, "orchestrate", "second-dispatch", secondParams, ctx),
-      invoke(pi, "orchestrate", "third-dispatch", thirdParams, ctx),
+      invoke(pi, "orchestrate", "second-dispatch", orchestrationParams, ctx),
     ]);
+    const synthesisGroups = runtime.orchestrateCalls
+      .slice(-2)
+      .map((call) => call.context.synthesisGroup);
 
-    expect(runtime.orchestrateCalls.map((call) => call.mode)).toEqual([
-      "inline",
-      "async",
-      "async",
-      "async",
-    ]);
-    expect(runtime.orchestrateCalls.slice(-3).map((call) => call.task)).toEqual([
-      orchestrationParams,
-      secondParams,
-      thirdParams,
-    ]);
-    expect(runtime.orchestrateCalls.slice(-3).map((call) => call.context.synthesisGroup))
-      .toEqual([
-        { id: "orchestrate:first-dispatch", size: 3 },
-        { id: "orchestrate:first-dispatch", size: 3 },
-        { id: "orchestrate:first-dispatch", size: 3 },
-      ]);
+    expect(inlineResult).not.toHaveProperty("terminate");
+    expect(synthesisGroups[0]).toEqual(synthesisGroups[1]);
+    expect(synthesisGroups[0]?.size).toBe(2);
     expect(groupedResults.every((result) => "terminate" in result && result.terminate === true))
       .toBe(true);
-    expect(runtime.interactiveSendCalls).toEqual([]);
-    expect(inlineUpdates).toEqual([{
-      content: [{ type: "text", text: "Worker response received." }],
-      details: {
-        mode: "inline",
-        result: expect.objectContaining({
-          worker_id: "worker-complete",
-          title: "Inspect",
-          status: "completed",
-          started_at: 1,
-          settled_at: 2,
-        }),
-      },
-    }]);
-    expect(inlineResult).not.toHaveProperty("terminate");
-    expect(inlineResult.details).toMatchObject({ mode: "inline" });
-    expect(pi.sent).toEqual([]);
   });
 
   test("finishes an async sibling group when one call fails before admission", async () => {

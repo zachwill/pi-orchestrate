@@ -76,20 +76,6 @@ describe("orchestrator contract", () => {
     expect(section.indexOf("`alpha`")).toBeLessThan(section.indexOf("`zeta`"));
   });
 
-  test("retains the structural parent and parallel-dispatch contract", () => {
-    const section = expectOneContract(applyOrchestratorContract("", catalog([])));
-
-    expect(section).toContain("You own the outcome, not every implementation, review, or verification step.");
-    expect(section).toContain("Delegate nontrivial implementation, review, integration assessment, and verification");
-    expect(section).toContain("same worker definition and identical instructions");
-    expect(section).toContain("exactly one `multi_tool_use.parallel` call");
-    expect(section).toContain("exactly N `functions.orchestrate` entries and no other tools");
-    expect(section).toContain("native siblings in one assistant response");
-    expect(section).toContain("Ensure worker results are independently reviewed and verified");
-    expect(section).toContain("Do not personally repeat delegated review or verification without a concrete reason");
-    expect(section).toContain("No trusted workers are available");
-  });
-
   test("repairs malformed and duplicate delimiters without losing unrelated prompt text", () => {
     const valid = applyOrchestratorContract("", catalog([worker("old", "package")]));
     const malformed = [

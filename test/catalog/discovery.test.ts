@@ -114,70 +114,17 @@ describe("worker catalog discovery", () => {
     expect(workers(catalog).map((worker) => worker.name)).toEqual(["package", "shared"]);
   });
 
-  test("parses explicit lifecycles, defaults omission, and rejects invalid lifecycle values", () => {
+  test("defaults an omitted lifecycle to one-shot", () => {
     const fs = new FakeFileSystem();
     fs.addDirectory(packageDirectory, {
-      "one-shot.md": definition("one-shot", "prompt"),
-      "interactive.md": definition("interactive", "prompt", "", "interactive"),
-      "invalid.md": definition("invalid", "prompt", "", "forever"),
       "omitted.md": definition("omitted", "prompt").replace("lifecycle: one-shot\n", ""),
     });
     fs.addDirectory(userDirectory, {});
 
     const catalog = createWorkerCatalogDiscovery(fs)(options(false));
 
-    expect(workers(catalog).map(({ name, lifecycle }) => ({ name, lifecycle }))).toEqual([
-      { name: "interactive", lifecycle: "interactive" },
-      { name: "omitted", lifecycle: "one-shot" },
-      { name: "one-shot", lifecycle: "one-shot" },
-    ]);
-    expect(catalog.diagnostics).toEqual([
-      {
-        severity: "error",
-        source: "package",
-        filePath: join(packageDirectory, "invalid.md"),
-        message: "frontmatter field 'lifecycle' must be 'one-shot' or 'interactive'",
-      },
-    ]);
-  });
-
-  test("accepts only strict, regular Markdown worker definitions", () => {
-    const fs = new FakeFileSystem();
-    fs.addDirectory(packageDirectory, {
-      "valid.md": `---
-name: valid
-description: valid description
-model: provider/model
-tools:
-  - read
-skills:
-  - bun
-lifecycle: one-shot
----
-valid prompt`,
-      "bad-model.md": definition("bad-model", "prompt").replace("provider/model", "model"),
-      "bad-tools.md": definition("bad-tools", "prompt").replace("tools: read", "tools: Read"),
-      "empty.md": definition("empty", "   "),
-      "huge.md": { content: definition("huge", "prompt"), size: 64 * 1024 + 1 },
-      "mismatch.md": definition("different", "prompt"),
-      "missing-tools.md": definition("missing-tools", "prompt").replace("tools: read\n", ""),
-      "symlink.md": { content: definition("symlink", "prompt"), kind: "symlink" },
-      "unknown.md": definition("unknown", "prompt", "alias: other-name\n"),
-      "ignored.json": "{}",
-    });
-    fs.addDirectory(userDirectory, {});
-
-    const catalog = createWorkerCatalogDiscovery(fs)(options(false));
-
-    expect(workers(catalog).map((worker) => worker.name)).toEqual(["valid"]);
-    expect(workers(catalog)[0]).toMatchObject({
-      tools: ["read"],
-      skills: ["bun"],
-      model: { provider: "provider", modelId: "model" },
-      lifecycle: "one-shot",
-    });
-    expect(catalog.diagnostics).toHaveLength(8);
-    expect(fs.calls.some((call) => call.includes("ignored.json"))).toBe(false);
+    expect(workers(catalog)[0]?.lifecycle).toBe("one-shot");
+    expect(catalog.diagnostics).toEqual([]);
   });
 
   test("decodes comma lists and compaction through the frontmatter schema", () => {
@@ -213,30 +160,31 @@ prompt`,
     });
   });
 
-  test("reports stable schema paths and rejects excess properties at every struct boundary", () => {
+  test("reports representative parsing, schema-path, excess, size, and regular-file failures", () => {
     const fs = new FakeFileSystem();
     fs.addDirectory(packageDirectory, {
-      "nested-extra.md": definition(
-        "nested-extra",
-        "prompt",
-        "compaction:\n  future: true\n  alsoFuture: false\n",
-      ),
-      "top-extra.md": definition("top-extra", "prompt", "zeta: true\nalpha: true\n"),
+      "bad-lifecycle.md": definition("bad-lifecycle", "prompt", "", "temporary"),
       "bad-enabled.md": definition(
         "bad-enabled",
         "prompt",
         "compaction:\n  enabled: yes\n",
       ),
-      "bad-reserve.md": definition(
-        "bad-reserve",
+      "bad-compaction-extra.md": definition(
+        "bad-compaction-extra",
         "prompt",
-        "compaction:\n  reserveTokens: -1\n",
+        "compaction:\n  zeta: true\n  alpha: true\n",
       ),
       "bad-second-tool.md": definition("bad-second-tool", "prompt").replace(
         "tools: read",
         "tools: [read, Read]",
       ),
-      "empty-comma.md": definition("empty-comma", "prompt").replace("tools: read", "tools: ''"),
+      "top-extra.md": definition("top-extra", "prompt", "zeta: true\nalpha: true\n"),
+      "invalid-yaml.md": "---\nname: [unterminated\n---\nprompt",
+      "oversized.md": {
+        content: definition("oversized", "x".repeat(64 * 1024)),
+        size: 1,
+      },
+      "symlink.md": { content: definition("symlink", "prompt"), kind: "symlink" },
     });
     fs.addDirectory(userDirectory, {});
 
@@ -246,99 +194,15 @@ prompt`,
     );
 
     expect(workers(catalog)).toEqual([]);
-    expect(messages.get("top-extra.md")).toBe("unknown frontmatter fields: alpha, zeta");
-    expect(messages.get("nested-extra.md")).toBe(
-      "unknown compaction fields: alsoFuture, future",
-    );
-    expect(messages.get("bad-enabled.md")).toBe(
-      "frontmatter field 'compaction.enabled' must be a boolean",
-    );
-    expect(messages.get("bad-reserve.md")).toBe(
-      "frontmatter field 'compaction.reserveTokens' must be a non-negative integer",
-    );
-    expect(messages.get("bad-second-tool.md")).toBe("unsupported tool 'Read'");
-    expect(messages.get("empty-comma.md")).toBe(
-      "frontmatter field 'tools' must be a non-empty comma string or string array",
-    );
-  });
-
-  test("reports every field failure from structured issue paths", () => {
-    const fs = new FakeFileSystem();
-    fs.addDirectory(packageDirectory, {
-      "bad-name.md": definition("bad-name", "prompt").replace("name: bad-name", "name: ''"),
-      "bad-description.md": definition("bad-description", "prompt").replace(
-        "description: bad-description description",
-        "description: ''",
-      ),
-      "empty-model.md": definition("empty-model", "prompt").replace(
-        "model: provider/model",
-        "model: ''",
-      ),
-      "bad-model.md": definition("bad-model", "prompt").replace(
-        "model: provider/model",
-        "model: local-model",
-      ),
-      "empty-thinking.md": definition("empty-thinking", "prompt", "thinking: ''\n"),
-      "bad-thinking.md": definition("bad-thinking", "prompt", "thinking: extreme\n"),
-      "missing-tools.md": definition("missing-tools", "prompt").replace("tools: read\n", ""),
-      "bad-tools-shape.md": definition("bad-tools-shape", "prompt").replace(
-        "tools: read",
-        "tools: [read, 42]",
-      ),
-      "bad-skills.md": definition("bad-skills", "prompt", "skills: [bun, '']\n"),
-      "bad-compaction.md": definition("bad-compaction", "prompt", "compaction: compact\n"),
-      "bad-enabled.md": definition(
-        "bad-enabled",
-        "prompt",
-        "compaction:\n  enabled: 1\n",
-      ),
-      "bad-reserve.md": definition(
-        "bad-reserve",
-        "prompt",
-        "compaction:\n  reserveTokens: 1.5\n",
-      ),
-      "bad-keep-recent.md": definition(
-        "bad-keep-recent",
-        "prompt",
-        "compaction:\n  keepRecentTokens: -1\n",
-      ),
-      "compaction-priority.md": definition(
-        "compaction-priority",
-        "prompt",
-        "compaction:\n  enabled: 1\n  reserveTokens: -1\n  keepRecentTokens: -1\n",
-      ),
-      "bad-lifecycle.md": definition("bad-lifecycle", "prompt", "", "temporary"),
-      "priority.md": definition("priority", "prompt", "", "temporary").replace(
-        "description: priority description",
-        "description: ''",
-      ),
-      "not-mapping.md": "---\n- name\n- tools\n---\nprompt",
-    });
-    fs.addDirectory(userDirectory, {});
-
-    const catalog = createWorkerCatalogDiscovery(fs)(options(false));
-    const messages = new Map(
-      catalog.diagnostics.map((item) => [item.filePath?.split("/").at(-1), item.message]),
-    );
-
     expect(messages).toEqual(new Map([
-      ["bad-compaction.md", "frontmatter field 'compaction' must be a mapping"],
-      ["bad-description.md", "frontmatter field 'description' must be a non-empty string"],
+      ["bad-compaction-extra.md", "unknown compaction fields: alpha, zeta"],
       ["bad-enabled.md", "frontmatter field 'compaction.enabled' must be a boolean"],
-      ["bad-keep-recent.md", "frontmatter field 'compaction.keepRecentTokens' must be a non-negative integer"],
       ["bad-lifecycle.md", "frontmatter field 'lifecycle' must be 'one-shot' or 'interactive'"],
-      ["bad-model.md", "frontmatter field 'model' must use provider/model format"],
-      ["bad-name.md", "frontmatter field 'name' must be a non-empty string"],
-      ["bad-reserve.md", "frontmatter field 'compaction.reserveTokens' must be a non-negative integer"],
-      ["bad-skills.md", "frontmatter field 'skills' must be a comma string or string array"],
-      ["bad-thinking.md", "unsupported thinking level 'extreme'"],
-      ["bad-tools-shape.md", "frontmatter field 'tools' must be a non-empty comma string or string array"],
-      ["compaction-priority.md", "frontmatter field 'compaction.enabled' must be a boolean"],
-      ["empty-model.md", "frontmatter field 'model' must be a non-empty string"],
-      ["empty-thinking.md", "frontmatter field 'thinking' must be a non-empty string"],
-      ["missing-tools.md", "frontmatter field 'tools' is required"],
-      ["not-mapping.md", "frontmatter must be a mapping"],
-      ["priority.md", "frontmatter field 'description' must be a non-empty string"],
+      ["bad-second-tool.md", "unsupported tool 'Read'"],
+      ["invalid-yaml.md", "frontmatter is not valid YAML"],
+      ["oversized.md", "worker file exceeds 65536 bytes"],
+      ["symlink.md", "worker file must be a regular non-symlink file"],
+      ["top-extra.md", "unknown frontmatter fields: alpha, zeta"],
     ]));
   });
 

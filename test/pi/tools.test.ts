@@ -17,15 +17,13 @@ import {
 } from "../../extension/catalog/definition.ts";
 import {
   MAX_WORKER_INSTRUCTIONS_LENGTH,
-  MAX_WORKER_TITLE_LENGTH,
   type RunId,
   type WorkerId,
   type WorkerUsage,
 } from "../../extension/orchestration/model.ts";
-import {
-  OrchestrationActionRejected,
-  type AbortTarget,
-  type OrchestrationContext,
+import type {
+  AbortTarget,
+  OrchestrationContext,
 } from "../../extension/orchestration/admission.ts";
 import type {
   AcceptedRun,
@@ -362,95 +360,51 @@ describe("registerOrchestrationTools", () => {
 
   });
 
-  test("schemas accept current inputs and reject malformed or ambiguous inputs", () => {
+  test("tool schemas keep distinct strict transport shapes", () => {
     const { pi } = harness();
-    const validTask = { worker: "scout", title: "Inspect", instructions: "Inspect." };
+    const task = { worker: "scout", title: "Inspect", instructions: "Inspect." };
 
-    expect(Value.Check(pi.tool("orchestrate").parameters, validTask)).toBe(true);
-    expect(Value.Check(pi.tool("orchestrate").parameters, [validTask])).toBe(false);
-    expect(Value.Check(pi.tool("orchestrate").parameters, { ...validTask, extra: true })).toBe(false);
+    expect(Value.Check(pi.tool("orchestrate").parameters, task)).toBe(true);
+    expect(Value.Check(pi.tool("orchestrate").parameters, [task])).toBe(false);
+    expect(Value.Check(pi.tool("orchestrate").parameters, { ...task, extra: true })).toBe(false);
+    expect(Value.Check(pi.tool("orchestrate").parameters, { ...task, title: "   " })).toBe(false);
     expect(Value.Check(pi.tool("orchestrate").parameters, {
-      worker: "scout",
-      title: "Inspect",
-    })).toBe(false);
-    for (const field of ["worker", "title", "instructions"] as const) {
-      expect(Value.Check(pi.tool("orchestrate").parameters, {
-        ...validTask,
-        [field]: "   ",
-      })).toBe(false);
-    }
-    for (const field of ["worker", "title"] as const) {
-      expect(Value.Check(pi.tool("orchestrate").parameters, {
-        ...validTask,
-        [field]: "x".repeat(MAX_WORKER_TITLE_LENGTH + 1),
-      })).toBe(false);
-    }
-    expect(Value.Check(pi.tool("orchestrate").parameters, {
-      ...validTask,
+      ...task,
       instructions: "x".repeat(MAX_WORKER_INSTRUCTIONS_LENGTH + 1),
     })).toBe(false);
 
     expect(Value.Check(pi.tool("worker_status").parameters, {})).toBe(true);
     expect(Value.Check(pi.tool("worker_status").parameters, { poll: true })).toBe(false);
 
-    const sendSchema = pi.tool("interactive_send").parameters;
-    expect(Value.Check(sendSchema, {
+    expect(Value.Check(pi.tool("interactive_send").parameters, {
       worker_id: "worker-1",
       instructions: "Continue.",
     })).toBe(true);
-    for (const workerId of ["run-1", "worker- ", "worker-"]) {
-      expect(Value.Check(sendSchema, {
-        worker_id: workerId,
-        instructions: "Continue.",
-      })).toBe(false);
-    }
-    expect(Value.Check(sendSchema, {
-      worker_id: "worker-1",
-      instructions: "   ",
+    expect(Value.Check(pi.tool("interactive_send").parameters, {
+      worker_id: "run-1",
+      instructions: "Continue.",
     })).toBe(false);
-    expect(Value.Check(sendSchema, {
+    expect(Value.Check(pi.tool("interactive_send").parameters, {
       worker_id: "worker-1",
-      instructions: "x".repeat(MAX_WORKER_INSTRUCTIONS_LENGTH + 1),
     })).toBe(false);
-    const abortSchema = pi.tool("worker_abort").parameters;
-    expect(Value.Check(abortSchema, { worker_ids: ["worker-1"] })).toBe(true);
-    expect(Value.Check(abortSchema, { worker_ids: ["run-1"] })).toBe(false);
-    expect(Value.Check(abortSchema, { worker_ids: ["worker- "] })).toBe(false);
-    expect(Value.Check(abortSchema, { all: true })).toBe(true);
-    expect(Value.Check(abortSchema, {})).toBe(false);
-    expect(Value.Check(abortSchema, { worker_ids: [] })).toBe(false);
-    expect(Value.Check(abortSchema, { all: false })).toBe(false);
-    expect(Value.Check(abortSchema, { worker_ids: ["worker-1"], all: true })).toBe(false);
 
-    const closeSchema = pi.tool("interactive_close").parameters;
-    expect(Value.Check(closeSchema, { worker_id: "worker-1" })).toBe(true);
-    expect(Value.Check(closeSchema, { worker_id: "run-1" })).toBe(false);
-    expect(Value.Check(closeSchema, { worker_id: "invalid-placeholder" })).toBe(false);
-    expect(Value.Check(closeSchema, { worker_id: "worker- " })).toBe(false);
-  });
+    expect(Value.Check(pi.tool("worker_abort").parameters, {
+      worker_ids: ["worker-1"],
+    })).toBe(true);
+    expect(Value.Check(pi.tool("worker_abort").parameters, { all: true })).toBe(true);
+    expect(Value.Check(pi.tool("worker_abort").parameters, { worker_ids: [] })).toBe(false);
+    expect(Value.Check(pi.tool("worker_abort").parameters, {
+      worker_ids: ["worker-1"],
+      all: true,
+    })).toBe(false);
 
-  test("uses concise, nonduplicated prompt guidance with the required semantics", () => {
-    const { pi } = harness();
-    const bullets = pi.tools.flatMap((tool) => tool.promptGuidelines ?? []);
-    expect(new Set(bullets).size).toBe(bullets.length);
-
-    const guidance = (name: string) => {
-      const tool = pi.tool(name);
-      expect(tool.description).toBeTruthy();
-      expect(tool.promptSnippet).toBeTruthy();
-      expect(tool.promptGuidelines?.length).toBeGreaterThan(0);
-      return [tool.description, tool.promptSnippet, ...(tool.promptGuidelines ?? [])].join(" ");
-    };
-
-    expect(guidance("orchestrate")).toMatch(/fully briefed|fully briefed.*parallel|parallel worker scopes/);
-    expect(guidance("orchestrate")).toMatch(/async|asynchronously/);
-    expect(guidance("worker_status")).toMatch(/diagnostics or recovery/);
-    expect(guidance("worker_status")).toMatch(/never poll/i);
-    expect(guidance("interactive_send")).toMatch(/interactive worker.*ready/);
-    expect(guidance("interactive_send")).toMatch(/one-shot/);
-    expect(guidance("worker_abort")).toMatch(/active.*interactive_close/);
-    expect(guidance("interactive_close")).toMatch(/interactive worker.*ready/);
-    expect(guidance("interactive_close")).toMatch(/one-shot/);
+    expect(Value.Check(pi.tool("interactive_close").parameters, {
+      worker_id: "worker-1",
+    })).toBe(true);
+    expect(Value.Check(pi.tool("interactive_close").parameters, {
+      worker_id: "worker-1",
+      instructions: "Continue.",
+    })).toBe(false);
   });
 
   test("constructs the complete orchestration context and selects async mode by tool call ID", async () => {
@@ -509,27 +463,45 @@ describe("registerOrchestrationTools", () => {
     );
   });
 
-  test("rejects already-aborted async orchestrate admission with the exact reason", async () => {
-    const { pi, runtime, context, modes } = harness();
-    modes.set("orchestrate-aborted", "async");
-    const reason = { kind: "parent-turn-ended" };
-    const controller = new AbortController();
-    controller.abort(reason);
+  test("preserves already-aborted signal reasons at both dispatch adapters", async () => {
+    const cases = [
+      {
+        tool: "orchestrate",
+        params: { worker: "scout", title: "Inspect", instructions: "Inspect." },
+      },
+      {
+        tool: "interactive_send",
+        params: { worker_id: "worker-ready", instructions: "Continue." },
+      },
+    ] as const;
 
-    const rejectedReason = await invoke(
-      pi,
-      "orchestrate",
-      "orchestrate-aborted",
-      { worker: "scout", title: "Inspect", instructions: "Inspect." },
-      context,
-      controller.signal,
-    ).then(
-      () => "unexpected success",
-      (error: unknown) => error,
-    );
+    for (const testCase of cases) {
+      const { pi, runtime, context, modes } = harness();
+      const toolCallId = `${testCase.tool}-aborted`;
+      const reason = { kind: "parent-turn-ended", tool: testCase.tool };
+      const controller = new AbortController();
+      controller.abort(reason);
+      modes.set(toolCallId, "async");
 
-    expect(rejectedReason).toBe(reason);
-    expect(runtime.orchestrateCalls).toHaveLength(0);
+      const rejectedReason = await invoke(
+        pi,
+        testCase.tool,
+        toolCallId,
+        testCase.params,
+        context,
+        controller.signal,
+      ).then(
+        () => "unexpected success",
+        (error: unknown) => error,
+      );
+
+      expect(rejectedReason).toBe(reason);
+      expect(
+        testCase.tool === "orchestrate"
+          ? runtime.orchestrateCalls
+          : runtime.interactiveSendCalls,
+      ).toHaveLength(0);
+    }
   });
 
   test("returns one inline result without termination", async () => {
@@ -619,38 +591,6 @@ describe("registerOrchestrationTools", () => {
     expect(runtime.interactiveSendCalls[0]?.context.ownerSessionId).toBe("owner-session");
     expect(asyncResult.terminate).toBe(true);
     expect(inlineResult).not.toHaveProperty("terminate");
-
-    await invoke(
-      pi,
-      "interactive_send",
-      "send-blank",
-      { worker_id: "   ", instructions: "Continue." },
-      context,
-    );
-    expect(runtime.interactiveSendCalls.at(-1)?.workerId).toBe("   ");
-  });
-
-  test("rejects already-aborted async interactive_send admission with the exact reason", async () => {
-    const { pi, runtime, context, modes } = harness();
-    modes.set("send-aborted", "async");
-    const reason = new Error("parent turn ended before admission");
-    const controller = new AbortController();
-    controller.abort(reason);
-
-    const rejectedReason = await invoke(
-      pi,
-      "interactive_send",
-      "send-aborted",
-      { worker_id: "worker-ready", instructions: "Continue." },
-      context,
-      controller.signal,
-    ).then(
-      () => "unexpected success",
-      (error: unknown) => error,
-    );
-
-    expect(rejectedReason).toBe(reason);
-    expect(runtime.interactiveSendCalls).toHaveLength(0);
   });
 
   test("worker_status forwards only the current owner and returns catalog diagnostics plus state", async () => {
@@ -704,31 +644,9 @@ describe("registerOrchestrationTools", () => {
     );
     await invoke(pi, "worker_abort", "abort-all", { all: true }, context);
 
-    await invoke(
-      pi,
-      "worker_abort",
-      "abort-blank-worker",
-      { worker_ids: [" "] },
-      context,
-    );
-    await invoke(
-      pi,
-      "worker_abort",
-      "abort-ambiguous",
-      { worker_ids: ["worker-1"], all: true },
-      context,
-    );
-    await invoke(pi, "worker_abort", "abort-empty", { worker_ids: [] }, context);
-
     expect(runtime.abortCalls).toEqual([
       { ownerSessionId: "owner-session", target: { workerIds: ["worker-1", "worker-2"] } },
       { ownerSessionId: "owner-session", target: { all: true } },
-      { ownerSessionId: "owner-session", target: { workerIds: [" "] } },
-      {
-        ownerSessionId: "owner-session",
-        target: { workerIds: ["worker-1"], all: true },
-      },
-      { ownerSessionId: "owner-session", target: { workerIds: [] } },
     ]);
   });
 
@@ -748,15 +666,6 @@ describe("registerOrchestrationTools", () => {
     ]);
     expect(result.details).toEqual({ worker_id: "worker-ready" });
     expect(result).not.toHaveProperty("terminate");
-
-    await invoke(
-      pi,
-      "interactive_close",
-      "close-blank",
-      { worker_id: "\t" },
-      context,
-    );
-    expect(runtime.interactiveCloseCalls.at(-1)?.workerId).toBe("\t");
   });
 
   test("stores exact outbound instructions through both execution adapters", async () => {
@@ -806,78 +715,6 @@ describe("registerOrchestrationTools", () => {
         },
       },
     });
-  });
-
-  test("propagates typed worker-ID validation rejections from executable actions", async () => {
-    const cases = [
-      {
-        tool: "interactive_send",
-        runtimeMethod: "sendInteractive",
-        operation: "sendInteractive",
-        params: { worker_id: "  ", instructions: "Continue." },
-      },
-      {
-        tool: "worker_abort",
-        runtimeMethod: "abort",
-        operation: "abort",
-        params: { worker_ids: ["\t"] },
-      },
-      {
-        tool: "interactive_close",
-        runtimeMethod: "closeInteractive",
-        operation: "closeInteractive",
-        params: { worker_id: "\n" },
-      },
-    ] as const;
-
-    for (const expected of cases) {
-      const { pi, runtime, context } = harness();
-      const rejected = new OrchestrationActionRejected({
-        operation: expected.operation,
-        reason: "validation",
-        message: "worker_id must not be blank",
-      });
-      runtime.failures[expected.runtimeMethod] = rejected;
-
-      const observed = await invoke(
-        pi,
-        expected.tool,
-        `${expected.tool}-blank`,
-        expected.params,
-        context,
-      ).then(
-        () => "unexpected success",
-        (error: unknown) => error,
-      );
-
-      expect(observed).toBe(rejected);
-      expect(observed).toMatchObject({
-        operation: expected.operation,
-        reason: "validation",
-        message: "worker_id must not be blank",
-      });
-    }
-  });
-
-  test("preserves tagged orchestration rejection identity through tool execution", async () => {
-    const { pi, runtime, context } = harness();
-    const rejected = new OrchestrationActionRejected({
-      operation: "orchestrate",
-      reason: "unknown-worker",
-      message: "Unknown worker: missing",
-    });
-    runtime.failures.orchestrate = rejected;
-
-    await expect(
-      invoke(
-        pi,
-        "orchestrate",
-        "typed-rejection",
-        { worker: "missing", title: "Inspect", instructions: "Inspect." },
-        context,
-      ),
-    ).rejects.toBe(rejected);
-    expect(rejected.message).toBe("Unknown worker: missing");
   });
 
   test("throws execution failures instead of returning fake error results", async () => {

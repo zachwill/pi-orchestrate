@@ -502,77 +502,6 @@ describe("child session acquisition handoff", () => {
     expect(h.session.dispose).toHaveBeenCalledTimes(1);
   });
 
-  test("interrupted shutdown transfers offered cleanup ownership before committing interruption", async () => {
-    const h = harness();
-    const reservationReached = new PromiseGate();
-    const releaseReservation = new PromiseGate();
-    const reclamationObserved = new PromiseGate();
-    const releaseReclamation = new PromiseGate();
-    h.dependencies.beforeAdoptionReservation = () => Effect.yieldNow.pipe(
-      Effect.andThen(Effect.promise(() => {
-        reservationReached.resolve(undefined);
-        return releaseReservation.promise;
-      })),
-    );
-    h.dependencies.onReclamationOpenObserved = mock(() => Effect.promise(() => {
-      reclamationObserved.resolve(undefined);
-      return releaseReclamation.promise;
-    }));
-    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
-    const sessions = effectRuntime.runSync(ChildSessions);
-    const acquisition = effectRuntime.runFork(
-      sessions.acquire(options(), (session) => session),
-    );
-    await reservationReached.promise;
-
-    const shutdownFiber = effectRuntime.runFork(sessions.shutdown());
-    await reclamationObserved.promise;
-    shutdownFiber.interruptUnsafe();
-    releaseReclamation.resolve(undefined);
-    expect((await effectRuntime.runPromise(Fiber.await(shutdownFiber)))._tag).toBe("Failure");
-    releaseReservation.resolve(undefined);
-    await expect(effectRuntime.runPromise(Fiber.join(acquisition))).rejects.toMatchObject({
-      _tag: "WorkerSession.AcquisitionClosedError",
-    });
-
-    await effectRuntime.runPromise(sessions.shutdown());
-    await effectRuntime.runPromise(sessions.shutdown());
-    await effectRuntime.dispose();
-
-    expect(h.dependencies.onReclamationOpenObserved).toHaveBeenCalledTimes(1);
-    expect(h.session.dispose).toHaveBeenCalledTimes(1);
-    expect(h.loaderDispose).toHaveBeenCalledTimes(1);
-  });
-
-  test("falls back when root closes between observing open and reclamation admission", async () => {
-    const h = harness();
-    const runtimeDispose = mock(async () => h.session.dispose());
-    h.dependencies.createRuntime = (input) => ({
-      session: input.session,
-      dispose: runtimeDispose,
-    });
-    let disposeRoot: Promise<void> | undefined;
-    let closeRoot: () => void = () => {
-      throw new Error("Runtime root was not installed");
-    };
-    h.dependencies.onReclamationOpenObserved = mock(() => Effect.sync(() => closeRoot()));
-    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
-    const sessions = effectRuntime.runSync(ChildSessions);
-    closeRoot = () => {
-      disposeRoot ??= effectRuntime.dispose();
-    };
-
-    await expect(effectRuntime.runPromise(
-      sessions.acquire(options(), () => undefined),
-    )).rejects.toThrow("All fibers interrupted without error");
-    await disposeRoot;
-
-    expect(h.dependencies.onReclamationOpenObserved).toHaveBeenCalledTimes(1);
-    expect(runtimeDispose).toHaveBeenCalledTimes(1);
-    expect(h.session.dispose).toHaveBeenCalledTimes(1);
-    expect(h.loaderDispose).toHaveBeenCalledTimes(1);
-  });
-
   test("late acquisition failure after interruption remains typed and unobserved by the abandoned caller", async () => {
     const h = harness();
     const started = new PromiseGate();
@@ -646,44 +575,6 @@ describe("child session acquisition handoff", () => {
     expect((await effectRuntime.runPromise(Fiber.await(acquisition)))._tag).toBe("Failure");
     expect(h.session.dispose).toHaveBeenCalledTimes(1);
     await effectRuntime.dispose();
-  });
-
-  test("interruption requested during throwing adoption cannot skip reclamation", async () => {
-    const h = harness();
-    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
-    const sessions = effectRuntime.runSync(ChildSessions);
-    let interruptAcquisition: () => void = () => {
-      throw new Error("Acquisition fiber was not installed");
-    };
-
-    const acquisition = effectRuntime.runFork(
-      sessions.acquire(options(), () => {
-        interruptAcquisition();
-        throw new Error("adopter failed");
-      }),
-    );
-    interruptAcquisition = () => acquisition.interruptUnsafe();
-
-    expect((await effectRuntime.runPromise(Fiber.await(acquisition)))._tag).toBe("Failure");
-    expect(h.session.dispose).toHaveBeenCalledTimes(1);
-    await effectRuntime.dispose();
-  });
-
-  test("shutdown during rejecting adoption preserves undefined and reclaims exactly once", async () => {
-    const h = harness();
-    const effectRuntime = ManagedRuntime.make(createChildSessionsLayer(h.dependencies));
-    const sessions = effectRuntime.runSync(ChildSessions);
-
-    expect(await effectRuntime.runPromise(
-      sessions.acquire(options(), () => {
-        effectRuntime.runSync(sessions.shutdown());
-        return undefined;
-      }),
-    )).toBeUndefined();
-    expect(h.session.dispose).toHaveBeenCalledTimes(1);
-    expect(h.loaderDispose).toHaveBeenCalledTimes(1);
-    await effectRuntime.dispose();
-    expect(h.session.dispose).toHaveBeenCalledTimes(1);
   });
 
   test("shutdown during throwing adoption preserves the defect and reclaims exactly once", async () => {

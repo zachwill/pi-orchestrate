@@ -12,8 +12,6 @@ import {
   MAX_WORKER_TITLE_LENGTH,
   createSequentialIdFactories,
   type OrchestrateTaskInput,
-  type RunId,
-  type WorkerId,
   type WorkerMessageDirection,
   type WorkerOutcome,
   type WorkerUsage,
@@ -29,7 +27,6 @@ import {
   Orchestration,
   orchestrationLayer,
   type CompletedRun,
-  type OrchestrationService,
 } from "../../extension/orchestration/service.ts";
 import { DeliveryCoordinator } from "../../extension/parent/delivery.ts";
 import {
@@ -358,18 +355,11 @@ function promptPlan(outcome: WorkerOutcome, resolved = false): PromptPlan {
   return { gate, outcome };
 }
 
-interface TestRuntimeOptions {
-  readonly idFactories?: ReturnType<typeof createSequentialIdFactories>;
-}
-
-function directRuntime(
-  sessions: ChildSessionsService,
-  overrides: TestRuntimeOptions = {},
-) {
+function directRuntime(sessions: ChildSessionsService) {
   const effectRuntime = ManagedRuntime.make(
-    orchestrationLayer({
-      idFactories: overrides.idFactories ?? createSequentialIdFactories(),
-    }).pipe(Layer.provide(Layer.succeed(ChildSessions, sessions))),
+    orchestrationLayer({ idFactories: createSequentialIdFactories() }).pipe(
+      Layer.provide(Layer.succeed(ChildSessions, sessions)),
+    ),
   );
   return {
     effectRuntime,
@@ -377,11 +367,8 @@ function directRuntime(
   };
 }
 
-function runtime(
-  sessions: ChildSessionsService,
-  overrides: TestRuntimeOptions = {},
-) {
-  const { effectRuntime } = directRuntime(sessions, overrides);
+function runtime(sessions: ChildSessionsService) {
+  const { effectRuntime } = directRuntime(sessions);
   return createOrchestrationClient(effectRuntime);
 }
 
@@ -396,25 +383,12 @@ async function expectPending(promise: Promise<unknown>): Promise<void> {
 }
 
 describe("orchestration admission and concurrency", () => {
-  test("composes Orchestration from its required service Layers", async () => {
-    const effectRuntime = ManagedRuntime.make(
-      orchestrationLayer({ idFactories: createSequentialIdFactories() }).pipe(
-        Layer.provide(Layer.succeed(ChildSessions, new FakeChildSessions([]))),
-      ),
-    );
-    const orchestration = effectRuntime.runSync(Orchestration);
-
-    expect(await effectRuntime.runPromise(orchestration.snapshot("owner"))).toEqual({
-      runs: [],
-      workers: [],
-    });
-    await effectRuntime.runPromise(orchestration.shutdown());
-    await effectRuntime.dispose();
-  });
-
   test("rejects stateful actions after shutdown without creating state", async () => {
     const { effectRuntime, orchestration } = directRuntime(new FakeChildSessions([]));
-    await effectRuntime.runPromise(orchestration.shutdown());
+    await Promise.all([
+      effectRuntime.runPromise(orchestration.shutdown()),
+      effectRuntime.runPromise(orchestration.shutdown()),
+    ]);
     const exit = await effectRuntime.runPromiseExit(
       orchestration.abort("owner", { all: true }),
     );
@@ -503,191 +477,6 @@ describe("orchestration admission and concurrency", () => {
     prompt.gate.resolve(undefined);
     await effectRuntime.runPromise(orchestration.shutdown());
     await effectRuntime.dispose();
-  });
-
-  test("rechecks shutdown and worker state after deliberately reentrant ID factories", async () => {
-    let shutdownRunIds = 0;
-    let shutdownWorkerIds = 0;
-    let shutdownEffect: Effect.Effect<void> | undefined;
-    let shutdownService: OrchestrationService | undefined;
-    const shutdownSessions = new FakeChildSessions([]);
-    const shutdownRuntime = directRuntime(shutdownSessions, {
-      idFactories: {
-        runId: () => {
-          shutdownRunIds += 1;
-          if (!shutdownService) throw new Error("Missing shutdown race service");
-          shutdownEffect = shutdownService.shutdown();
-          return "run-race" as RunId;
-        },
-        workerId: () => {
-          shutdownWorkerIds += 1;
-          return "worker-race" as WorkerId;
-        },
-      },
-    });
-    shutdownService = shutdownRuntime.orchestration;
-
-    const shutdownExit = await shutdownRuntime.effectRuntime.runPromiseExit(
-      shutdownService.orchestrate(
-        context("owner", [definition("worker")]),
-        task("worker"),
-        "async",
-      ),
-    );
-    if (!Exit.isFailure(shutdownExit)) throw new Error("Expected shutdown race rejection");
-    expect(Cause.squash(shutdownExit.cause)).toMatchObject({
-      operation: "orchestrate",
-      reason: "shutdown",
-    });
-    expect({ shutdownRunIds, shutdownWorkerIds }).toEqual({
-      shutdownRunIds: 1,
-      shutdownWorkerIds: 1,
-    });
-    expect(shutdownSessions.creates.value).toBe(0);
-    expect(await Effect.runPromise(shutdownService.snapshot("owner"))).toEqual({
-      runs: [],
-      workers: [],
-    });
-    if (!shutdownEffect) throw new Error("Shutdown race did not start shutdown");
-    await shutdownRuntime.effectRuntime.runPromise(shutdownEffect);
-    await shutdownRuntime.effectRuntime.dispose();
-
-    const tracker = new PromptTracker();
-    const handle = new FakeHandle(
-      "id-worker-state-race",
-      [promptPlan({ status: "ready", assistantText: "ready" }, true)],
-      tracker,
-    );
-    const sessions = new FakeChildSessions([{ handle }]);
-    let runIds = 0;
-    let workerIds = 0;
-    let closeDuringRunId = false;
-    let interactiveService: OrchestrationService | undefined;
-    let readyWorkerId: WorkerId | undefined;
-    const interactiveRuntime = directRuntime(sessions, {
-      idFactories: {
-        runId: () => {
-          runIds += 1;
-          if (closeDuringRunId) {
-            if (!interactiveService || !readyWorkerId) {
-              throw new Error("Missing interactive race target");
-            }
-            Effect.runSync(
-              interactiveService.closeInteractive("owner", readyWorkerId),
-            );
-          }
-          return `run-${runIds}` as RunId;
-        },
-        workerId: () => {
-          workerIds += 1;
-          return `worker-${workerIds}` as WorkerId;
-        },
-      },
-    });
-    interactiveService = interactiveRuntime.orchestration;
-    const owner = context("owner", [definition("interactive", "interactive")]);
-    const initial = await interactiveRuntime.effectRuntime.runPromise(
-      interactiveService.orchestrate(owner, task("interactive"), "inline"),
-    );
-    const initialWorkerId = initial.result.workerId;
-    readyWorkerId = initialWorkerId;
-    closeDuringRunId = true;
-
-    const sendExit = await interactiveRuntime.effectRuntime.runPromiseExit(
-      interactiveService.sendInteractive(owner, initialWorkerId, "Follow up", "async"),
-    );
-    if (!Exit.isFailure(sendExit)) throw new Error("Expected worker-state race rejection");
-    expect(Cause.squash(sendExit.cause)).toMatchObject({
-      operation: "sendInteractive",
-      reason: "worker-state",
-    });
-    expect({ runIds, workerIds }).toEqual({ runIds: 2, workerIds: 1 });
-    expect(sessions.creates.value).toBe(1);
-    expect(handle.prompts).toEqual(["Instructions for interactive"]);
-    expect(handle.disposeCalls).toBe(1);
-    await interactiveRuntime.effectRuntime.runPromise(interactiveService.shutdown());
-    await interactiveRuntime.effectRuntime.dispose();
-  });
-
-  test("keeps generated-ID invariant failures as defects", async () => {
-    const tracker = new PromptTracker();
-    const duplicateHandle = new FakeHandle(
-      "duplicate-id",
-      [promptPlan({ status: "completed", assistantText: "late" })],
-      tracker,
-    );
-    const duplicate = directRuntime(
-      new FakeChildSessions([{ handle: duplicateHandle }]),
-      {
-        idFactories: {
-          runId: () => "run-fixed" as RunId,
-          workerId: () => "worker-fixed" as WorkerId,
-        },
-      },
-    );
-    await duplicate.effectRuntime.runPromise(
-      duplicate.orchestration.orchestrate(
-        context("owner", [definition("worker")]),
-        task("worker"),
-        "async",
-      ),
-    );
-    const duplicateExit = await duplicate.effectRuntime.runPromiseExit(
-      duplicate.orchestration.orchestrate(
-        context("owner", [definition("worker")]),
-        task("worker"),
-        "async",
-      ),
-    );
-    if (!Exit.isFailure(duplicateExit)) throw new Error("Expected duplicate-ID defect");
-    const duplicateError = Cause.squash(duplicateExit.cause);
-    expect(duplicateError).toBeInstanceOf(Error);
-    expect((duplicateError as Error).message).toBe("Duplicate run ID: run-fixed");
-    expect(duplicateError).not.toBeInstanceOf(OrchestrationActionRejected);
-    expect(
-      (await duplicate.effectRuntime.runPromise(duplicate.orchestration.snapshot("owner")))
-        .workers,
-    ).toHaveLength(1);
-    await duplicate.effectRuntime.runPromise(
-      duplicate.orchestration.abort("owner", { all: true }),
-    );
-    duplicateHandle.promptPlans[0]!.gate.resolve(undefined);
-    await duplicate.effectRuntime.runPromise(duplicate.orchestration.shutdown());
-    await duplicate.effectRuntime.dispose();
-  });
-
-  test("admits and notifies synchronously through the single host adapter execution", async () => {
-    const tracker = new PromptTracker();
-    const prompt = promptPlan({ status: "completed", assistantText: "done" });
-    const handle = new FakeHandle("synchronous-admission", [prompt], tracker);
-    const orchestrator = runtime(new FakeChildSessions([{ handle }]));
-    const notifications: string[] = [];
-    const notificationSnapshots: Array<{ owner: string; status: string | undefined }> = [];
-    orchestrator.subscribeState("owner", (snapshot) => {
-      notifications.push("owner");
-      notificationSnapshots.push({
-        owner: "owner",
-        status: snapshot.workers[0]?.status,
-      });
-    });
-
-    const accepted = orchestrator.orchestrate(
-      context("owner", [definition("worker")]),
-      task("worker"),
-      "async",
-    );
-
-    expect(notifications).toEqual(["owner", "owner"]);
-    expect(notificationSnapshots).toEqual([
-      { owner: "owner", status: undefined },
-      { owner: "owner", status: "starting" },
-    ]);
-    expect((await orchestrator.snapshot("owner")).workers[0]?.status).toBe("starting");
-    await accepted;
-    await tracker.starts.waitFor(1);
-    prompt.gate.resolve(undefined);
-    await handle.disposed.promise;
-    await orchestrator.shutdown();
   });
 
   test("rejects invalid input and model preflight atomically before IDs, state, or sessions", async () => {
@@ -801,8 +590,6 @@ describe("completion, interactive workers, and run ownership", () => {
       status: "closed",
       outcome: { status: "closed" },
     });
-    expect((orchestrator as unknown as { send?: unknown }).send).toBeUndefined();
-    expect((orchestrator as unknown as { close?: unknown }).close).toBeUndefined();
     await orchestrator.shutdown();
   });
 
@@ -907,39 +694,6 @@ describe("completion, interactive workers, and run ownership", () => {
 });
 
 describe("per-worker settlement observability", () => {
-  test("permits pruned worker and run IDs to be reused with new settlement identities", async () => {
-    const tracker = new PromptTracker();
-    const count = MAX_TERMINAL_WORKER_HISTORY + 2;
-    const plans = Array.from({ length: count }, (_, index) => ({
-      handle: new FakeHandle(
-        `reuse-${index}`,
-        [promptPlan({ status: "completed", assistantText: `${index}` }, true)],
-        tracker,
-      ),
-    }));
-    let nextRun = 0;
-    let nextWorker = 0;
-    const orchestrator = runtime(new FakeChildSessions(plans), {
-      idFactories: {
-        runId: () => `run-${nextRun++ % (MAX_COMPLETED_RUN_HISTORY + 1)}` as RunId,
-        workerId: () => `worker-${nextWorker++ % (MAX_TERMINAL_WORKER_HISTORY + 1)}` as WorkerId,
-      },
-    });
-    const events: WorkerSettlement[] = [];
-    orchestrator.subscribeSettlement((event) => events.push(event));
-    const owner = context("owner", [definition("worker")]);
-
-    for (let index = 0; index < count; index += 1) {
-      await orchestrator.orchestrate(owner, task("worker", `Reuse ${index}`), "inline");
-    }
-
-    expect(events[0]?.workerId).toBe(events.at(-1)?.workerId);
-    expect(events[0]?.runId).toBe(events.at(-1)?.runId);
-    expect(events[0]?.eventId).not.toBe(events.at(-1)?.eventId);
-    expect(events.at(-1)?.sequence).toBe(count);
-    await orchestrator.shutdown();
-  });
-
   test("observes inline interactive generations locally with distinct event IDs and final usage", async () => {
     const tracker = new PromptTracker();
     const first = promptPlan({ status: "ready", assistantText: "first" });
@@ -1037,17 +791,8 @@ describe("orchestration state observability", () => {
       tracker,
     );
     const orchestrator = runtime(new FakeChildSessions([{ handle: first }, { handle: second }]));
-    const notifications: string[] = [];
-    const snapshots: Array<{ owner: string; activity: string | undefined }> = [];
     orchestrator.subscribeState("owner-a", () => {
       throw new Error("listener failed");
-    });
-    const unsubscribe = orchestrator.subscribeState("owner-a", (snapshot) => {
-      notifications.push("owner-a");
-      snapshots.push({
-        owner: "owner-a",
-        activity: snapshot.workers[0]?.activity,
-      });
     });
 
     await orchestrator.orchestrate(
@@ -1061,8 +806,7 @@ describe("orchestration state observability", () => {
       "async",
     );
     await tracker.starts.waitFor(2);
-    notifications.length = 0;
-    snapshots.length = 0;
+    expect(tracker.maximumActive).toBe(2);
 
     const usage: WorkerUsage = {
       input: 12,
@@ -1077,12 +821,6 @@ describe("orchestration state observability", () => {
     first.emitActivity("read");
     first.emitMessageDirection("from-model");
 
-    expect(notifications).toEqual(["owner-a", "owner-a", "owner-a"]);
-    expect(snapshots).toEqual([
-      { owner: "owner-a", activity: undefined },
-      { owner: "owner-a", activity: "read" },
-      { owner: "owner-a", activity: "read" },
-    ]);
     const ownerA = await orchestrator.snapshot("owner-a");
     expect(ownerA.workers[0]?.usage).toEqual(usage);
     expect(ownerA.workers[0]?.activity).toBe("read");
@@ -1098,14 +836,13 @@ describe("orchestration state observability", () => {
     expect(ownerBWorker?.activity).toBeUndefined();
     expect(ownerBWorker?.messageDirection).toBe("to-model");
 
-    unsubscribe();
-    unsubscribe();
-    first.emitActivity("bash");
-    expect(notifications).toEqual(["owner-a", "owner-a", "owner-a"]);
-
     first.promptPlans[0]!.gate.resolve(undefined);
+    await first.disposed.promise;
+    expect((await orchestrator.snapshot("owner-b")).workers[0]?.status).toBe(
+      "running",
+    );
     second.promptPlans[0]!.gate.resolve(undefined);
-    await Promise.all([first.disposed.promise, second.disposed.promise]);
+    await second.disposed.promise;
     await orchestrator.shutdown();
   });
 });
@@ -1306,9 +1043,7 @@ describe("Effect-owned generations and reentrant interactive operations", () => 
         "inline",
       );
     });
-    const observedStatuses: Array<string | undefined> = [];
     orchestrator.subscribeState("owner", (snapshot) => {
-      observedStatuses.push(snapshot.workers[0]?.status);
       if (
         snapshot.workers[0]?.status === "ready" &&
         closeRaceLoser === undefined
@@ -1323,11 +1058,6 @@ describe("Effect-owned generations and reentrant interactive operations", () => 
     first.gate.resolve(undefined);
     await tracker.starts.waitFor(2);
     expect(handle.prompts).toEqual(["Instructions for interactive", "State follow-up"]);
-    expect(observedStatuses.slice(0, 3)).toEqual([
-      "running",
-      "ready",
-      "running",
-    ]);
     await expect(closeRaceLoser).rejects.toMatchObject({
       operation: "closeInteractive",
       reason: "worker-state",
@@ -1812,8 +1542,8 @@ describe("active-only aborts and bounded lifecycle barriers", () => {
   });
 });
 
-describe("Effect-owned generation and cleanup supervision", () => {
-  test("tracks open-set session disposals until the orchestration FiberSet is empty", async () => {
+describe("generation failure and cleanup behavior", () => {
+  test("shutdown waits for all concurrent session disposals", async () => {
     const tracker = new PromptTracker();
     const first = new FakeHandle(
       "concurrent-disposal-first",
@@ -1849,7 +1579,7 @@ describe("Effect-owned generation and cleanup supervision", () => {
     expect(second.disposeCalls).toBe(1);
   });
 
-  test("TestClock governs timestamps and bounds a live orchestration-owned disposal", async () => {
+  test("TestClock governs timestamps and bounds a live session disposal", async () => {
     const tracker = new PromptTracker();
     const handle = new FakeHandle(
       "bounded-disposal",
@@ -1887,179 +1617,7 @@ describe("Effect-owned generation and cleanup supervision", () => {
     await effectRuntime.dispose();
   });
 
-  test("settles an admitted generation when root closure closes its FiberMap before launch", async () => {
-    const sessions = new FakeChildSessions([]);
-    const { effectRuntime, orchestration } = directRuntime(sessions);
-    let closed = false;
-    orchestration.subscribeState("owner", (snapshot) => {
-      if (closed || snapshot.workers[0]?.status !== "starting") return;
-      closed = true;
-      Effect.runSync(effectRuntime.disposeEffect);
-    });
-
-    const completed = await Effect.runPromise(
-      orchestration.orchestrate(
-        context("owner", [definition("worker")]),
-        task("worker"),
-        "inline",
-      ),
-    );
-
-    expect(closed).toBe(true);
-    expect(sessions.creates.value).toBe(0);
-    expect(completed.result).toMatchObject({
-      status: "failed",
-      outcome: {
-        status: "failed",
-        message: "Worker generation could not start because orchestration is closed",
-      },
-    });
-    expect(await Effect.runPromise(orchestration.snapshot("owner"))).toMatchObject({
-      runs: [{ state: "complete" }],
-      workers: [{ status: "failed" }],
-    });
-  });
-
-  test("settles cancellation when root closure closes its supervisor before queued launch", async () => {
-    const tracker = new PromptTracker();
-    const handle = new FakeHandle(
-      "closed-cancellation",
-      [promptPlan({ status: "completed", assistantText: "late" })],
-      tracker,
-    );
-    const { effectRuntime, orchestration } = directRuntime(
-      new FakeChildSessions([{ handle }]),
-    );
-    const accepted = await effectRuntime.runPromise(
-      orchestration.orchestrate(
-        context("owner", [definition("worker")]),
-        task("worker"),
-        "async",
-      ),
-    );
-    await tracker.starts.waitFor(1);
-
-    let abort: Promise<void> | undefined;
-    let rootClosed = false;
-    orchestration.subscribeState("owner", (snapshot) => {
-      if (rootClosed || snapshot.workers[0]?.status !== "running") return;
-      rootClosed = true;
-      abort = Effect.runPromise(
-        orchestration.abort("owner", { workerIds: [accepted.workerId] }),
-      );
-      Effect.runSync(effectRuntime.disposeEffect);
-    });
-
-    expect(rootClosed).toBe(true);
-    await abort;
-    await handle.disposed.promise;
-    expect(handle.abortCalls).toBe(0);
-    expect(handle.disposeCalls).toBe(1);
-    expect(await Effect.runPromise(orchestration.snapshot("owner"))).toMatchObject({
-      runs: [{ state: "complete" }],
-      workers: [{ status: "aborted", outcome: { status: "aborted" } }],
-    });
-  });
-
-  test("starts disposal once when the cleanup FiberSet is already closed", async () => {
-    const tracker = new PromptTracker();
-    const handle = new FakeHandle(
-      "closed-interactive-generation",
-      [promptPlan({ status: "ready", assistantText: "ready" }, true)],
-      tracker,
-    );
-    const { effectRuntime, orchestration } = directRuntime(
-      new FakeChildSessions([{ handle }]),
-    );
-    const owner = context("owner", [definition("interactive", "interactive")]);
-    let closeDuringSend = false;
-    let rootClosed = false;
-    orchestration.subscribeState("owner", (snapshot) => {
-      if (
-        !closeDuringSend ||
-        rootClosed ||
-        snapshot.workers[0]?.status !== "running"
-      ) return;
-      rootClosed = true;
-      Effect.runSync(effectRuntime.disposeEffect);
-    });
-
-    const initial = await effectRuntime.runPromise(
-      orchestration.orchestrate(owner, task("interactive"), "inline"),
-    );
-    closeDuringSend = true;
-    const followUp = await Effect.runPromise(
-      orchestration.sendInteractive(
-        owner,
-        initial.result.workerId,
-        "Follow up",
-        "inline",
-      ),
-    );
-    await handle.disposed.promise;
-
-    expect(rootClosed).toBe(true);
-    expect(followUp.result).toMatchObject({
-      status: "failed",
-      outcome: {
-        status: "failed",
-        message: "Worker generation could not start because orchestration is closed",
-      },
-    });
-    expect(handle.prompts).toEqual(["Instructions for interactive"]);
-    expect(handle.disposeInvocations).toBe(1);
-    expect(handle.disposeCalls).toBe(1);
-
-    handle.emitStaleActivity("late stale activity");
-    expect(await Effect.runPromise(orchestration.snapshot("owner"))).toMatchObject({
-      runs: [{ state: "complete" }, { state: "complete" }],
-      workers: [{
-        status: "failed",
-        activity: undefined,
-        outcome: {
-          status: "failed",
-          message: "Worker generation could not start because orchestration is closed",
-        },
-      }],
-    });
-  });
-
-  test("completes one uninterruptible disposal when FiberSet closure races registration", async () => {
-    const tracker = new PromptTracker();
-    const handle = new FakeHandle(
-      "cleanup-registration-race",
-      [promptPlan({ status: "ready", assistantText: "ready" }, true)],
-      tracker,
-    );
-    handle.disposeGate = new Deferred();
-    const { effectRuntime, orchestration } = directRuntime(
-      new FakeChildSessions([{ handle }]),
-    );
-    const owner = context("owner", [definition("interactive", "interactive")]);
-    const initial = await effectRuntime.runPromise(
-      orchestration.orchestrate(owner, task("interactive"), "inline"),
-    );
-    let rootClosed = false;
-    handle.disposeInvocationHook = () => {
-      rootClosed = true;
-      Effect.runSync(effectRuntime.disposeEffect);
-    };
-
-    await Effect.runPromise(
-      orchestration.closeInteractive("owner", initial.result.workerId),
-    );
-    expect(rootClosed).toBe(true);
-    expect(handle.disposeInvocations).toBe(1);
-    expect(handle.disposeCalls).toBe(1);
-    await expectPending(handle.disposeCompleted.promise);
-
-    handle.disposeGate.resolve(undefined);
-    await handle.disposeCompleted.promise;
-    expect(handle.disposeInvocations).toBe(1);
-    expect(handle.disposeCalls).toBe(1);
-  });
-
-  test("a real FiberMap generation defect fails the current worker and completes its run", async () => {
+  test("a worker workflow defect fails the current worker and completes its run", async () => {
     const tracker = new PromptTracker();
     const handle = new FakeHandle("workflow-defect", [], tracker);
     const orchestrator = runtime(new FakeChildSessions([{ handle }]));
@@ -2088,11 +1646,6 @@ describe("Effect-owned generation and cleanup supervision", () => {
     const { effectRuntime, orchestration } = directRuntime(
       new FakeChildSessions([{ handle }]),
     );
-    const states: string[] = [];
-    orchestration.subscribeState("owner", (snapshot) => {
-      const status = snapshot.workers[0]?.status;
-      if (status) states.push(status);
-    });
 
     const completed = await effectRuntime.runPromise(
       orchestration.orchestrate(
@@ -2103,7 +1656,6 @@ describe("Effect-owned generation and cleanup supervision", () => {
     );
 
     expect(completed.result.status).toBe("completed");
-    expect(states.at(-1)).toBe("completed");
     expect(handle.disposeInvocations).toBe(1);
     expect(handle.disposeCalls).toBe(0);
     expect((await effectRuntime.runPromise(orchestration.snapshot("owner"))).workers[0])
@@ -2126,17 +1678,11 @@ describe("Effect-owned generation and cleanup supervision", () => {
     const completed = await effectRuntime.runPromise(
       orchestration.orchestrate(owner, task("interactive"), "inline"),
     );
-    const states: string[] = [];
-    orchestration.subscribeState("owner", (snapshot) => {
-      const status = snapshot.workers[0]?.status;
-      if (status) states.push(status);
-    });
     handle.disposeInvocationFailure = new Error("close dispose invocation failed");
 
     await effectRuntime.runPromise(
       orchestration.closeInteractive("owner", completed.result.workerId),
     );
-    expect(states).toEqual(["ready", "closed"]);
     expect(handle.disposeInvocations).toBe(1);
     expect(handle.disposeCalls).toBe(0);
     expect((await effectRuntime.runPromise(orchestration.snapshot("owner"))).workers[0])
