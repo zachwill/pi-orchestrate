@@ -696,7 +696,13 @@ describe("Pi 0.80.10 SDK integration", () => {
         /automatic delivery requires no keepalive activity.*do not call `sleep`.*poll with any tool.*inspect files or processes.*no-op tool calls.*only genuinely independent work.*otherwise end the turn/i,
       );
       expect(initialParent.systemPrompt).toMatch(
-        /parent reviews and synthesizes worker results.*resolves conflicts.*integrates changes.*relevant verification/i,
+        /own the outcome, not every implementation, review, or verification step.*delegate nontrivial implementation, review, integration assessment, and verification/i,
+      );
+      expect(initialParent.systemPrompt).toMatch(
+        /ensure worker results are independently reviewed and verified.*synthesize the resulting evidence.*resolve reported conflicts, disagreements, or blockers/i,
+      );
+      expect(initialParent.systemPrompt).toMatch(
+        /do not personally repeat delegated review or verification without a concrete reason/i,
       );
       expect(initialParent.systemPrompt).toContain("Trusted worker catalog");
       expect(initialParent.systemPrompt).toContain("`scout` [package]");

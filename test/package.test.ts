@@ -352,6 +352,10 @@ describe("shipped parent contract", () => {
     expect(contract).toMatch(/automatic delivery requires no keepalive activity/i);
     expect(contract).toMatch(/do not call `sleep`.*poll with any tool.*inspect files or processes.*no-op tool calls/i);
     expect(contract).toMatch(/only genuinely independent work.*otherwise end the turn/i);
+    expect(contract).toMatch(/own the outcome, not every implementation, review, or verification step/i);
+    expect(contract).toMatch(/delegate nontrivial implementation, review, integration assessment, and verification/i);
+    expect(contract).toMatch(/ensure worker results are independently reviewed and verified.*synthesize the resulting evidence/i);
+    expect(contract).toMatch(/do not personally repeat delegated review or verification without a concrete reason/i);
     expect(contract).not.toMatch(/\bworker_(?:send|close)\b/);
     expect(contract).not.toContain("orchestration_status");
     expect(contract).not.toMatch(/\breusable\b/i);

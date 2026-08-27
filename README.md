@@ -87,6 +87,6 @@ Workers can use global Pi settings, authentication, packages, extensions, skills
 
 A definition's `tools` field controls Pi's tool allowlist, not operating-system authority. A worker with `bash` can start external processes, including other agent CLIs. A read-only prompt also does not prevent writes when the worker has a write-capable tool.
 
-Concurrent workers share the same working tree, so overlapping write scopes can collide. The parent owns reviewing their output and integrating the result.
+Concurrent workers share the same working tree, so overlapping write scopes can collide. The parent owns the outcome and ensures worker output is independently reviewed, integrated, and verified. For nontrivial scopes, the parent delegates those activities instead of repeating them directly.
 
 Pi Orchestrate excludes itself from child sessions and keeps workers as direct Pi children.
