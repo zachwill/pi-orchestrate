@@ -593,6 +593,48 @@ describe("completion, interactive workers, and run ownership", () => {
     await orchestrator.shutdown();
   });
 
+  test("carries synthesis-group metadata through an async interactive follow-up", async () => {
+    const tracker = new PromptTracker();
+    const first = promptPlan({ status: "ready", assistantText: "first" });
+    const second = promptPlan({ status: "ready", assistantText: "second" });
+    const handle = new FakeHandle("interactive-group", [first, second], tracker);
+    const orchestrator = runtime(new FakeChildSessions([{ handle }]));
+    const worker = definition("interactive", "interactive");
+    const owner = context("owner", [worker]);
+
+    const initial = orchestrator.orchestrate(owner, task("interactive"), "inline");
+    await tracker.starts.waitFor(1);
+    first.gate.resolve(undefined);
+    const workerId = (await initial).result.workerId;
+
+    const settlement = new Deferred<WorkerSettlement>();
+    const unsubscribe = orchestrator.subscribeSettlement((event) => {
+      if (event.synthesisGroupId === "mixed-dispatch-group") settlement.resolve(event);
+    });
+    const groupedOwner = context("owner", [worker], {
+      synthesisGroup: { id: "mixed-dispatch-group", size: 2 },
+    });
+    await orchestrator.sendInteractive(
+      groupedOwner,
+      workerId,
+      "Grouped follow-up",
+      "async",
+    );
+    await tracker.starts.waitFor(2);
+    second.gate.resolve(undefined);
+
+    expect(await settlement.promise).toMatchObject({
+      workerId,
+      mode: "async",
+      synthesisGroupId: "mixed-dispatch-group",
+      synthesisGroupSize: 2,
+      outcome: { status: "ready", assistantText: "second" },
+    });
+    unsubscribe();
+    await orchestrator.closeInteractive("owner", workerId);
+    await orchestrator.shutdown();
+  });
+
   test("automatically disposes completed one-shot workers and rejects interactive close", async () => {
     const tracker = new PromptTracker();
     const prompt = promptPlan({ status: "completed", assistantText: "done" });

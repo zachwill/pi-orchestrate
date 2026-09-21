@@ -7,7 +7,7 @@ export const MAX_WORKER_DELIVERY_MARKDOWN_BYTES = 16 * 1024;
 export const DELIVERY_TRUNCATION_MARKER =
   "\n\n[Worker result truncated for parent context. Full output remains in structured details.]";
 export const DELIVERY_PARENT_INSTRUCTIONS =
-  "Parent: Synthesize all results, resolve conflicts, review changes and evidence, run integration checks, and continue the user's task. Do not merely forward worker reports.";
+  "Parent: Use these results as input to the user's task. Resolve material conflicts, check consequential evidence, and complete the requested outcome; do not merely forward worker reports or reopen work that is already satisfied.";
 
 export type ParentBindingGeneration = string | number | symbol;
 export type ScheduleIdleRecheck = (recheck: () => void) => () => void;

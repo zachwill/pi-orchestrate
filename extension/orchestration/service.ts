@@ -376,14 +376,13 @@ class OrchestrationEngine implements OrchestrationService {
       const runId = this.idFactories.runId();
       const completion = yield* Deferred.make<CompletedRun>();
       const now = this.clock.currentTimeMillisUnsafe();
-      const runRecord: RunRecord = {
-        id: runId,
-        ownerSessionId: context.ownerSessionId,
-        workerId: validatedWorkerId,
+      const runRecord = makeRunRecord(
+        runId,
+        validatedWorkerId,
+        context,
         mode,
-        state: "running",
-        createdAt: now,
-      };
+        now,
+      );
 
       const admission = this.transact((draft) => {
         const ready = readyInteractiveDecision(

@@ -27,7 +27,6 @@ import type {
 } from "../../extension/orchestration/admission.ts";
 import type {
   AcceptedRun,
-  CompletedRun,
   OwnerSnapshot,
   SettlementListener,
 } from "../../extension/orchestration/service.ts";
@@ -37,7 +36,6 @@ import {
   type OrchestrationToolDependencies,
 } from "../../extension/pi/tools.ts";
 import type { DispatchDecision } from "../../extension/parent/dispatch-policy.ts";
-import type { WorkerSettlement } from "../../extension/orchestration/settlement.ts";
 
 beforeAll(() => initTheme("dark", false));
 
@@ -65,7 +63,6 @@ class FakeOrchestrationClient {
     mode: DispatchMode;
     signal?: AbortSignal;
   }> = [];
-  settlementToEmit: WorkerSettlement | undefined;
   readonly interactiveSendCalls: Array<{
     context: OrchestrationContext;
     workerId: string;
@@ -81,7 +78,6 @@ class FakeOrchestrationClient {
     id: "run-accepted" as RunId,
     workerId: "worker-accepted" as WorkerId,
   };
-  completedRun: CompletedRun = completedRun();
   snapshotResult: OwnerSnapshot = snapshot();
   failures: Partial<
     Record<"orchestrate" | "sendInteractive" | "abort" | "closeInteractive" | "snapshot", Error>
@@ -93,12 +89,12 @@ class FakeOrchestrationClient {
     mode: DispatchMode,
     signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun | CompletedRun> {
+  ): Promise<AcceptedRun> {
     if (signal?.aborted) throw signal.reason;
     this.orchestrateCalls.push({ context, task, mode, signal });
     if (this.failures.orchestrate) throw this.failures.orchestrate;
-    if (mode === "inline" && this.settlementToEmit) onSettlement?.(this.settlementToEmit);
-    return mode === "async" ? this.acceptedRun : this.completedRun;
+    void onSettlement;
+    return this.acceptedRun;
   }
 
   async sendInteractive(
@@ -108,12 +104,12 @@ class FakeOrchestrationClient {
     mode: DispatchMode,
     signal?: AbortSignal,
     onSettlement?: SettlementListener,
-  ): Promise<AcceptedRun | CompletedRun> {
+  ): Promise<AcceptedRun> {
     if (signal?.aborted) throw signal.reason;
     this.interactiveSendCalls.push({ context, workerId, instructions, mode, signal });
     if (this.failures.sendInteractive) throw this.failures.sendInteractive;
-    if (mode === "inline" && this.settlementToEmit) onSettlement?.(this.settlementToEmit);
-    return mode === "async" ? this.acceptedRun : this.completedRun;
+    void onSettlement;
+    return this.acceptedRun;
   }
 
   async abort(ownerSessionId: string, target: AbortTarget): Promise<void> {
@@ -140,7 +136,6 @@ interface Harness {
   readonly catalog: WorkerCatalog;
   readonly catalogCalls: ExtensionContext[];
   readonly dispatchCalls: string[];
-  readonly modes: Map<string, DispatchMode>;
   readonly synthesisGroups: Map<string, DispatchDecision["synthesisGroup"]>;
 }
 
@@ -158,7 +153,6 @@ function harness(): Harness {
   const context = extensionContext();
   const catalogCalls: ExtensionContext[] = [];
   const dispatchCalls: string[] = [];
-  const modes = new Map<string, DispatchMode>();
   const synthesisGroups = new Map<string, DispatchDecision["synthesisGroup"]>();
   const deps: OrchestrationToolDependencies = {
     orchestration: runtime as unknown as OrchestrationClient,
@@ -169,10 +163,7 @@ function harness(): Harness {
     getDispatchDecision(toolCallId) {
       dispatchCalls.push(toolCallId);
       const synthesisGroup = synthesisGroups.get(toolCallId);
-      return {
-        mode: modes.get(toolCallId) ?? "async",
-        ...(synthesisGroup ? { synthesisGroup } : {}),
-      };
+      return synthesisGroup ? { synthesisGroup } : {};
     },
   };
 
@@ -184,7 +175,6 @@ function harness(): Harness {
     catalog,
     catalogCalls,
     dispatchCalls,
-    modes,
     synthesisGroups,
   };
 }
@@ -278,25 +268,6 @@ const usage: WorkerUsage = {
   contextTokens: 16,
   turns: 2,
 };
-
-function completedRun(): CompletedRun {
-  return {
-    id: "run-inline" as RunId,
-    ownerSessionId: "owner-session",
-    mode: "inline",
-    result: {
-      workerId: "worker-inline" as WorkerId,
-      worker: "scout",
-      title: "Inspect",
-      status: "completed",
-      outcome: { status: "completed", assistantText: "Inspection complete." },
-      usage,
-      startedAt: 1_000,
-      settledAt: 6_000,
-      sessionFile: "/sessions/worker-inline.jsonl",
-    },
-  };
-}
 
 function snapshot(): OwnerSnapshot {
   return {
@@ -415,10 +386,8 @@ describe("registerOrchestrationTools", () => {
       catalog,
       catalogCalls,
       dispatchCalls,
-      modes,
       synthesisGroups,
     } = harness();
-    modes.set("orchestrate-call", "async");
     synthesisGroups.set("orchestrate-call", { id: "synthesis-group", size: 2 });
     const task = { worker: "scout", title: "Inspect", instructions: "Inspect." };
     const controller = new AbortController();
@@ -451,7 +420,7 @@ describe("registerOrchestrationTools", () => {
       mode: "async",
       signal: controller.signal,
     });
-    expect(result.terminate).toBe(true);
+    expect(result).not.toHaveProperty("terminate");
     expect(result.details).toEqual({
       mode: "async",
       run_id: runtime.acceptedRun.id,
@@ -476,12 +445,11 @@ describe("registerOrchestrationTools", () => {
     ] as const;
 
     for (const testCase of cases) {
-      const { pi, runtime, context, modes } = harness();
+      const { pi, runtime, context } = harness();
       const toolCallId = `${testCase.tool}-aborted`;
       const reason = { kind: "parent-turn-ended", tool: testCase.tool };
       const controller = new AbortController();
       controller.abort(reason);
-      modes.set(toolCallId, "async");
 
       const rejectedReason = await invoke(
         pi,
@@ -504,93 +472,32 @@ describe("registerOrchestrationTools", () => {
     }
   });
 
-  test("returns one inline result without termination", async () => {
-    const { pi, runtime, context, modes } = harness();
-    modes.set("inline-call", "inline");
+  test("interactive_send is always async and forwards its synthesis group", async () => {
+    const { pi, runtime, context, synthesisGroups } = harness();
+    synthesisGroups.set("send", { id: "dispatch:send", size: 2 });
     const controller = new AbortController();
 
     const result = await invoke(
       pi,
-      "orchestrate",
-      "inline-call",
-      { worker: "scout", title: "Inspect", instructions: "Inspect." },
-      context,
-      controller.signal,
-    );
-
-    expect(runtime.orchestrateCalls[0]?.mode).toBe("inline");
-    expect(runtime.orchestrateCalls[0]?.signal).toBe(controller.signal);
-    controller.abort();
-    expect(runtime.orchestrateCalls[0]?.signal?.aborted).toBe(true);
-    expect(result).not.toHaveProperty("terminate");
-    expect(result.details).toMatchObject({
-      mode: "inline",
-      run_id: runtime.completedRun.id,
-      result: {
-        worker_id: runtime.completedRun.result.workerId,
-        worker: "scout",
-        title: "Inspect",
-      },
-    });
-    expect(result.content[0]?.type === "text" && result.content[0].text).toContain(
-      "Inspection complete.",
-    );
-    const rendered = pi.tool("orchestrate").renderResult!(
-      result,
-      { isPartial: false, expanded: false },
-      themeForRendering(),
-      { lastComponent: undefined } as never,
-    );
-    expect(Bun.stripANSI(rendered.render(80).join("\n"))).toContain(
-      "✓ Inspect · scout · 5s",
-    );
-  });
-
-  test("interactive_send forwards plain worker IDs and follows mode termination semantics", async () => {
-    const { pi, runtime, context, modes } = harness();
-    modes.set("send-async", "async");
-    modes.set("send-inline", "inline");
-    const controller = new AbortController();
-
-    const asyncResult = await invoke(
-      pi,
       "interactive_send",
-      "send-async",
+      "send",
       { worker_id: "worker-ready", instructions: "Continue." },
       context,
       controller.signal,
     );
-    const inlineResult = await invoke(
-      pi,
-      "interactive_send",
-      "send-inline",
-      { worker_id: "worker-ready", instructions: "Finish." },
-      context,
-      controller.signal,
-    );
 
-    expect(runtime.interactiveSendCalls.map(({ workerId, instructions, mode, signal }) => ({
-      workerId,
-      instructions,
-      mode,
-      signal,
-    }))).toEqual([
-      {
-        workerId: "worker-ready",
-        instructions: "Continue.",
-        mode: "async",
-        signal: controller.signal,
+    expect(runtime.interactiveSendCalls).toHaveLength(1);
+    expect(runtime.interactiveSendCalls[0]).toMatchObject({
+      workerId: "worker-ready",
+      instructions: "Continue.",
+      mode: "async",
+      signal: controller.signal,
+      context: {
+        ownerSessionId: "owner-session",
+        synthesisGroup: { id: "dispatch:send", size: 2 },
       },
-      {
-        workerId: "worker-ready",
-        instructions: "Finish.",
-        mode: "inline",
-        signal: controller.signal,
-      },
-    ]);
-    expect(runtime.interactiveSendCalls[0]?.context.ownerSessionId).toBe("owner-session");
-    expect(asyncResult.terminate).toBe(true);
-    expect(inlineResult).not.toHaveProperty("terminate");
+    });
+    expect(result).not.toHaveProperty("terminate");
   });
 
   test("worker_status forwards only the current owner and returns catalog diagnostics plus state", async () => {
@@ -677,44 +584,6 @@ describe("registerOrchestrationTools", () => {
     expect(runtime.orchestrateCalls.at(-1)?.task).toEqual(task);
     await invoke(pi, "interactive_send", "exact-send", { worker_id: "worker-1", instructions }, context);
     expect(runtime.interactiveSendCalls.at(-1)?.instructions).toBe(instructions);
-  });
-
-  test("publishes the current inline settlement update", async () => {
-    const { pi, runtime, context, modes } = harness();
-    modes.set("inline-partial", "inline");
-    runtime.settlementToEmit = {
-      eventId: "settlement-inline",
-      sequence: 1,
-      ownerSessionId: "owner-session",
-      runId: "run-inline" as RunId,
-      workerId: "worker-inline" as WorkerId,
-      generation: 1,
-      mode: "inline",
-      worker: "scout",
-      title: "Inspect",
-      lifecycle: "one-shot",
-      status: "completed",
-      outcome: { status: "completed", assistantText: "Live complete response." },
-      usage,
-      startedAt: 1,
-      settledAt: 2,
-      sessionFile: "/sessions/worker-inline.jsonl",
-    };
-    const updates: unknown[] = [];
-    await invoke(pi, "orchestrate", "inline-partial", { worker: "scout", title: "Inspect", instructions: "Inspect." }, context, undefined, (update) => updates.push(update));
-    expect(updates).toHaveLength(1);
-    expect(updates[0]).toMatchObject({
-      details: {
-        mode: "inline",
-        result: {
-          worker_id: "worker-inline",
-          outcome: {
-            status: "completed",
-            assistant_text: "Live complete response.",
-          },
-        },
-      },
-    });
   });
 
   test("throws execution failures instead of returning fake error results", async () => {

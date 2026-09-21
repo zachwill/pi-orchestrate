@@ -6,7 +6,6 @@ export interface ParentToolCall {
 }
 
 export interface DispatchDecision {
-  readonly mode: "async" | "inline";
   readonly synthesisGroup?: SynthesisGroup;
 }
 
@@ -20,30 +19,21 @@ const DISPATCH_TOOL_NAMES: ReadonlySet<string> = new Set([
   "interactive_send",
 ]);
 
-// Sole dispatches and homogeneous orchestrate waves detach so the parent turn can
-// end while work continues. Mixed tools stay inline because their shared parent
-// turn still has sibling work; one wave boundary defers one synthesis turn until
-// every admitted member has settled.
+// Every public dispatch detaches so sibling parent tools can finish independently.
+// Dispatches from one assistant response share a synthesis boundary; ordinary
+// sibling tools are neither group members nor part of its expected size.
 export function classifyParentDispatches(
   toolCalls: readonly ParentToolCall[],
 ): readonly ClassifiedParentDispatch[] {
-  const isOrchestrateGroup =
-    toolCalls.length > 1 &&
-    toolCalls.every((toolCall) => toolCall.name === "orchestrate");
-  const synthesisGroup = isOrchestrateGroup
-    ? { id: `orchestrate:${toolCalls[0]?.id ?? "group"}`, size: toolCalls.length }
+  const dispatches = toolCalls.filter((toolCall) =>
+    DISPATCH_TOOL_NAMES.has(toolCall.name)
+  );
+  const synthesisGroup = dispatches.length > 1
+    ? { id: `dispatch:${dispatches[0]!.id}`, size: dispatches.length }
     : undefined;
 
-  return toolCalls.flatMap((toolCall): ClassifiedParentDispatch[] => {
-    if (!DISPATCH_TOOL_NAMES.has(toolCall.name)) return [];
-    return [{
-      toolCallId: toolCall.id,
-      decision: {
-        mode: isOrchestrateGroup || toolCalls.length === 1 ? "async" : "inline",
-        ...(toolCall.name === "orchestrate" && synthesisGroup
-          ? { synthesisGroup }
-          : {}),
-      },
-    }];
-  });
+  return dispatches.map((toolCall) => ({
+    toolCallId: toolCall.id,
+    decision: synthesisGroup ? { synthesisGroup } : {},
+  }));
 }

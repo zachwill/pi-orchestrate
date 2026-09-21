@@ -84,7 +84,7 @@ export function createOrchestrationExtension(
         orchestration: host.orchestration,
         getCatalog: catalogFor,
         getDispatchDecision: (toolCallId) =>
-          dispatchDecisions.get(toolCallId) ?? { mode: "inline" },
+          dispatchDecisions.get(toolCallId) ?? {},
       });
       hostAttachment ??= attachProcessHost(host);
 

@@ -524,7 +524,7 @@ describe("Pi Orchestrate extension integration", () => {
     expect(runtime.orchestrateCalls[0]?.context.projectTrusted).toBe(true);
   });
 
-  test("propagates a pure dispatch mode from the hook through the registered tool adapter", async () => {
+  test("propagates a pure async dispatch without terminating the parent run", async () => {
     const pi = new FakePi();
     const { host, runtime } = fakeHost();
     install(pi, host);
@@ -539,10 +539,10 @@ describe("Pi Orchestrate extension integration", () => {
     const result = await invoke(pi, "orchestrate", "pure", orchestrationParams, ctx);
 
     expect(runtime.orchestrateCalls[0]?.mode).toBe("async");
-    expect(result.terminate).toBe(true);
+    expect(result).not.toHaveProperty("terminate");
   });
 
-  test("classifies interactive sends and clears their dispatch decision after execution", async () => {
+  test("keeps interactive sends async beside ordinary tools and after decision cleanup", async () => {
     const pi = new FakePi();
     const { host, runtime } = fakeHost();
     install(pi, host);
@@ -586,12 +586,12 @@ describe("Pi Orchestrate extension integration", () => {
 
     expect(runtime.interactiveSendModes).toEqual([
       "async",
-      "inline",
-      "inline",
+      "async",
+      "async",
     ]);
   });
 
-  test("keeps a mixed call inline and marks a sibling dispatch group for synthesis", async () => {
+  test("keeps dispatches async beside ordinary tools and groups only dispatch siblings", async () => {
     const pi = new FakePi();
     const { host, runtime } = fakeHost();
     install(pi, host);
@@ -608,7 +608,7 @@ describe("Pi Orchestrate extension integration", () => {
       },
       ctx,
     );
-    const inlineResult = await invoke(
+    const mixedResult = await invoke(
       pi,
       "orchestrate",
       "mixed-dispatch",
@@ -634,11 +634,12 @@ describe("Pi Orchestrate extension integration", () => {
       .slice(-2)
       .map((call) => call.context.synthesisGroup);
 
-    expect(inlineResult).not.toHaveProperty("terminate");
+    expect(runtime.orchestrateCalls.at(-3)?.mode).toBe("async");
+    expect(runtime.orchestrateCalls.at(-3)?.context.synthesisGroup).toBeUndefined();
+    expect(mixedResult).not.toHaveProperty("terminate");
     expect(synthesisGroups[0]).toEqual(synthesisGroups[1]);
     expect(synthesisGroups[0]?.size).toBe(2);
-    expect(groupedResults.every((result) => "terminate" in result && result.terminate === true))
-      .toBe(true);
+    expect(groupedResults.every((result) => !("terminate" in result))).toBe(true);
   });
 
   test("finishes an async sibling group when one call fails before admission", async () => {
@@ -663,7 +664,7 @@ describe("Pi Orchestrate extension integration", () => {
     host.delivery.accept(workerSettlement("owner-group", {
       eventId: "group-result",
       sequence: 50,
-      synthesisGroupId: "orchestrate:group-valid",
+      synthesisGroupId: "dispatch:group-valid",
       synthesisGroupSize: 2,
     }));
     await pi.emit("tool_execution_end", {

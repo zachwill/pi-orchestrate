@@ -146,7 +146,7 @@ function renderContext(
   const guidance: string[] = [];
   if (activeCount > 0) {
     guidance.push(
-      "Do not duplicate active assignments. Wait for automatic result delivery; do not poll worker_status for completion.",
+      "Do not duplicate active assignments. Continue useful independent work when it materially advances the outcome.",
     );
   }
   if (readyCount > 0) {
@@ -155,7 +155,7 @@ function renderContext(
     );
   }
   guidance.push(
-    "Use worker_status only for diagnostics or recovery when this snapshot reports overflow or state appears inconsistent.",
+    "Settled results are delivered automatically after the parent run ends. If progress depends on pending evidence, end the run truthfully rather than polling. Use worker_status only for diagnostics or recovery when this snapshot reports overflow or state appears inconsistent.",
   );
   sections.push(`Guidance:\n- ${guidance.join("\n- ")}`);
 

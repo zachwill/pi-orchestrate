@@ -165,6 +165,50 @@ describe("DeliveryCoordinator worker settlements", () => {
     ]);
   });
 
+  test("resumes each overlapping synthesis group at its own completion boundary", () => {
+    const coordinator = new DeliveryCoordinator();
+    const parent = createBinding("owner-a", 1);
+    coordinator.bind(parent.binding);
+
+    coordinator.accept(settlement({
+      eventId: "group-a-first",
+      sequence: 30,
+      synthesisGroupId: "group-a",
+      synthesisGroupSize: 2,
+    }));
+    coordinator.accept(settlement({
+      eventId: "group-b-first",
+      sequence: 31,
+      synthesisGroupId: "group-b",
+      synthesisGroupSize: 2,
+    }));
+    coordinator.accept(settlement({
+      eventId: "group-b-final",
+      sequence: 32,
+      synthesisGroupId: "group-b",
+      synthesisGroupSize: 2,
+    }));
+
+    expect(parent.sent.map(({ message }) => message.details.eventId)).toEqual([
+      "group-a-first",
+      "group-b-first",
+      "group-b-final",
+    ]);
+    expect(parent.sent.map(({ options }) => options.triggerTurn)).toEqual([false, false, true]);
+
+    coordinator.accept(settlement({
+      eventId: "group-a-final",
+      sequence: 33,
+      synthesisGroupId: "group-a",
+      synthesisGroupSize: 2,
+    }));
+    expect(coordinator.pendingCount("owner-a")).toBe(1);
+    coordinator.markAgentSettled("owner-a", 1);
+
+    expect(parent.sent.at(-1)?.message.details.eventId).toBe("group-a-final");
+    expect(parent.sent.at(-1)?.options.triggerTurn).toBe(true);
+  });
+
   test("shrinks an async synthesis group when a sibling call fails preflight", () => {
     const coordinator = new DeliveryCoordinator();
     const parent = createBinding("owner-a", 1, false);

@@ -16,9 +16,11 @@ pi install npm:@zachwill/pi-orchestrate
 
 Each `orchestrate` dispatch creates a fresh worker session with its own transcript. The worker receives a complete brief from the parent but not the parent's conversation.
 
-A worker definition is reusable configuration for the worker's prompt, tools, lifecycle, and optional model settings.
+A worker definition is reusable configuration for the worker's prompt, tools, lifecycle, and optional model settings. The parent remains responsible for the user's complete requested outcome across its own and worker work.
 
-Independent workers dispatched together run concurrently. Their results return only to the parent session that started them, and the parent synthesizes the group after every worker finishes. A rejected or failed worker does not cancel its peers. Orchestration dispatched alongside unrelated tool calls runs inline instead of in the background.
+Workers run in the background. `orchestrate` and `interactive_send` return acceptance so the parent can continue useful independent work, including tool calls dispatched alongside the workers. Worker dispatches in the same response form one result group; dispatches in later responses form separate groups.
+
+Results return only to the parent session that started the workers. Results that settle while the parent is busy are queued. After the parent run ends normally, individual results can enter its context as they arrive; a dispatch group resumes the parent after every admitted member settles. The parent can do useful independent work before ending its run, or end promptly when progress needs worker evidence. A rejected, failed, or aborted worker does not cancel its peers; stopping other active workers requires an explicit `worker_abort` request.
 
 Workers have one of two lifecycles:
 

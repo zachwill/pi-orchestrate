@@ -30,6 +30,7 @@ import { createOrchestrationExtension } from "../extension/index.ts";
 import { LIVE_WORKER_CONTEXT_TYPE } from "../extension/parent/worker-context.ts";
 
 interface WorkerResultDetails {
+  workerId: string;
   title: string;
   outcome: { assistantText?: string };
   synthesisGroupId?: string;
@@ -45,11 +46,33 @@ const MODEL_ID = "deterministic-agent";
 const API_ID = "pi-orchestrate-memory";
 const BASE_SYSTEM_PROMPT = "PARENT_BASE_PROMPT";
 
-type Scenario = "async" | "parallel" | "mixed" | "failure" | "shutdown";
+type Scenario =
+  | "async"
+  | "parallel"
+  | "decoupled"
+  | "admission-failure"
+  | "interactive"
+  | "mixed"
+  | "failure"
+  | "shutdown";
 type ProviderConfig = Parameters<ModelRuntime["registerProvider"]>[1];
 
 interface ProviderRequest {
-  readonly kind: "parent-initial" | "parent-synthesis" | "parent-checkpoint" | "compaction" | "child-alpha" | "child-beta" | "child-inline" | "child-failure";
+  readonly kind:
+    | "parent-initial"
+    | "parent-independent-second"
+    | "parent-pending"
+    | "parent-interactive-send"
+    | "parent-interactive-close"
+    | "parent-synthesis"
+    | "parent-checkpoint"
+    | "compaction"
+    | "child-alpha"
+    | "child-beta"
+    | "child-mixed"
+    | "child-failure"
+    | "child-interactive-start"
+    | "child-interactive-followup";
   readonly provider: string;
   readonly model: string;
   readonly systemPrompt: string;
@@ -107,7 +130,16 @@ interface SmokeHarness {
   readonly childProviderAborted: Counter;
   readonly childSessionShutdowns: Counter;
   readonly childExtensionStateKey: string;
-  readonly childGates: Readonly<Record<"child-alpha" | "child-beta" | "child-inline" | "child-failure", Deferred>>;
+  readonly childGates: Readonly<Record<
+    | "child-alpha"
+    | "child-beta"
+    | "child-mixed"
+    | "child-failure"
+    | "child-interactive-start"
+    | "child-interactive-followup",
+    Deferred
+  >>;
+  readonly parentIndependentSecondStarted: Counter;
   readonly previousAgentDir: string | undefined;
   readonly previousOffline: string | undefined;
   disposed: boolean;
@@ -270,22 +302,52 @@ function transcriptText(context: Context): string {
     .join("\n");
 }
 
-function providerKind(systemPrompt: string, transcript: string): ProviderRequest["kind"] {
+function providerKind(
+  scenario: Scenario,
+  systemPrompt: string,
+  transcript: string,
+): ProviderRequest["kind"] {
   if (systemPrompt.includes("You are a context summarization assistant")) return "compaction";
-  if (!systemPrompt.includes("direct child worker session")) {
-    return transcript.includes("RESULT_ALPHA") ||
-      transcript.includes("RESULT_BETA") ||
-      transcript.includes("DETERMINISTIC_PROVIDER_FAILURE") ||
-      transcript.includes("Completed inline run")
-      ? "parent-synthesis"
-      : transcript.includes("CONTEXT_CHECKPOINT") || transcript.includes("COMPACTED_CHECKPOINT")
-        ? "parent-checkpoint"
-        : "parent-initial";
+  if (systemPrompt.includes("direct child worker session")) {
+    if (transcript.includes("INTERACTIVE_FOLLOWUP")) return "child-interactive-followup";
+    if (transcript.includes("INTERACTIVE_START")) return "child-interactive-start";
+    if (transcript.includes("ALPHA_TASK")) return "child-alpha";
+    if (transcript.includes("BETA_TASK")) return "child-beta";
+    if (transcript.includes("FAIL_TASK")) return "child-failure";
+    return "child-mixed";
   }
-  if (transcript.includes("ALPHA_TASK")) return "child-alpha";
-  if (transcript.includes("BETA_TASK")) return "child-beta";
-  if (transcript.includes("FAIL_TASK")) return "child-failure";
-  return "child-inline";
+
+  if (scenario === "interactive") {
+    if (transcript.includes("RESULT_INTERACTIVE_FOLLOWUP")) {
+      return transcript.includes("Closed worker ")
+        ? "parent-synthesis"
+        : "parent-interactive-close";
+    }
+    if (transcript.includes("RESULT_INTERACTIVE_READY")) {
+      const acceptedRuns = transcript.match(/Accepted async run/g)?.length ?? 0;
+      return acceptedRuns >= 2 ? "parent-pending" : "parent-interactive-send";
+    }
+    if (transcript.includes("Accepted async run")) return "parent-pending";
+    return "parent-initial";
+  }
+  if (
+    transcript.includes("RESULT_ALPHA") ||
+    transcript.includes("RESULT_BETA") ||
+    transcript.includes("DETERMINISTIC_PROVIDER_FAILURE") ||
+    transcript.includes("RESULT_MIXED")
+  ) {
+    return "parent-synthesis";
+  }
+  if (transcript.includes("CONTEXT_CHECKPOINT") || transcript.includes("COMPACTED_CHECKPOINT")) {
+    return "parent-checkpoint";
+  }
+  if (transcript.includes("Accepted async run")) {
+    if (scenario === "decoupled" && !transcript.includes("second-fixture-content")) {
+      return "parent-independent-second";
+    }
+    return "parent-pending";
+  }
+  return "parent-initial";
 }
 
 function createProviderExtension(
@@ -296,6 +358,7 @@ function createProviderExtension(
   childRequestsStarted: Counter,
   childProviderSignals: AbortSignal[],
   childProviderAborted: Counter,
+  parentIndependentSecondStarted: Counter,
   compaction?: CompactionControl,
 ): InlineExtension {
   const streamSimple = (
@@ -305,7 +368,7 @@ function createProviderExtension(
   ): AssistantMessageEventStream => {
     const systemPrompt = context.systemPrompt ?? "";
     const transcript = transcriptText(context);
-    const kind = providerKind(systemPrompt, transcript);
+    const kind = providerKind(scenario, systemPrompt, transcript);
     requests.push({
       kind,
       provider: requestedModel.provider,
@@ -329,7 +392,55 @@ function createProviderExtension(
       return streamText("Checkpoint acknowledged.", highUsage ? 20_000 : 1);
     }
 
+    if (kind === "parent-independent-second") {
+      parentIndependentSecondStarted.increment();
+      return streamToolCalls([{
+        type: "toolCall",
+        id: "independent-read-second",
+        name: "read",
+        arguments: { path: "second-fixture.txt" },
+      }]);
+    }
+
+    if (kind === "parent-pending") {
+      return streamText("Worker evidence is pending; I will combine it when delivered.");
+    }
+
+    if (kind === "parent-interactive-send" || kind === "parent-interactive-close") {
+      const workerId = transcript.match(/Worker `(worker-[^`]+)`/)?.[1];
+      if (!workerId) return streamError("Interactive worker ID missing from delivery");
+      return streamToolCalls([kind === "parent-interactive-send"
+        ? {
+            type: "toolCall",
+            id: "interactive-followup",
+            name: "interactive_send",
+            arguments: {
+              worker_id: workerId,
+              instructions: "INTERACTIVE_FOLLOWUP: return follow-up evidence.",
+            },
+          }
+        : {
+            type: "toolCall",
+            id: "interactive-close",
+            name: "interactive_close",
+            arguments: { worker_id: workerId },
+          }]);
+    }
+
     if (kind === "parent-initial") {
+      if (scenario === "interactive") {
+        return streamToolCalls([{
+          type: "toolCall",
+          id: "dispatch-interactive",
+          name: "orchestrate",
+          arguments: {
+            worker: "collaborator",
+            title: "Interactive task",
+            instructions: "INTERACTIVE_START: become ready for follow-up.",
+          },
+        }]);
+      }
+
       if (scenario === "async" || scenario === "shutdown") {
         return streamToolCalls([
           {
@@ -345,7 +456,7 @@ function createProviderExtension(
         ]);
       }
 
-      if (scenario === "parallel") {
+      if (scenario === "parallel" || scenario === "decoupled") {
         return streamToolCalls([
           {
             type: "toolCall",
@@ -367,6 +478,39 @@ function createProviderExtension(
               instructions: "BETA_TASK: return deterministic beta evidence.",
             },
           },
+          ...(scenario === "decoupled"
+            ? [{
+                type: "toolCall" as const,
+                id: "independent-read-first",
+                name: "read",
+                arguments: { path: "fixture.txt" },
+              }]
+            : []),
+        ]);
+      }
+
+      if (scenario === "admission-failure") {
+        return streamToolCalls([
+          {
+            type: "toolCall",
+            id: "dispatch-valid",
+            name: "orchestrate",
+            arguments: {
+              worker: "scout",
+              title: "Admitted peer",
+              instructions: "ALPHA_TASK: return deterministic alpha evidence.",
+            },
+          },
+          {
+            type: "toolCall",
+            id: "dispatch-rejected",
+            name: "orchestrate",
+            arguments: {
+              worker: "missing-worker",
+              title: "Rejected peer",
+              instructions: "This worker must fail admission.",
+            },
+          },
         ]);
       }
 
@@ -386,12 +530,12 @@ function createProviderExtension(
       return streamToolCalls([
         {
           type: "toolCall",
-          id: "dispatch-inline",
+          id: "dispatch-mixed",
           name: "orchestrate",
           arguments: {
             worker: "scout",
-            title: "Inline task",
-            instructions: "INLINE_TASK: return deterministic inline evidence.",
+            title: "Mixed task",
+            instructions: "MIXED_TASK: return deterministic mixed-call evidence.",
           },
         },
         {
@@ -408,9 +552,15 @@ function createProviderExtension(
         ? `SYNTHESIS:${transcript.includes("RESULT_ALPHA")}`
         : scenario === "parallel"
           ? `PARALLEL_SYNTHESIS:${transcript.includes("RESULT_ALPHA")}:${transcript.includes("RESULT_BETA")}`
-          : scenario === "failure"
-          ? `FAILURE_SYNTHESIS:${transcript.includes("DETERMINISTIC_PROVIDER_FAILURE")}`
-          : `INLINE_SYNTHESIS:${transcript.includes("RESULT_INLINE")}:${transcript.includes("fixture-content")}`;
+          : scenario === "decoupled"
+            ? `DECOUPLED_SYNTHESIS:${transcript.includes("fixture-content")}:${transcript.includes("second-fixture-content")}:${transcript.includes("RESULT_ALPHA")}:${transcript.includes("RESULT_BETA")}`
+            : scenario === "admission-failure"
+              ? `ADMISSION_SYNTHESIS:${transcript.includes("RESULT_ALPHA")}:${transcript.includes("Unknown worker")}`
+              : scenario === "interactive"
+                ? `INTERACTIVE_SYNTHESIS:${transcript.includes("RESULT_INTERACTIVE_READY")}:${transcript.includes("RESULT_INTERACTIVE_FOLLOWUP")}:${transcript.includes("Closed worker")}`
+                : scenario === "failure"
+                  ? `FAILURE_SYNTHESIS:${transcript.includes("DETERMINISTIC_PROVIDER_FAILURE")}`
+                  : `MIXED_SYNTHESIS:${transcript.includes("RESULT_MIXED")}:${transcript.includes("fixture-content")}`;
       events.push("provider:parent-synthesis:done");
       return streamText(synthesis);
     }
@@ -425,7 +575,11 @@ function createProviderExtension(
       ? "RESULT_ALPHA"
       : kind === "child-beta"
         ? "RESULT_BETA"
-        : "RESULT_INLINE";
+        : kind === "child-interactive-start"
+          ? "RESULT_INTERACTIVE_READY"
+          : kind === "child-interactive-followup"
+            ? "RESULT_INTERACTIVE_FOLLOWUP"
+            : "RESULT_MIXED";
     const stream = createAssistantMessageEventStream();
     if (options?.signal) {
       childProviderSignals.push(options.signal);
@@ -530,6 +684,19 @@ async function createHarness(
   await mkdir(cwd, { recursive: true });
   await mkdir(agentDir, { recursive: true });
   await Bun.write(join(cwd, "fixture.txt"), "fixture-content\n");
+  await Bun.write(join(cwd, "second-fixture.txt"), "second-fixture-content\n");
+  if (scenario === "interactive") {
+    const workersDir = join(agentDir, "pi-orchestrate", "workers");
+    await mkdir(workersDir, { recursive: true });
+    await Bun.write(join(workersDir, "collaborator.md"), `---
+name: collaborator
+description: Deterministic interactive SDK worker
+tools: read
+lifecycle: interactive
+---
+You are the deterministic interactive SDK worker.
+`);
+  }
 
   const childSessionShutdowns = new Counter();
   const childExtensionStateKey = `__pi_orchestrate_sdk_${crypto.randomUUID().replaceAll("-", "_")}`;
@@ -560,11 +727,14 @@ async function createHarness(
   const childRequestsStarted = new Counter();
   const childProviderSignals: AbortSignal[] = [];
   const childProviderAborted = new Counter();
+  const parentIndependentSecondStarted = new Counter();
   const childGates = {
     "child-alpha": new Deferred(),
     "child-beta": new Deferred(),
-    "child-inline": new Deferred(true),
+    "child-mixed": new Deferred(true),
     "child-failure": new Deferred(true),
+    "child-interactive-start": new Deferred(),
+    "child-interactive-followup": new Deferred(),
   };
   const settingsManager = SettingsManager.inMemory(
     {
@@ -598,6 +768,7 @@ async function createHarness(
           childRequestsStarted,
           childProviderSignals,
           childProviderAborted,
+          parentIndependentSecondStarted,
           compaction,
         ),
         { name: "pi-orchestrate", factory: createOrchestrationExtension() },
@@ -613,7 +784,11 @@ async function createHarness(
       agentDir: options.agentDir,
       model,
       thinkingLevel: "off",
-      tools: scenario === "mixed" ? ["orchestrate", "read"] : ["orchestrate"],
+      tools: scenario === "mixed" || scenario === "decoupled"
+        ? ["orchestrate", "read"]
+        : scenario === "interactive"
+          ? ["orchestrate", "interactive_send", "interactive_close"]
+          : ["orchestrate"],
       modelRuntime,
       resourceLoader,
       sessionManager: options.sessionManager,
@@ -654,6 +829,7 @@ async function createHarness(
       childSessionShutdowns,
       childExtensionStateKey,
       childGates,
+      parentIndependentSecondStarted,
       previousAgentDir,
       previousOffline,
       disposed: false,
@@ -904,6 +1080,160 @@ describe("Pi 0.85.0 SDK integration", () => {
     }
   }, 4_000);
 
+  test.serial("runs mixed dispatch and parent reads while children are gated, ends normally, and synthesizes the group once", async () => {
+    const harness = await createHarness("decoupled");
+    try {
+      const session = harness.runtime.session;
+      await session.prompt("Dispatch two gated workers and perform both independent reads before reporting pending status.");
+      await harness.childRequestsStarted.waitFor(2);
+      await harness.parentIndependentSecondStarted.waitFor(1);
+
+      expect(harness.requests.filter((request) => request.kind === "parent-initial")).toHaveLength(1);
+      expect(harness.requests.filter((request) => request.kind === "parent-independent-second"))
+        .toHaveLength(1);
+      expect(harness.requests.filter((request) => request.kind === "parent-pending")).toHaveLength(1);
+      expect(session.messages.filter((message) =>
+        message.role === "toolResult" && message.toolName === "read")).toHaveLength(2);
+      expect(assistantTexts(session.messages).at(-1)).toBe(
+        "Worker evidence is pending; I will combine it when delivered.",
+      );
+      expect(session.messages.filter(isWorkerResultMessage)).toHaveLength(0);
+      expect(harness.requests.filter((request) => request.kind === "parent-synthesis")).toHaveLength(0);
+      expect(harness.requests.find((request) => request.kind === "parent-independent-second")?.transcript)
+        .toContain("fixture-content");
+
+      const host = getProcessHost()!;
+      const settled = new Counter();
+      const unsubscribe = host.orchestration.subscribeSettlement(() => settled.increment());
+      harness.childGates["child-beta"].resolve();
+      await settled.waitFor(1);
+      expect(harness.requests.filter((request) => request.kind === "parent-synthesis")).toHaveLength(0);
+
+      harness.childGates["child-alpha"].resolve();
+      await settled.waitFor(2);
+      await session.waitForIdle();
+      unsubscribe();
+
+      const workerMessages = session.messages.filter(isWorkerResultMessage);
+      expect(workerMessages.map((message) => message.details.title)).toEqual([
+        "Beta task",
+        "Alpha task",
+      ]);
+      expect(new Set(workerMessages.map((message) => message.details.synthesisGroupId)).size)
+        .toBe(1);
+      expect(workerMessages.map((message) => message.details.synthesisGroupSize)).toEqual([2, 2]);
+      expect(assistantTexts(session.messages).at(-1)).toBe(
+        "DECOUPLED_SYNTHESIS:true:true:true:true",
+      );
+      expect(harness.requests.filter((request) => request.kind === "parent-synthesis")).toHaveLength(1);
+      expect(harness.requests.filter((request) => request.kind === "child-alpha")).toHaveLength(1);
+      expect(harness.requests.filter((request) => request.kind === "child-beta")).toHaveLength(1);
+      expect(session.messages.filter((message) =>
+        message.role === "toolResult" && message.toolName === "orchestrate")).toHaveLength(2);
+      expect(session.messages.some((message) =>
+        message.role === "toolResult" && message.toolName === "worker_status")).toBe(false);
+      expect(harness.events.filter((event) => event === "parent:agent_start")).toHaveLength(2);
+    } finally {
+      await disposeHarness(harness);
+    }
+  }, 4_000);
+
+  test.serial("ends normally when no independent parent work exists and resumes on the result", async () => {
+    const harness = await createHarness("async");
+    try {
+      const session = harness.runtime.session;
+      await session.prompt("Dispatch the worker; there is no independent parent work.");
+      await harness.childRequestsStarted.waitFor(1);
+
+      expect(harness.requests.map((request) => request.kind)).toEqual([
+        "parent-initial",
+        "parent-pending",
+        "child-alpha",
+      ]);
+      expect(assistantTexts(session.messages).at(-1)).toBe(
+        "Worker evidence is pending; I will combine it when delivered.",
+      );
+      expect(session.messages.filter(isWorkerResultMessage)).toHaveLength(0);
+
+      harness.childGates["child-alpha"].resolve();
+      await harness.customMessagesStarted.waitFor(1);
+      await session.waitForIdle();
+      expect(harness.requests.filter((request) => request.kind === "parent-synthesis"))
+        .toHaveLength(1);
+      expect(assistantTexts(session.messages).at(-1)).toBe("SYNTHESIS:true");
+    } finally {
+      await disposeHarness(harness);
+    }
+  }, 4_000);
+
+  test.serial("a rejected group member does not strand its admitted peer or duplicate synthesis", async () => {
+    const harness = await createHarness("admission-failure");
+    try {
+      const session = harness.runtime.session;
+      await session.prompt("Dispatch one valid and one invalid group member, then report pending status.");
+      await harness.childRequestsStarted.waitFor(1);
+
+      const dispatchResults = session.messages.filter(
+        (message): message is Extract<AgentMessage, { role: "toolResult" }> =>
+          message.role === "toolResult" && message.toolName === "orchestrate",
+      );
+      expect(dispatchResults).toHaveLength(2);
+      expect(dispatchResults.filter((message) => message.isError)).toHaveLength(1);
+      expect(harness.requests.filter((request) => request.kind === "parent-pending")).toHaveLength(1);
+      expect(harness.requests.filter((request) => request.kind === "parent-synthesis")).toHaveLength(0);
+
+      harness.childGates["child-alpha"].resolve();
+      await harness.customMessagesStarted.waitFor(1);
+      await session.waitForIdle();
+
+      const workerMessages = session.messages.filter(isWorkerResultMessage);
+      expect(workerMessages).toHaveLength(1);
+      expect(workerMessages[0]?.details.title).toBe("Admitted peer");
+      expect(assistantTexts(session.messages).at(-1)).toBe("ADMISSION_SYNTHESIS:true:true");
+      expect(harness.requests.filter((request) => request.kind === "parent-synthesis")).toHaveLength(1);
+      expect(harness.events.filter((event) =>
+        event === "parent:custom:pi-orchestrate-worker-result")).toHaveLength(1);
+    } finally {
+      await disposeHarness(harness);
+    }
+  }, 4_000);
+
+  test.serial("interactive_send returns asynchronously, ends normally, and preserves lifecycle close", async () => {
+    const harness = await createHarness("interactive");
+    try {
+      const session = harness.runtime.session;
+      await session.prompt("Start the interactive worker and report pending status until its evidence arrives.");
+      await harness.childRequestsStarted.waitFor(1);
+      harness.childGates["child-interactive-start"].resolve();
+      await harness.childRequestsStarted.waitFor(2);
+      await session.waitForIdle();
+
+      expect(harness.requests.filter((request) => request.kind === "parent-interactive-send"))
+        .toHaveLength(1);
+      expect(harness.requests.filter((request) => request.kind === "parent-pending")).toHaveLength(2);
+      const sendResult = session.messages.find((message) =>
+        message.role === "toolResult" && message.toolName === "interactive_send");
+      expect(sendResult).toBeDefined();
+      expect(session.messages.filter(isWorkerResultMessage)).toHaveLength(1);
+
+      harness.childGates["child-interactive-followup"].resolve();
+      await harness.customMessagesStarted.waitFor(2);
+      await session.waitForIdle();
+
+      const workerMessages = session.messages.filter(isWorkerResultMessage);
+      expect(workerMessages).toHaveLength(2);
+      expect(new Set(workerMessages.map((message) => message.details.workerId)).size).toBe(1);
+      expect(harness.requests.filter((request) => request.kind === "parent-interactive-close"))
+        .toHaveLength(1);
+      expect(assistantTexts(session.messages).at(-1)).toBe("INTERACTIVE_SYNTHESIS:true:true:true");
+      const snapshot = await getProcessHost()!.orchestration.snapshot(session.sessionId);
+      expect(snapshot.workers).toHaveLength(1);
+      expect(snapshot.workers[0]?.status).toBe("closed");
+    } finally {
+      await disposeHarness(harness);
+    }
+  }, 4_000);
+
   test.serial("aborts an active child provider request when the final process-host attachment quits", async () => {
     const harness = await createHarness("shutdown");
     try {
@@ -1018,28 +1348,29 @@ describe("Pi 0.85.0 SDK integration", () => {
     }
   }, 4_000);
 
-  test.serial("keeps mixed orchestrate and read calls inline without detached delivery", async () => {
+  test.serial("keeps mixed orchestrate and read calls concurrent with detached delivery", async () => {
     const harness = await createHarness("mixed");
     try {
       const session = harness.runtime.session;
       await session.prompt("Run the mixed-call SDK smoke test.");
+      await harness.customMessagesStarted.waitFor(1);
       await session.agent.waitForIdle();
 
-      expect(assistantTexts(session.messages).at(-1)).toBe("INLINE_SYNTHESIS:true:true");
+      expect(assistantTexts(session.messages).at(-1)).toBe("MIXED_SYNTHESIS:true:true");
       expect(harness.requests.filter((request) => request.kind === "parent-initial")).toHaveLength(1);
       expect(harness.requests.filter((request) => request.kind === "parent-synthesis")).toHaveLength(1);
-      expect(harness.requests.filter((request) => request.kind === "child-inline")).toHaveLength(1);
-      expect(session.messages.filter((message) => message.role === "custom")).toHaveLength(0);
+      expect(harness.requests.filter((request) => request.kind === "child-mixed")).toHaveLength(1);
+      expect(session.messages.filter(isWorkerResultMessage)).toHaveLength(1);
       expect(harness.events.filter((event) =>
         event === "parent:custom:pi-orchestrate-worker-result"))
-        .toHaveLength(0);
+        .toHaveLength(1);
 
       const toolResults = session.messages.filter((message) => message.role === "toolResult");
       const orchestrationResult = toolResults.find((message) => message.toolName === "orchestrate");
       const readResult = toolResults.find((message) => message.toolName === "read");
       expect(orchestrationResult).toBeDefined();
       expect(readResult).toBeDefined();
-      expect(harness.events.filter((event) => event === "parent:agent_start")).toHaveLength(1);
+      expect(harness.events.filter((event) => event === "parent:agent_start")).toHaveLength(2);
 
       await harness.runtime.dispose();
       harness.disposed = true;
