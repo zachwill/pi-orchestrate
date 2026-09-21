@@ -1,89 +1,81 @@
 # Pi Orchestrate Contributor Instructions
 
-Pi Orchestrate is a concurrent, owner-scoped worker extension for Pi. Parent agents delegate bounded work to isolated child sessions while retaining responsibility for the task.
+Pi Orchestrate delegates work to direct child Pi sessions. Changes must preserve exact-owner isolation, independent worker lifecycles, and reliable result delivery.
 
-## Sources of Truth
+## Start Here
 
-Read these before changing code:
+- Read the implementation that owns the change and its relevant tests. Unit tests generally mirror `extension/` paths under `test/`; extension wiring is tested in `test/integration.test.ts`.
+- `README.md` explains human-facing behavior, configuration, and trust boundaries. `extension/parent/contract.ts` defines the parent model's operating instructions. Worker definitions are specified by `extension/catalog/discovery.ts` and illustrated in `examples/workers/`.
+- `extension/orchestration/model.ts` defines worker-status transitions; `extension/orchestration/service.ts` owns the orchestration lifecycle. Their tests establish behavior beyond the README's overview.
+- Before changing Pi API usage, read the relevant Pi documentation, exported types, and implementation at the repository-pinned dependency version. Check compatibility against the supported range in `package.json`; newer globally installed documentation is supplementary.
 
-1. `README.md` defines public behavior, trust boundaries, worker definitions, and terminology.
-2. `extension/index.ts` is the extension entry point and composition root; `extension/package-root.ts` resolves the installed package root.
-3. Read the owning implementation module you will change and its matching file in `test/`.
+Update the README when a change affects human setup, usage, or consequential expectations. Keep implementation mechanics in code and tests, and model-operating instructions in the parent contract. Do not turn this file into another behavioral specification.
 
-The state machine in `extension/orchestration/model.ts` and executable tests define orchestration behavior. `extension/parent/contract.ts` defines the model-facing parent contract. `examples/workers/`, `extension/catalog/definition.ts`, `extension/catalog/discovery.ts`, and the README define the worker format.
+## Ownership
 
-When public behavior changes, update the README and the relevant contract, package, SDK, and integration tests. Do not restate the public contract in this file.
+Change the owning boundary rather than adding cross-layer shortcuts. Paths below are relative to `extension/`.
 
-## Module Ownership
+| Module | Responsibility |
+| --- | --- |
+| `catalog/definition.ts` | Worker and catalog types, supported tools, catalog construction and lookup |
+| `catalog/discovery.ts` | Definition parsing, trusted discovery, precedence, and diagnostics |
+| `orchestration/model.ts` | Worker/run records, IDs, worker-status transitions, and task-size limits |
+| `orchestration/admission.ts` | Task, worker-reference, and model preflight |
+| `orchestration/settlement.ts` | Settlement schemas, persisted decoding, and transport projections |
+| `orchestration/service.ts` | Admitted work, concurrency, cancellation, interactive generations, retained sessions, and settlement publication |
+| `worker/session.ts` | Direct child sessions, lineage, inherited resources and authentication, prompting, observation, and disposal |
+| `worker/child-sessions.ts` | Process-level child-session acquisition, adoption, reclamation, and shutdown |
+| `parent/contract.ts` | Parent guidance and trusted catalog insertion |
+| `parent/dispatch-policy.ts` | Tool-call grouping, dispatch mode, and synthesis-group classification |
+| `parent/delivery.ts` | Owner bindings, queued result delivery, and grouped synthesis |
+| `parent/worker-context.ts` | Bounded, owner-filtered transient worker context |
+| `parent/process-host.ts` | Process host, Effect composition, Pi-facing adapters, and attachment lifetime |
+| `pi/tools.ts` | Public tool schemas, execution adapters, and streaming updates |
+| `pi/tool-renderer.ts`, `pi/presentation.ts`, `pi/tui.ts` | Tool rendering, result/status presentation, and shared width-safe UI helpers, respectively |
+| `package-root.ts` | Installed package-root resolution |
+| `index.ts` | Lifecycle hooks and composition; not orchestration policy |
 
-Keep decisions in the module that owns them:
+## Invariants
 
-- `extension/catalog/definition.ts` owns worker-definition and catalog value types, supported tool names, catalog construction, and lookup.
-- `extension/catalog/discovery.ts` owns frontmatter schemas, strict parsing and format validation, trusted source discovery, precedence, and diagnostics.
-- `extension/orchestration/model.ts` owns worker and run types, state transitions, IDs, and limits.
-- `extension/orchestration/settlement.ts` owns canonical settlement schemas, persisted decoding, and tool transport projections.
-- `extension/orchestration/admission.ts` owns task, worker-reference, and model preflight decisions.
-- `extension/orchestration/service.ts` owns admitted work, concurrency, owner-scoped state and operations, cancellation, interactive generations, retained sessions, settlement publication, and FiberMap/FiberSet coordination.
-- `extension/worker/session.ts` owns durable direct child sessions, lineage, inherited Pi resources, prompting, usage and activity reporting, message direction, abort, and disposal.
-- `extension/worker/child-sessions.ts` owns process-level child-session acquisition, adoption handoff, reclamation, and shutdown.
-- `extension/parent/contract.ts` owns model-facing parent guidance and trusted catalog insertion.
-- `extension/parent/dispatch-policy.ts` owns parent tool-call grouping, dispatch mode, and synthesis-group classification.
-- `extension/parent/delivery.ts` owns owner binding, queued exact-session delivery, and grouped synthesis.
-- `extension/parent/process-host.ts` owns the process-scoped orchestration host, Effect application composition, Pi-facing adapters, attachments, and shutdown.
-- `extension/pi/tools.ts` owns public tool schemas, execution adapters, and streaming updates.
-- `extension/pi/tool-renderer.ts` owns tool call and result renderers.
-- `extension/pi/presentation.ts` owns result messages, worker status presentation, widgets, and footer state.
-- `extension/pi/tui.ts` owns shared width-safe rendering, appearance, timing, and component disposal helpers.
-- `extension/package-root.ts` owns installed package-root resolution.
-- `extension/index.ts` binds lifecycle hooks and composes the extension. Do not move orchestration policy into it.
+- Validate tasks, worker references, and models before allocating IDs, creating records, or starting sessions. Preflight failure starts nothing.
+- Admitted workers start and settle independently. One failure must not roll back peers. Preserve dispatch and grouped-synthesis semantics when changing execution or delivery.
+- Scope state, controls, context projections, and delivery to the exact owner. Reject stale worker generations and parent bindings without changing current state.
+- Keep workers as direct Pi children. Do not load Pi Orchestrate recursively or create descendant Pi worker sessions.
+- Load project workers and resources only when Pi reports the project trusted. Preserve child lineage, durable transcripts, selected tools/skills, and model/authentication inheritance.
+- Do not start long-lived resources in the extension factory. Acquire them on session start or demand, and release them according to their session, worker, or process ownership. Reload and session replacement must not destroy process-owned work.
+- Cleanup must be idempotent and best-effort without hiding failures or preventing lifecycle settlement.
 
-Do not add cross-layer shortcuts. Change an owning boundary directly instead of routing around it.
+## Implementation
 
-## Orchestration Invariants
-
-- Validate tasks, worker references, and models before allocating IDs, creating orchestration records, or starting sessions. Preflight failure starts nothing.
-- Once admitted, workers start and settle independently. One worker failure must not roll back its peers.
-- Preserve the dispatch modes, grouped synthesis, lifecycle, and delivery behavior defined by the README and encoded in contract and integration tests.
-- Scope state, operations, cancellation, and delivery to the exact owner. Never leak results or controls across sessions.
-- Reject stale interactive generations and race-losing operations without corrupting current worker state.
-- Keep child sessions as direct Pi Orchestrate children. Do not load Pi Orchestrate recursively or create descendant Pi worker sessions.
-- Read project workers and project context only when Pi reports the project trusted.
-- Make cleanup idempotent and best-effort while still settling lifecycle state.
-- Keep model-facing output and collapsed UI bounded. Preserve the complete state required for reconstruction in structured details.
-
-## Project Sandcastle Rules
-
-The global Sandcastle Doctrine applies. This package is pre-1.0: keep its public boundaries precise and its internal shape easy to replace.
-
-- Preserve ownership, trust, state-transition, and persisted-settlement contracts deliberately.
-- Replace obsolete internal seams directly. Delete dead APIs, aliases, adapters, schemas, migrations, terminology, and tests instead of preserving legacy paths.
-- Support backwards compatibility only for a named, concrete boundary with tests.
-- Use Effect when it clarifies failures, dependencies, interruption, concurrency, validation, observability, or resource ownership. Keep straightforward synchronous domain logic straightforward.
-
-## Implementation Rules
-
-- Use Bun for installs, scripts, and tests.
-- Keep TypeScript strict and ESM/NodeNext-compatible. Use `.ts` specifiers for relative imports because the package ships and executes raw TypeScript.
+- Use Bun for installs, scripts, and tests. Keep TypeScript strict and ESM/NodeNext-compatible, with `.ts` relative imports: this package ships raw TypeScript.
 - Keep tool schemas strict. Throw from `execute` to signal failure; an error-shaped return value is still a successful tool result.
-- Keep model-facing `content` concise and put complete machine-readable state in `details`.
-- Do not start timers, watchers, sessions, or other long-lived resources in the extension factory. Bind them on session start or demand and release them on shutdown.
-- Guard terminal-only APIs with `ctx.mode === "tui"`.
-- Fit every rendered line to its supplied width using Pi TUI width and ANSI helpers rather than string slicing.
-- Renderers must tolerate partial persisted data, rebuild pre-themed content on `invalidate()`, reuse components where appropriate, and dispose timers and subscriptions exactly once.
-- Preserve fresh child-session lineage, durable storage, selected tools and skills, trust boundaries, and model and authentication inheritance.
-- Read the installed Pi documentation and exported types before changing lifecycle, session, model, tool, package, or TUI behavior. Verify assumptions with SDK integration tests.
+- Bound model-facing content and collapsed UI. Put complete reconstruction data in structured `details`, not unbounded text.
+- Guard terminal-only APIs with `ctx.mode === "tui"`. Fit rendered lines using Pi TUI width and ANSI helpers, not string slicing.
+- Renderers must tolerate partial persisted data, rebuild themed content on `invalidate()`, and dispose timers and subscriptions exactly once.
+
+## Design
+
+This package is pre-1.0. Keep ownership, trust, and persisted-settlement contracts precise while leaving internals easy to replace.
+
+- Replace obsolete implementations directly; remove dead adapters, aliases, tests, and documentation. Preserve compatibility only for a named requirement with tests.
+- Use Effect where it clarifies failures, concurrency, interruption, dependencies, or resource ownership. Keep straightforward synchronous domain logic straightforward.
 
 ## Verification
 
-`package.json` is the canonical command source.
+Choose coverage by the behavior at risk:
 
-Run the narrow matching test while working, then run both commands before finishing:
+- Owning module tests: domain behavior and local regressions.
+- `test/integration.test.ts`: lifecycle hooks, attachments, ownership, and delivery wiring.
+- `test/sdk-integration.test.ts`: assumptions about real Pi APIs and the supported dependency baseline.
+- `test/package.test.ts`: published contents, manifests, resource discovery, and package loading.
+
+Use deterministic synchronization for concurrency tests. Cover relevant stale generations, races, owner isolation, and cleanup failures; do not add unrelated suites merely because a change touches a shared module.
+
+For code or dependency changes, run focused tests while working, then both commands before finishing. `package.json` is the command source of truth.
 
 ```bash
 AGENT=1 bun run typecheck
 AGENT=1 bun test
 ```
 
-Changes involving package contents, real Pi APIs, process lifetime, owner binding, or delivery require explicit coverage in `test/package.test.ts`, `test/sdk-integration.test.ts`, and `test/integration.test.ts` as applicable.
-
-Keep tests beside the module that owns the behavior. Use integration tests for lifecycle hooks, host attachments, orchestration ownership, and delivery. Make concurrency tests deterministic and cover stale generations, races, ownership isolation, and cleanup failures.
+For documentation-only changes, verify factual claims, referenced paths, commands, and links. Run executable checks when the documentation changes a runnable example or exposes an implementation assumption that needs validation.
