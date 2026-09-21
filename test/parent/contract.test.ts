@@ -52,6 +52,8 @@ describe("orchestrator contract", () => {
     expect(twice).toBe(once);
     expectOneContract(once);
     expect(once).toStartWith("Base system prompt.\n\n");
+    expect(once).toContain("Compaction does not stop workers.");
+    expect(once).toContain("Do not redispatch work because its dispatch was compacted away.");
   });
 
   test("replaces in place with the current sorted trusted catalog", () => {

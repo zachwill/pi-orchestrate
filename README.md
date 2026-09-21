@@ -1,6 +1,6 @@
 # Pi Orchestrate
 
-[`@zachwill/pi-orchestrate`](https://www.npmjs.com/package/@zachwill/pi-orchestrate) lets a Pi session delegate work to direct child sessions.
+[`@zachwill/pi-orchestrate`](https://www.npmjs.com/package/@zachwill/pi-orchestrate) lets a Pi session delegate work to direct child sessions. It requires Pi 0.85.0 or newer.
 
 - Each worker gets a focused brief and a separate conversation.
 - Workers run independently and return their results to the parent.
@@ -22,6 +22,14 @@ Workers have one of two lifecycles:
 A **worker ID** identifies a worker session. A **run ID** identifies one generation within it. An interactive follow-up creates a new run while preserving the worker ID and prior session context.
 
 Interactive workers remain available across session switches and extension reloads within the same Pi process. Closing one releases its retained session; process shutdown releases any that remain.
+
+## Compaction
+
+Parent compaction does not stop workers. Results that settle during compaction remain queued for the owning session and resume automatic delivery when that session becomes idle, including after failed or cancelled compaction. Grouped work still triggers synthesis only after the group settles.
+
+Before each parent model request, the extension adds a fresh, owner-scoped snapshot of active workers and ready interactive sessions. This transient context survives compaction by being rebuilt from live state; it is not appended to the transcript. The snapshot is capped at 12 KiB and reports omitted workers or truncated assignments, with `worker_status` available for recovery rather than polling.
+
+This state belongs to the running Pi process. Compaction does not require restarting workers, and persisted transcripts do not restore running workers after a process restart.
 
 ## Agent interface
 

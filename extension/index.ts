@@ -10,6 +10,10 @@ import {
 import type { WorkerCatalog } from "./catalog/definition.ts";
 import { applyOrchestratorContract } from "./parent/contract.ts";
 import {
+  projectLiveWorkerContext,
+  replaceLiveWorkerContext,
+} from "./parent/worker-context.ts";
+import {
   attachProcessHost,
   createProcessHost,
   destroyProcessHost,
@@ -108,6 +112,52 @@ export function createOrchestrationExtension(
           cachedCatalog,
         ),
       };
+    });
+
+    pi.on("context", async (event, ctx) => {
+      const messages = replaceLiveWorkerContext(event.messages, undefined);
+      const binding = activeBinding;
+      const boundHost = host;
+      const attachment = hostAttachment;
+
+      if (!binding || !boundHost || !attachment) return { messages };
+
+      try {
+        if (
+          attachment.host !== boundHost ||
+          ctx.sessionManager.getSessionId() !== binding.ownerSessionId
+        ) {
+          return { messages };
+        }
+
+        const snapshot = await boundHost.orchestration.snapshot(
+          binding.ownerSessionId,
+        );
+
+        // Session replacement and reload can race the awaited snapshot. Only the
+        // exact attachment generation that requested it may add parent context.
+        if (
+          activeBinding !== binding ||
+          host !== boundHost ||
+          hostAttachment !== attachment ||
+          attachment.host !== boundHost ||
+          ctx.sessionManager.getSessionId() !== binding.ownerSessionId
+        ) {
+          return { messages };
+        }
+
+        const context = projectLiveWorkerContext(snapshot, {
+          ownerSessionId: binding.ownerSessionId,
+          pendingResultCount: boundHost.delivery.pendingCount(
+            binding.ownerSessionId,
+          ),
+        });
+        return { messages: replaceLiveWorkerContext(messages, context) };
+      } catch {
+        // A context projection is advisory. On snapshot or stale-context failure,
+        // omit it rather than retaining an older authority-bearing projection.
+        return { messages };
+      }
     });
 
     pi.on("message_end", (event) => {

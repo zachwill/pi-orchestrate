@@ -7,6 +7,7 @@ import {
   MAX_WORKER_DELIVERY_MARKDOWN_BYTES,
   type ParentBinding,
   type ParentBindingGeneration,
+  type ScheduleIdleRecheck,
   type WorkerDeliveryMessage,
   type WorkerDeliveryOptions,
 } from "../../extension/parent/delivery.ts";
@@ -79,6 +80,31 @@ function createBinding(
     attempts,
     setIdle(value: boolean) { idle = value; },
     failOnAttempt(attempt: number | undefined) { failedAttempt = attempt; },
+  };
+}
+
+interface ScheduledRecheck {
+  readonly callback: () => void;
+  cancelled: boolean;
+}
+
+function createIdleRecheckScheduler() {
+  const scheduled: ScheduledRecheck[] = [];
+  const scheduleIdleRecheck: ScheduleIdleRecheck = (callback) => {
+    const recheck = { callback, cancelled: false };
+    scheduled.push(recheck);
+    return () => { recheck.cancelled = true; };
+  };
+  return {
+    scheduleIdleRecheck,
+    scheduled,
+    activeCount: () => scheduled.filter((recheck) => !recheck.cancelled).length,
+    runNext() {
+      const recheck = scheduled.find((candidate) => !candidate.cancelled);
+      if (!recheck) throw new Error("No idle recheck is scheduled");
+      recheck.cancelled = true;
+      recheck.callback();
+    },
   };
 }
 
@@ -175,6 +201,120 @@ describe("DeliveryCoordinator worker settlements", () => {
     expect(parent.sent.map(({ message }) => message.details.eventId)).toEqual(["a1", "b1", "a2", "b2"]);
     expect(parent.sent.map(({ options }) => options.triggerTurn)).toEqual([false, false, false, true]);
     expect(coordinator.pendingCount("owner-a")).toBe(0);
+  });
+
+  test("rechecks pending delivery blocked by non-agent activity until the parent is idle", () => {
+    const scheduler = createIdleRecheckScheduler();
+    const coordinator = new DeliveryCoordinator(scheduler.scheduleIdleRecheck);
+    const parent = createBinding("owner-a", 1, false);
+    coordinator.bind(parent.binding);
+
+    expect(scheduler.scheduled).toHaveLength(0);
+    coordinator.accept(settlement({ eventId: "compaction-result", sequence: 14 }));
+    expect(scheduler.activeCount()).toBe(1);
+
+    scheduler.runNext();
+    expect(parent.sent).toEqual([]);
+    expect(scheduler.activeCount()).toBe(1);
+
+    parent.setIdle(true);
+    scheduler.runNext();
+    expect(parent.sent[0]?.message.details.eventId).toBe("compaction-result");
+    expect(parent.sent[0]?.options.triggerTurn).toBe(true);
+    expect(scheduler.activeCount()).toBe(0);
+  });
+
+  test("preserves grouped synthesis when an idle recheck resumes a flush", () => {
+    const scheduler = createIdleRecheckScheduler();
+    const coordinator = new DeliveryCoordinator(scheduler.scheduleIdleRecheck);
+    const parent = createBinding("owner-a", 1, false);
+    coordinator.bind(parent.binding);
+    coordinator.accept(settlement({
+      eventId: "compacted-group-first",
+      sequence: 15,
+      synthesisGroupId: "compacted-group",
+      synthesisGroupSize: 2,
+    }));
+    coordinator.accept(settlement({
+      eventId: "compacted-group-final",
+      sequence: 16,
+      synthesisGroupId: "compacted-group",
+      synthesisGroupSize: 2,
+    }));
+
+    expect(scheduler.activeCount()).toBe(1);
+    parent.setIdle(true);
+    scheduler.runNext();
+
+    expect(parent.sent.map(({ message }) => message.details.eventId)).toEqual([
+      "compacted-group-first",
+      "compacted-group-final",
+    ]);
+    expect(parent.sent.map(({ options }) => options.triggerTurn)).toEqual([false, true]);
+    expect(scheduler.activeCount()).toBe(0);
+  });
+
+  test("stops idle rechecks when an agent starts and resumes delivery only after settlement", () => {
+    const scheduler = createIdleRecheckScheduler();
+    const coordinator = new DeliveryCoordinator(scheduler.scheduleIdleRecheck);
+    const parent = createBinding("owner-a", 1, false);
+    coordinator.bind(parent.binding);
+    coordinator.accept(settlement({ eventId: "agent-race", sequence: 17 }));
+    expect(scheduler.activeCount()).toBe(1);
+
+    coordinator.markAgentStarted("owner-a", 1);
+    expect(scheduler.activeCount()).toBe(0);
+    parent.setIdle(true);
+    expect(parent.sent).toEqual([]);
+
+    coordinator.markAgentSettled("owner-a", 1);
+    expect(parent.sent[0]?.message.details.eventId).toBe("agent-race");
+    expect(scheduler.activeCount()).toBe(0);
+  });
+
+  test("fences and cancels idle rechecks across bind, rebind, unbind, and clear", () => {
+    const scheduler = createIdleRecheckScheduler();
+    const coordinator = new DeliveryCoordinator(scheduler.scheduleIdleRecheck);
+    coordinator.accept(settlement({ eventId: "waiting-for-bind", sequence: 18 }));
+    expect(scheduler.scheduled).toHaveLength(0);
+
+    const oldParent = createBinding("owner-a", 1, false);
+    coordinator.bind(oldParent.binding);
+    const staleRecheck = scheduler.scheduled[0];
+    expect(staleRecheck).toBeDefined();
+
+    const newParent = createBinding("owner-a", 2, false);
+    coordinator.bind(newParent.binding);
+    expect(staleRecheck?.cancelled).toBe(true);
+    expect(scheduler.activeCount()).toBe(1);
+
+    newParent.setIdle(true);
+    staleRecheck?.callback();
+    expect(oldParent.sent).toEqual([]);
+    expect(newParent.sent).toEqual([]);
+
+    coordinator.unbind("owner-a", 2);
+    expect(scheduler.activeCount()).toBe(0);
+
+    const finalParent = createBinding("owner-a", 3, false);
+    coordinator.bind(finalParent.binding);
+    expect(scheduler.activeCount()).toBe(1);
+    coordinator.clear();
+    expect(scheduler.activeCount()).toBe(0);
+    expect(coordinator.pendingCount("owner-a")).toBe(0);
+  });
+
+  test("does not schedule idle rechecks while the parent agent is running", () => {
+    const scheduler = createIdleRecheckScheduler();
+    const coordinator = new DeliveryCoordinator(scheduler.scheduleIdleRecheck);
+    const parent = createBinding("owner-a", 1);
+    coordinator.bind(parent.binding);
+    coordinator.markAgentStarted("owner-a", 1);
+    parent.setIdle(false);
+
+    coordinator.accept(settlement({ eventId: "running-agent", sequence: 19 }));
+    expect(scheduler.scheduled).toHaveLength(0);
+    expect(parent.sent).toEqual([]);
   });
 
   test("preserves owner isolation and ignores stale binding generations", () => {

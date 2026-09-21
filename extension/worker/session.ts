@@ -674,7 +674,14 @@ const prepareChildModelRuntime = Effect.fn("WorkerSession.prepareChildModelRunti
       yield* Effect.tryPromise({
         try: async () => {
           if (auth.headers) {
-            modelRuntime.registerProvider(selected.provider, { headers: { ...auth.headers } });
+            // Provider config accepts resolved values, not request-only null suppressions;
+            // the child runtime derives those again from the provider's auth implementation.
+            const headers = Object.fromEntries(
+              Object.entries(auth.headers).filter(
+                (entry): entry is [string, string] => entry[1] !== null,
+              ),
+            );
+            modelRuntime.registerProvider(selected.provider, { headers });
           }
           if (auth.apiKey && !options.modelRegistry.isUsingOAuth(model)) {
             await modelRuntime.setRuntimeApiKey(selected.provider, auth.apiKey);
@@ -869,8 +876,8 @@ export const createWorkerSession = Effect.fn("WorkerSession.create")(function* (
     const services = yield* acquireWorkerServices(options, dependencies, modelRuntime);
 
     // createAgentSessionServices registers extension providers and refreshes, but
-    // discards that result in Pi 0.80.10. Keep this worker-owned probe so provider
-    // errors and aborts remain typed acquisition failures; remove it when Pi surfaces them.
+    // does not surface the refresh result. Keep this worker-owned probe so provider
+    // errors and aborts remain typed acquisition failures.
     yield* refreshModelRuntime(modelRuntime, definition);
     const model = yield* Effect.try({
       try: () => {

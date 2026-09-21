@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -10,7 +11,8 @@ import {
   type WorkerCatalog,
   type WorkerDefinition,
 } from "../extension/catalog/definition.ts";
-import type { RunId, WorkerId } from "../extension/orchestration/model.ts";
+import type { RunId, WorkerId, WorkerRecord } from "../extension/orchestration/model.ts";
+import { LIVE_WORKER_CONTEXT_TYPE } from "../extension/parent/worker-context.ts";
 import {
   attachProcessHost,
   createProcessHost,
@@ -118,8 +120,8 @@ class FakeOrchestrationClient {
   async abort(): Promise<void> {}
   async closeInteractive(): Promise<void> {}
 
-  async snapshot(_ownerSessionId: string): Promise<OwnerSnapshot> {
-    return { runs: [], workers: [] };
+  async snapshot(ownerSessionId: string): Promise<OwnerSnapshot> {
+    return this.snapshots.get(ownerSessionId) ?? { runs: [], workers: [] };
   }
 
   subscribeState(
@@ -309,7 +311,92 @@ const publicToolNames = [
   "interactive_close",
 ];
 
+function runningWorker(ownerSessionId: string): WorkerRecord {
+  const settlement = workerSettlement(ownerSessionId);
+  return {
+    id: `worker-${ownerSessionId}` as WorkerId,
+    runId: settlement.runId,
+    worker: "scout",
+    title: `Assignment for ${ownerSessionId}`,
+    instructions: "Inspect the assigned files.",
+    ownerSessionId,
+    lifecycle: "one-shot",
+    status: "running",
+    startedAt: 1,
+    usage: settlement.usage,
+  };
+}
+
+const staleWorkerContext: AgentMessage = {
+  role: "custom", customType: LIVE_WORKER_CONTEXT_TYPE,
+  content: "stale worker snapshot", display: false, timestamp: 1,
+};
+
 describe("Pi Orchestrate extension integration", () => {
+  test("projects current owned workers on each provider request without persisting messages", async () => {
+    const pi = new FakePi();
+    const { host, runtime } = fakeHost();
+    const { ctx } = createContext("owner-a");
+    const worker = runningWorker("owner-a");
+    runtime.snapshots.set("owner-a", { runs: [], workers: [worker, runningWorker("owner-b")] });
+    install(pi, host);
+    await pi.emit("session_start", {}, ctx);
+    const original: AgentMessage[] = [{ role: "user", content: "Continue after compaction.", timestamp: 1 }];
+    const [projected] = await pi.emit("context", { messages: [...original, staleWorkerContext] }, ctx);
+    expect(projected).toEqual({ messages: [original[0], expect.objectContaining({
+      customType: LIVE_WORKER_CONTEXT_TYPE,
+      display: false,
+      content: expect.stringContaining("worker-owner-a"),
+    })] });
+    expect(JSON.stringify(projected)).not.toContain("worker-owner-b");
+    expect(JSON.stringify(projected)).not.toContain("stale worker snapshot");
+    expect(original).toHaveLength(1);
+    expect(pi.sent).toEqual([]);
+    runtime.snapshots.set("owner-a", { runs: [], workers: [{ ...worker, status: "completed" }] });
+    expect(await pi.emit("context", { messages: original }, ctx)).toEqual([{ messages: original }]);
+    await pi.emit("session_shutdown", { reason: "quit" }, ctx);
+  });
+
+  for (const reason of ["reload", "resume"] as const) {
+    test(`discards a snapshot resolved after ${reason} and binds fresh context to the replacement`, async () => {
+      const pi = new FakePi();
+      const { host, runtime } = fakeHost();
+      const { ctx } = createContext("owner-a");
+      install(pi, host);
+      await pi.emit("session_start", {}, ctx);
+      let resolveSnapshot!: (snapshot: OwnerSnapshot) => void;
+      runtime.snapshot = () => new Promise((resolve) => { resolveSnapshot = resolve; });
+      const pending = pi.emit("context", { messages: [staleWorkerContext] }, ctx);
+      await pi.emit("session_shutdown", { reason }, ctx);
+      const replacement = new FakePi();
+      const owner = reason === "reload" ? "owner-a" : "owner-b";
+      const next = createContext(owner);
+      install(replacement, host);
+      await replacement.emit("session_start", {}, next.ctx);
+      resolveSnapshot({ runs: [], workers: [runningWorker("owner-a")] });
+      expect(await pending).toEqual([{ messages: [] }]);
+      runtime.snapshot = async () => ({ runs: [], workers: [runningWorker(owner)] });
+      expect(await replacement.emit("context", { messages: [] }, next.ctx)).toEqual([
+        { messages: [expect.objectContaining({ content: expect.stringContaining(`worker-${owner}`) })] },
+      ]);
+      expect(await pi.emit("context", { messages: [staleWorkerContext] }, ctx)).toEqual([{ messages: [] }]);
+      await replacement.emit("session_shutdown", { reason: "quit" }, next.ctx);
+    });
+  }
+
+  test("removes stale projections when the snapshot fails or the context belongs to another owner", async () => {
+    const pi = new FakePi();
+    const { host, runtime } = fakeHost();
+    const { ctx } = createContext("owner-a");
+    install(pi, host);
+    await pi.emit("session_start", {}, ctx);
+    runtime.snapshot = async () => { throw new Error("snapshot unavailable"); };
+    expect(await pi.emit("context", { messages: [staleWorkerContext] }, ctx)).toEqual([{ messages: [] }]);
+    runtime.snapshot = async () => ({ runs: [], workers: [runningWorker("owner-a")] });
+    expect(await pi.emit("context", { messages: [] }, createContext("owner-b").ctx)).toEqual([{ messages: [] }]);
+    await pi.emit("session_shutdown", { reason: "quit" }, ctx);
+  });
+
   test("a factory that never starts a session acquires no lifecycle resources", async () => {
     const pi = new FakePi();
     const shared = fakeHost();

@@ -53,6 +53,13 @@ describe("published package resources", () => {
       await mkdir(extractedDirectory);
       await run(["tar", "-xzf", artifactPath, "-C", extractedDirectory], root);
       const packageRoot = join(extractedDirectory, "package");
+      const packedManifest = await Bun.file(join(packageRoot, "package.json")).json();
+      expect(packedManifest.peerDependencies).toMatchObject({
+        "@earendil-works/pi-agent-core": "^0.85.0",
+        "@earendil-works/pi-ai": "^0.85.0",
+        "@earendil-works/pi-coding-agent": "^0.85.0",
+        "@earendil-works/pi-tui": "^0.85.0",
+      });
 
       await symlink(
         join(root, "node_modules"),
@@ -83,6 +90,8 @@ describe("published package resources", () => {
       expect(loadedExtensions.extensions.map((extension) => extension.resolvedPath)).toEqual([
         join(packageRoot, "extension", "index.ts"),
       ]);
+      expect(loadedExtensions.extensions[0]?.handlers.has("context")).toBe(true);
+      expect(await Bun.file(join(packageRoot, "extension", "parent", "worker-context.ts")).exists()).toBe(true);
       const packedCatalogModule = await import(pathToFileURL(
         join(packageRoot, "extension", "catalog", "discovery.ts"),
       ).href);

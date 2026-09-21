@@ -689,7 +689,11 @@ describe("worker session acquisition", () => {
       getApiKeyAndHeaders: mock(async () => ({
         ok: true as const,
         apiKey: "runtime-secret",
-        headers: { "X-Configured": "resolved-header", "X-Runtime": "runtime-header" },
+        headers: {
+          "X-Configured": "resolved-header",
+          "X-Runtime": "runtime-header",
+          "X-Suppressed": null,
+        },
       })),
     });
     const runtime = new FakeModelRuntime([]);

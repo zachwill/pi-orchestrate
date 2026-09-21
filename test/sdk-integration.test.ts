@@ -27,6 +27,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { getProcessHost, quitProcessHost } from "../extension/parent/process-host.ts";
 import { createOrchestrationExtension } from "../extension/index.ts";
+import { LIVE_WORKER_CONTEXT_TYPE } from "../extension/parent/worker-context.ts";
 
 interface WorkerResultDetails {
   title: string;
@@ -48,7 +49,7 @@ type Scenario = "async" | "parallel" | "mixed" | "failure" | "shutdown";
 type ProviderConfig = Parameters<ModelRuntime["registerProvider"]>[1];
 
 interface ProviderRequest {
-  readonly kind: "parent-initial" | "parent-synthesis" | "child-alpha" | "child-beta" | "child-inline" | "child-failure";
+  readonly kind: "parent-initial" | "parent-synthesis" | "parent-checkpoint" | "compaction" | "child-alpha" | "child-beta" | "child-inline" | "child-failure";
   readonly provider: string;
   readonly model: string;
   readonly systemPrompt: string;
@@ -87,6 +88,12 @@ class Counter {
     if (this.value >= target) return Promise.resolve();
     return new Promise((resolve) => this.waiters.push({ target, resolve }));
   }
+}
+
+interface CompactionControl {
+  readonly started: Counter;
+  readonly release: Deferred;
+  readonly outcome: "success" | "failure";
 }
 
 interface SmokeHarness {
@@ -143,9 +150,11 @@ function assistantMessage(content: AssistantMessage["content"], stopReason: Assi
   };
 }
 
-function streamText(text: string): AssistantMessageEventStream {
+function streamText(text: string, inputTokens = 1): AssistantMessageEventStream {
   const stream = createAssistantMessageEventStream();
   const output = assistantMessage([], "stop");
+  output.usage.input = inputTokens;
+  output.usage.totalTokens = inputTokens + output.usage.output;
   const block = { type: "text" as const, text: "" };
 
   stream.push({ type: "start", partial: output });
@@ -156,6 +165,44 @@ function streamText(text: string): AssistantMessageEventStream {
   stream.push({ type: "text_end", contentIndex: 0, content: text, partial: output });
   stream.push({ type: "done", reason: "stop", message: output });
   stream.end(output);
+  return stream;
+}
+
+function streamError(message: string): AssistantMessageEventStream {
+  const stream = createAssistantMessageEventStream();
+  const output = assistantMessage([], "error");
+  output.errorMessage = message;
+  stream.push({ type: "start", partial: output });
+  stream.push({ type: "error", reason: "error", error: output });
+  stream.end(output);
+  return stream;
+}
+
+function streamCompaction(control: CompactionControl, signal?: AbortSignal): AssistantMessageEventStream {
+  const stream = createAssistantMessageEventStream();
+  let finished = false;
+  const finish = (aborted: boolean) => {
+    if (finished) return;
+    finished = true;
+    signal?.removeEventListener("abort", abort);
+    const reason = aborted ? "aborted" : control.outcome === "failure" ? "error" : "stop";
+    const output = assistantMessage(
+      reason === "stop" ? [{ type: "text", text: "COMPACTED_CHECKPOINT: continue the task." }] : [],
+      reason,
+    );
+    stream.push({ type: "start", partial: output });
+    if (reason === "stop") stream.push({ type: "done", reason, message: output });
+    else {
+      output.errorMessage = aborted ? "Compaction cancelled" : "DETERMINISTIC_COMPACTION_FAILURE";
+      stream.push({ type: "error", reason, error: output });
+    }
+    stream.end(output);
+  };
+  const abort = () => finish(true);
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
+  void control.release.promise.then(() => finish(false));
+  control.started.increment();
   return stream;
 }
 
@@ -224,13 +271,16 @@ function transcriptText(context: Context): string {
 }
 
 function providerKind(systemPrompt: string, transcript: string): ProviderRequest["kind"] {
+  if (systemPrompt.includes("You are a context summarization assistant")) return "compaction";
   if (!systemPrompt.includes("direct child worker session")) {
     return transcript.includes("RESULT_ALPHA") ||
       transcript.includes("RESULT_BETA") ||
       transcript.includes("DETERMINISTIC_PROVIDER_FAILURE") ||
       transcript.includes("Completed inline run")
       ? "parent-synthesis"
-      : "parent-initial";
+      : transcript.includes("CONTEXT_CHECKPOINT") || transcript.includes("COMPACTED_CHECKPOINT")
+        ? "parent-checkpoint"
+        : "parent-initial";
   }
   if (transcript.includes("ALPHA_TASK")) return "child-alpha";
   if (transcript.includes("BETA_TASK")) return "child-beta";
@@ -246,6 +296,7 @@ function createProviderExtension(
   childRequestsStarted: Counter,
   childProviderSignals: AbortSignal[],
   childProviderAborted: Counter,
+  compaction?: CompactionControl,
 ): InlineExtension {
   const streamSimple = (
     requestedModel: Model<Api>,
@@ -263,6 +314,20 @@ function createProviderExtension(
       transcript,
     });
     events.push(`provider:${kind}:start`);
+
+    if (kind === "compaction") {
+      if (!compaction) throw new Error("Unexpected compaction request");
+      return streamCompaction(compaction, options?.signal);
+    }
+
+    if (kind === "parent-checkpoint") {
+      if (compaction?.started.value === 0 && transcript.includes("OVERFLOW_REQUEST")) {
+        return streamError("maximum context length exceeded");
+      }
+      const highUsage = compaction?.started.value === 0 && transcript.includes("THRESHOLD_REQUEST");
+      // Real usage-based threshold detection, without changing Pi's lifecycle.
+      return streamText("Checkpoint acknowledged.", highUsage ? 20_000 : 1);
+    }
 
     if (kind === "parent-initial") {
       if (scenario === "async" || scenario === "shutdown") {
@@ -452,7 +517,10 @@ function createObserverExtension(
   };
 }
 
-async function createHarness(scenario: Scenario): Promise<SmokeHarness & { effectivePrompts: string[] }> {
+async function createHarness(
+  scenario: Scenario,
+  compaction?: CompactionControl,
+): Promise<SmokeHarness & { effectivePrompts: string[] }> {
   await quitProcessHost();
   expect(getProcessHost()).toBeUndefined();
 
@@ -500,7 +568,7 @@ async function createHarness(scenario: Scenario): Promise<SmokeHarness & { effec
   };
   const settingsManager = SettingsManager.inMemory(
     {
-      compaction: { enabled: false },
+      compaction: { enabled: false, ...(compaction ? { keepRecentTokens: 1 } : {}) },
       retry: { enabled: false },
     },
     { projectTrusted: true },
@@ -530,6 +598,7 @@ async function createHarness(scenario: Scenario): Promise<SmokeHarness & { effec
           childRequestsStarted,
           childProviderSignals,
           childProviderAborted,
+          compaction,
         ),
         { name: "pi-orchestrate", factory: createOrchestrationExtension() },
         {
@@ -601,6 +670,7 @@ async function createHarness(scenario: Scenario): Promise<SmokeHarness & { effec
 }
 
 async function disposeHarness(harness: SmokeHarness): Promise<void> {
+  for (const gate of Object.values(harness.childGates)) gate.resolve();
   if (!harness.disposed) {
     await harness.runtime.dispose();
     harness.disposed = true;
@@ -628,7 +698,144 @@ function indexOfEvent(events: readonly string[], event: string): number {
   return index;
 }
 
-describe("Pi 0.80.10 SDK integration", () => {
+describe("Pi 0.85.0 SDK integration", () => {
+  for (const outcome of ["success", "failure", "abort"] as const) {
+    test.serial(`delivers a worker group after manual compaction ${outcome} without another prompt`, async () => {
+      const control: CompactionControl = {
+        started: new Counter(), release: new Deferred(),
+        outcome: outcome === "failure" ? "failure" : "success",
+      };
+      const harness = await createHarness("parallel", control);
+      try {
+        const session = harness.runtime.session;
+        await session.prompt("Dispatch two workers.");
+        await harness.childRequestsStarted.waitFor(2);
+        await session.prompt("CONTEXT_CHECKPOINT: leave both workers running.");
+        const host = getProcessHost()!;
+        const owner = session.sessionId;
+        const settled = new Counter();
+        const unsubscribe = host.orchestration.subscribeSettlement(() => settled.increment());
+        const ended = new Deferred();
+        const unsubscribeSession = session.subscribe((event) => {
+          if (event.type === "compaction_end") {
+            harness.events.push(`compaction:end:${event.reason}`);
+            ended.resolve();
+          }
+        });
+        const compacting = session.compact().then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        await control.started.waitFor(1);
+        expect(session.isIdle).toBe(false);
+        harness.childGates["child-beta"].resolve();
+        await settled.waitFor(1);
+        harness.childGates["child-alpha"].resolve();
+        await settled.waitFor(2);
+        expect(host.delivery.pendingCount(owner)).toBe(2);
+        expect(session.messages.filter(isWorkerResultMessage)).toHaveLength(0);
+        expect(harness.requests.filter((r) => r.kind === "parent-synthesis")).toHaveLength(0);
+
+        if (outcome === "abort") session.abortCompaction();
+        else control.release.resolve();
+        const error = await compacting;
+        if (outcome === "success") expect(error).toBeUndefined();
+        else {
+          expect(error).toBeInstanceOf(Error);
+          if (outcome === "abort") expect((error as Error).message).toMatch(/cancelled|aborted/i);
+          else expect((error as Error).message).toContain("DETERMINISTIC_COMPACTION_FAILURE");
+        }
+        await ended.promise;
+        // No prompt or synthetic agent_settled: the production idle recheck must wake delivery.
+        await harness.customMessagesStarted.waitFor(1);
+        await session.waitForIdle();
+        const messages = session.messages.filter(isWorkerResultMessage);
+        expect(messages.map((m) => m.details.title)).toEqual(["Beta task", "Alpha task"]);
+        expect(new Set(messages.map((m) => m.details.synthesisGroupId)).size).toBe(1);
+        expect(host.delivery.pendingCount(owner)).toBe(0);
+        expect(harness.requests.filter((r) => r.kind === "parent-synthesis")).toHaveLength(1);
+        expect(assistantTexts(session.messages).at(-1)).toBe("PARALLEL_SYNTHESIS:true:true");
+        expect(indexOfEvent(harness.events, "compaction:end:manual")).toBeLessThan(
+          indexOfEvent(harness.events, "parent:custom:pi-orchestrate-worker-result"),
+        );
+        const persisted = SessionManager.open(session.sessionFile!).buildSessionContext().messages;
+        expect(persisted.filter(isWorkerResultMessage)).toHaveLength(2);
+        expect(persisted.some((m) => m.role === "custom" && m.customType === LIVE_WORKER_CONTEXT_TYPE)).toBe(false);
+        unsubscribe();
+        unsubscribeSession();
+      } finally {
+        control.release.resolve();
+        await disposeHarness(harness);
+      }
+    }, 5_000);
+  }
+
+  for (const reason of ["threshold", "overflow"] as const) {
+    test.serial(`restores live worker context after ${reason} compaction and preserves grouped delivery`, async () => {
+      const control: CompactionControl = {
+        started: new Counter(), release: new Deferred(), outcome: "success",
+      };
+      const harness = await createHarness("parallel", control);
+      try {
+        const session = harness.runtime.session;
+        await session.prompt("Dispatch two workers.");
+        await harness.childRequestsStarted.waitFor(2);
+        await session.prompt("CONTEXT_CHECKPOINT: leave both workers running.");
+        const host = getProcessHost()!;
+        const before = await host.orchestration.snapshot(session.sessionId);
+        const alpha = before.workers.find((w) => w.title === "Alpha task")!;
+        const beta = before.workers.find((w) => w.title === "Beta task")!;
+        const betaSettled = new Deferred();
+        const unsubscribe = host.orchestration.subscribeSettlement((s) => {
+          if (s.workerId === beta.id) betaSettled.resolve();
+        });
+        const compactionReasons: string[] = [];
+        const unsubscribeSession = session.subscribe((event) => {
+          if (event.type === "compaction_end") compactionReasons.push(event.reason);
+        });
+        session.setAutoCompactionEnabled(true);
+        const prompting = session.prompt(`CONTEXT_CHECKPOINT ${reason.toUpperCase()}_REQUEST`);
+        await control.started.waitFor(1);
+        harness.childGates["child-beta"].resolve();
+        await betaSettled.promise;
+        expect(host.delivery.pendingCount(session.sessionId)).toBe(1);
+        expect(session.messages.filter(isWorkerResultMessage)).toHaveLength(0);
+        const requestCountDuringCompaction = harness.requests.length;
+        control.release.resolve();
+        await prompting;
+        expect(compactionReasons).toEqual([reason]);
+        expect(harness.requests.filter((r) => r.kind === "parent-synthesis")).toHaveLength(0);
+        // Threshold compaction does not retry a completed answer; inspect the next request.
+        if (reason === "threshold") await session.prompt("CONTEXT_CHECKPOINT: report live workers.");
+        const afterCompaction = harness.requests.slice(requestCountDuringCompaction)
+          .find((r) => r.kind.startsWith("parent-"));
+        expect(afterCompaction).toBeDefined();
+        expect(afterCompaction!.transcript).toContain("Pi Orchestrate live worker context");
+        expect(afterCompaction!.transcript).toContain(alpha.id);
+        expect(afterCompaction!.transcript).toContain("ALPHA_TASK");
+        expect(afterCompaction!.transcript).toContain("status=running");
+        expect(afterCompaction!.transcript).not.toContain(`worker_id="${beta.id}"`);
+        if (reason === "overflow") expect(afterCompaction!.transcript).toContain("Pending delivery: 1");
+        expect(session.messages.some((m) => m.role === "toolResult" && m.toolName === "orchestrate")).toBe(false);
+        expect(session.messages.some((m) => m.role === "custom" && m.customType === LIVE_WORKER_CONTEXT_TYPE)).toBe(false);
+
+        harness.childGates["child-alpha"].resolve();
+        await harness.customMessagesStarted.waitFor(1);
+        await session.waitForIdle();
+        expect(session.messages.filter(isWorkerResultMessage)).toHaveLength(2);
+        expect(assistantTexts(session.messages).at(-1)).toBe("PARALLEL_SYNTHESIS:true:true");
+        expect(harness.requests.filter((r) => r.kind === "parent-synthesis")).toHaveLength(reason === "threshold" ? 2 : 1);
+        expect(harness.childRequestsStarted.value).toBe(2);
+        expect(await Bun.file(session.sessionFile!).text()).not.toContain(LIVE_WORKER_CONTEXT_TYPE);
+        unsubscribe();
+        unsubscribeSession();
+      } finally {
+        control.release.resolve();
+        await disposeHarness(harness);
+      }
+    }, 5_000);
+  }
+
   test.serial("runs a sole orchestrate call asynchronously through real parent and child AgentSessions", async () => {
     const harness = await createHarness("async");
     try {

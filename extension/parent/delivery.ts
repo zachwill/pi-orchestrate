@@ -10,6 +10,7 @@ export const DELIVERY_PARENT_INSTRUCTIONS =
   "Parent: Synthesize all results, resolve conflicts, review changes and evidence, run integration checks, and continue the user's task. Do not merely forward worker reports.";
 
 export type ParentBindingGeneration = string | number | symbol;
+export type ScheduleIdleRecheck = (recheck: () => void) => () => void;
 
 export interface WorkerDeliveryMessage {
   readonly customType: "pi-orchestrate-worker-result";
@@ -32,6 +33,11 @@ export interface ParentBinding {
 interface BoundParent {
   readonly binding: ParentBinding;
   agentRunning: boolean;
+}
+
+interface ScheduledIdleRecheck {
+  readonly generation: ParentBindingGeneration;
+  cancel(): void;
 }
 
 interface SynthesisGroupState {
@@ -63,21 +69,30 @@ export class DeliveryCoordinator implements DeliveryService {
   private readonly boundParents = new Map<string, BoundParent>();
   private readonly pendingSettlements: WorkerSettlement[] = [];
   private readonly flushingOwners = new Set<string>();
+  private readonly idleRechecks = new Map<string, ScheduledIdleRecheck>();
   private readonly synthesisGroups = new Map<string, SynthesisGroupState>();
   // Orchestration settlement sequences are process-scoped and monotonic across
   // owners, so one watermark is valid.
   private highestAcceptedSequence = 0;
 
+  constructor(
+    private readonly scheduleIdleRecheck: ScheduleIdleRecheck = scheduleDeliveryIdleRecheck,
+  ) {}
+
   bind(binding: ParentBinding): void {
+    this.cancelIdleRecheck(binding.ownerSessionId);
     this.boundParents.set(binding.ownerSessionId, {
       binding,
-      agentRunning: !binding.isIdle(),
+      // Non-idle also covers manual compaction. Agent lifecycle events, rather
+      // than the broader idle flag, own this state.
+      agentRunning: false,
     });
     this.flush(binding.ownerSessionId, binding.generation);
   }
 
   unbind(ownerSessionId: string, generation: ParentBindingGeneration): void {
     if (!this.matchesBinding(ownerSessionId, generation)) return;
+    this.cancelIdleRecheck(ownerSessionId, generation);
     this.boundParents.delete(ownerSessionId);
   }
 
@@ -85,6 +100,7 @@ export class DeliveryCoordinator implements DeliveryService {
     const parent = this.boundParents.get(ownerSessionId);
     if (parent?.binding.generation !== generation) return;
     parent.agentRunning = true;
+    this.cancelIdleRecheck(ownerSessionId, generation);
   }
 
   markAgentSettled(ownerSessionId: string, generation: ParentBindingGeneration): void {
@@ -130,6 +146,8 @@ export class DeliveryCoordinator implements DeliveryService {
   }
 
   clear(): void {
+    for (const recheck of this.idleRechecks.values()) recheck.cancel();
+    this.idleRechecks.clear();
     this.boundParents.clear();
     this.pendingSettlements.length = 0;
     this.flushingOwners.clear();
@@ -146,18 +164,28 @@ export class DeliveryCoordinator implements DeliveryService {
 
   private canDeliver(ownerSessionId: string, generation: ParentBindingGeneration): boolean {
     const parent = this.boundParents.get(ownerSessionId);
-    return (
-      parent !== undefined &&
-      parent.binding.generation === generation &&
-      !parent.agentRunning &&
-      parent.binding.isIdle()
-    );
+    if (
+      parent === undefined ||
+      parent.binding.generation !== generation ||
+      parent.agentRunning
+    ) {
+      return false;
+    }
+    if (!parent.binding.isIdle()) {
+      this.ensureIdleRecheck(ownerSessionId, generation);
+      return false;
+    }
+    this.cancelIdleRecheck(ownerSessionId, generation);
+    return true;
   }
 
   private flush(ownerSessionId: string, generation: ParentBindingGeneration): void {
-    if (this.flushingOwners.has(ownerSessionId) || !this.canDeliver(ownerSessionId, generation)) {
+    if (this.flushingOwners.has(ownerSessionId)) return;
+    if (this.pendingCount(ownerSessionId) === 0) {
+      this.cancelIdleRecheck(ownerSessionId, generation);
       return;
     }
+    if (!this.canDeliver(ownerSessionId, generation)) return;
 
     this.flushingOwners.add(ownerSessionId);
     try {
@@ -214,6 +242,36 @@ export class DeliveryCoordinator implements DeliveryService {
     } finally {
       this.flushingOwners.delete(ownerSessionId);
     }
+  }
+
+  private ensureIdleRecheck(
+    ownerSessionId: string,
+    generation: ParentBindingGeneration,
+  ): void {
+    const current = this.idleRechecks.get(ownerSessionId);
+    if (current?.generation === generation) return;
+    current?.cancel();
+
+    const scheduled: ScheduledIdleRecheck = {
+      generation,
+      cancel: () => {},
+    };
+    this.idleRechecks.set(ownerSessionId, scheduled);
+    scheduled.cancel = this.scheduleIdleRecheck(() => {
+      if (this.idleRechecks.get(ownerSessionId) !== scheduled) return;
+      this.idleRechecks.delete(ownerSessionId);
+      this.flush(ownerSessionId, generation);
+    });
+  }
+
+  private cancelIdleRecheck(
+    ownerSessionId: string,
+    generation?: ParentBindingGeneration,
+  ): void {
+    const scheduled = this.idleRechecks.get(ownerSessionId);
+    if (!scheduled || (generation !== undefined && scheduled.generation !== generation)) return;
+    this.idleRechecks.delete(ownerSessionId);
+    scheduled.cancel();
   }
 
   private renderWorkerMessage(
@@ -301,6 +359,12 @@ export const deliveryLayer: Layer.Layer<Delivery, never, Orchestration> = Layer.
     return Delivery.of(coordinator);
   }),
 );
+
+function scheduleDeliveryIdleRecheck(recheck: () => void): () => void {
+  const timeout = setTimeout(recheck, 100);
+  timeout.unref();
+  return () => clearTimeout(timeout);
+}
 
 function synthesisGroupKey(ownerSessionId: string, synthesisGroupId: string): string {
   return `${ownerSessionId}\u0000${synthesisGroupId}`;

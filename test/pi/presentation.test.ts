@@ -53,7 +53,7 @@ function renderer(): MessageRenderer {
   return result!;
 }
 function renderResult(details: unknown, expanded: boolean, width: number, content = "fallback content"): string[] {
-  return renderer()({ role: "custom", customType: "pi-orchestrate-worker-result", content, display: true, details, timestamp: 1 }, { expanded }, theme)!.render(width);
+  return renderer()({ role: "custom", customType: "pi-orchestrate-worker-result", content, display: true, details, timestamp: 1 }, { expanded, outputPad: 1 }, theme)!.render(width);
 }
 
 describe("per-worker result messages", () => {
@@ -98,7 +98,7 @@ describe("per-worker result messages", () => {
   test("rebuilds themed worker-result children on invalidation", () => {
     let marker = "old";
     const mutableTheme = { ...theme, fg: (_: string, text: string) => `${marker}:${text}` } as Theme;
-    const component = renderer()({ role: "custom", customType: "pi-orchestrate-worker-result", content: "fallback", display: true, details: settlement(), timestamp: 1 }, { expanded: false }, mutableTheme)!;
+    const component = renderer()({ role: "custom", customType: "pi-orchestrate-worker-result", content: "fallback", display: true, details: settlement(), timestamp: 1 }, { expanded: false, outputPad: 1 }, mutableTheme)!;
     expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("old:");
     marker = "new";
     component.invalidate();
