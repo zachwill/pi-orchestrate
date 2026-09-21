@@ -1,16 +1,22 @@
 # Pi Orchestrate
 
-[`@zachwill/pi-orchestrate`](https://www.npmjs.com/package/@zachwill/pi-orchestrate) lets a Pi session delegate work to direct child sessions. It requires Pi 0.85.0 or newer.
+[`@zachwill/pi-orchestrate`](https://www.npmjs.com/package/@zachwill/pi-orchestrate) lets a Pi session delegate work to direct child sessions.
 
 - Each worker gets a focused brief and a separate conversation.
 - Workers run independently and return their results to the parent.
 - Only the parent can delegate; workers cannot create more workers.
 
+Requires Pi 0.85.0 or newer.
+
+```bash
+pi install npm:@zachwill/pi-orchestrate
+```
+
 ## The model
 
 Each `orchestrate` dispatch creates a fresh worker session with its own transcript. The worker receives a complete brief from the parent but not the parent's conversation.
 
-A worker definition is reusable configuration: it selects the worker's prompt, tools, lifecycle, and optional model settings. It is not a running or retained session.
+A worker definition is reusable configuration for the worker's prompt, tools, lifecycle, and optional model settings.
 
 Independent workers dispatched together run concurrently. Their results return only to the parent session that started them, and the parent synthesizes the group after every worker finishes. A rejected or failed worker does not cancel its peers. Orchestration dispatched alongside unrelated tool calls runs inline instead of in the background.
 
@@ -23,13 +29,7 @@ A **worker ID** identifies a worker session. A **run ID** identifies one generat
 
 Interactive workers remain available across session switches and extension reloads within the same Pi process. Closing one releases its retained session; process shutdown releases any that remain.
 
-## Compaction
-
-Parent compaction does not stop workers. Results that settle during compaction remain queued for the owning session and resume automatic delivery when that session becomes idle, including after failed or cancelled compaction. Grouped work still triggers synthesis only after the group settles.
-
-Before each parent model request, the extension adds a fresh, owner-scoped snapshot of active workers and ready interactive sessions. This transient context survives compaction by being rebuilt from live state; it is not appended to the transcript. The snapshot is capped at 12 KiB and reports omitted workers or truncated assignments, with `worker_status` available for recovery rather than polling.
-
-This state belongs to the running Pi process. Compaction does not require restarting workers, and persisted transcripts do not restore running workers after a process restart.
+Workers keep running when the parent conversation is compacted, and their results return automatically. Restarting Pi does not restore running workers.
 
 ## Agent interface
 
@@ -43,7 +43,7 @@ Pi Orchestrate gives the parent five model-facing tools:
 | `worker_abort` | Stop active workers owned by the parent |
 | `worker_status` | Inspect the trusted catalog and diagnose the parent's worker state |
 
-The extension supplies the parent with the exact dispatch and lifecycle rules for these tools. The README describes their behavior rather than duplicating those model instructions.
+The extension supplies the parent with instructions for using these tools.
 
 ## Worker definitions
 
@@ -85,8 +85,6 @@ The frontmatter is strict:
 
 The Markdown body is the worker's nonempty system prompt. `tools` and `skills` accept either YAML arrays or comma-separated strings. Supported Pi tools are `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`. Unknown fields and malformed definitions are rejected and appear in catalog diagnostics.
 
-Each `orchestrate` call starts a new worker session from the selected definition. Only `interactive_send` continues an existing session.
-
 ## Trust boundary
 
 Workers run in the parent process and are not security sandboxes. They share its filesystem and environment permissions.
@@ -95,6 +93,4 @@ Workers can use global Pi settings, authentication, packages, extensions, skills
 
 A definition's `tools` field controls Pi's tool allowlist, not operating-system authority. A worker with `bash` can start external processes, including other agent CLIs. A read-only prompt also does not prevent writes when the worker has a write-capable tool.
 
-Concurrent workers share the same working tree, so overlapping write scopes can collide. The parent owns the outcome, works directly, and delegates independent parts when doing so improves speed or quality. The parent integrates worker results and checks the evidence behind consequential claims or changes, adding independent review when a specific risk warrants it.
-
-Pi Orchestrate excludes itself from child sessions and keeps workers as direct Pi children.
+Concurrent workers share the same working tree, so overlapping write scopes can collide.
