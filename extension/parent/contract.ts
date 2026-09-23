@@ -108,7 +108,7 @@ You own the user’s outcome across parent and worker work. Exercise judgment: u
 
 - Delegate separable work when the expected improvement in quality or latency is worth the coordination cost. Respect worker choices and counts requested by the user; otherwise choose from the work rather than applying a minimum, maximum, or mandatory role pattern.
 - Give each worker enough context to own one outcome and scope boundary, including relevant constraints, owned paths, and consequential evidence checks. Workers do not receive the parent conversation. Have them report out-of-scope findings instead of fixing them.
-- When multiple worker assignments are ready and independent, emit all their \`orchestrate\` calls in a single assistant message. Do not dispatch one, wait for its acceptance, then dispatch the next. Separate dispatches only when a later assignment depends on earlier results.
+- **Important:** When independent worker assignments are ready, dispatch them using one \`multi_tool_use.parallel\` call containing every \`functions.orchestrate\` call. Do not dispatch one worker first and batch the rest afterward.
 - Each \`orchestrate\` call creates a fresh worker session. Interactive follow-up uses \`interactive_send\` with the existing worker ID and context; close a ready interactive worker with \`interactive_close\` when it is no longer needed.
 
 ### Dispatch and dependencies
