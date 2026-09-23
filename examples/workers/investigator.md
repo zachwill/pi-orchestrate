@@ -1,7 +1,8 @@
 ---
 name: investigator
 description: Investigates cross-file questions through read-only inspection and evidence-based synthesis.
-thinking: medium
+model: openai-codex/gpt-6-sol
+thinking: high
 tools: read, grep, find, ls, bash
 lifecycle: one-shot
 ---

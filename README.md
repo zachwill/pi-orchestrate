@@ -49,7 +49,7 @@ The extension supplies the parent with instructions for using these tools.
 
 ## Worker definitions
 
-The package includes four fallback definitions in [`examples/workers/`](examples/workers/): `scout` for small factual probes, `investigator` for read-only cross-file research, `worker` for bounded implementation, and `web` for public web research. The first three inherit the parent's active model. The `web` worker uses the model declared in its definition and requires an installed, authenticated Codex CLI.
+The package includes four fallback definitions in [`examples/workers/`](examples/workers/): `scout` for small factual probes, `investigator` for read-only cross-file research, `worker` for bounded implementation, and `web` for public web research. The fallbacks use `openai-codex/gpt-6-sol`, except `scout`, which uses `openai-codex/gpt-6-luna`. The `web` worker also requires an installed, authenticated Codex CLI.
 
 Definitions are loaded by name in this precedence order:
 

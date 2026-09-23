@@ -1,6 +1,7 @@
 ---
 name: worker
 description: Implements bounded code changes, fixes, and refactors.
+model: openai-codex/gpt-6-sol
 thinking: medium
 tools: read, bash, edit, write, grep, find, ls
 lifecycle: one-shot

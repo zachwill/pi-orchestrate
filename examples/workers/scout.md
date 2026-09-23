@@ -1,6 +1,7 @@
 ---
 name: scout
 description: Answers a small factual repository question through shallow, read-only inspection.
+model: openai-codex/gpt-6-luna
 thinking: low
 tools: read, grep, find, ls, bash
 lifecycle: one-shot
