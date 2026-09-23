@@ -685,9 +685,18 @@ async function createHarness(
   await mkdir(agentDir, { recursive: true });
   await Bun.write(join(cwd, "fixture.txt"), "fixture-content\n");
   await Bun.write(join(cwd, "second-fixture.txt"), "second-fixture-content\n");
+  const workersDir = join(agentDir, "pi-orchestrate", "workers");
+  await mkdir(workersDir, { recursive: true });
+  // Keep mock-provider scenarios independent of the packaged workers' model pins.
+  await Bun.write(join(workersDir, "scout.md"), `---
+name: scout
+description: Deterministic SDK scout
+tools: read
+lifecycle: one-shot
+---
+You are the deterministic SDK scout.
+`);
   if (scenario === "interactive") {
-    const workersDir = join(agentDir, "pi-orchestrate", "workers");
-    await mkdir(workersDir, { recursive: true });
     await Bun.write(join(workersDir, "collaborator.md"), `---
 name: collaborator
 description: Deterministic interactive SDK worker
@@ -1033,7 +1042,8 @@ describe("Pi 0.85.0 SDK integration", () => {
       expect(initialParent.systemPrompt).toStartWith(BASE_SYSTEM_PROMPT);
       expect(initialParent.systemPrompt).toContain("## Pi Orchestrate Contract");
       expect(initialParent.systemPrompt).toContain("Trusted worker catalog");
-      expect(initialParent.systemPrompt).toContain("`scout` [package]");
+      expect(initialParent.systemPrompt).toContain("`scout` [user]");
+      expect(initialParent.systemPrompt).toContain("`worker` [package]");
       expect(initialParent.systemPrompt).toContain("`investigator` [package]");
       expect(initialParent.systemPrompt).toContain("`worker` [package]");
 
