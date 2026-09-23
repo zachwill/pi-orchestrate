@@ -1,7 +1,7 @@
 ---
 name: web
 description: Researches the public web with one or more Codex searches and returns a source-grounded synthesis.
-model: openai-codex/gpt-5.6-sol
+model: openai-codex/gpt-6-sol
 thinking: medium
 tools: bash
 skills: []
@@ -31,7 +31,7 @@ stderr_log="$work_dir/stderr.log"
 
 codex exec - \
   --ignore-user-config \
-  --model gpt-5.6-sol \
+  --model gpt-6-sol \
   -c 'model_reasoning_effort="medium"' \
   -c 'web_search="cached"' \
   --ephemeral \
