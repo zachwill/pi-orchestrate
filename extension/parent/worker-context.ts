@@ -14,7 +14,7 @@ const ACTIVE_STATUSES = new Set<WorkerRecord["status"]>([
   "stopping",
 ]);
 const ITEM_TRUNCATION_MARKER =
-  "\n  [entry truncated; use worker_status once for diagnostics/recovery]";
+  "\n  [entry shortened; use worker_status for worker IDs and current state]";
 const ASSIGNMENT_TRUNCATION_MARKER = " … [assignment excerpt truncated]";
 
 type CustomMessage = Extract<AgentMessage, { readonly role: "custom" }>;
@@ -111,7 +111,7 @@ function renderBoundedContext(
   return capUtf8(
     renderContext([], items.length, activeCount, readyCount, pendingResultCount),
     MAX_LIVE_WORKER_CONTEXT_BYTES,
-    "\n[Live worker context truncated; use worker_status once for recovery.]",
+    "\n[Live worker context shortened; use worker_status to recover omitted workers.]",
   );
 }
 
@@ -124,8 +124,8 @@ function renderContext(
 ): string {
   const sections = [
     "## Pi Orchestrate live worker context",
-    "Authoritative transient process snapshot for this parent provider call; it is not conversation history.",
-    `Relevant owned workers: ${totalWorkers} (${activeCount} active, ${readyCount} ready interactive).`,
+    "Current workers for this session, refreshed for each request. Use this view to pick up existing work after compaction.",
+    `Workers: ${totalWorkers} (${activeCount} active, ${readyCount} ready for follow-up).`,
   ];
 
   if (shownItems.length > 0) {
@@ -134,29 +134,31 @@ function renderContext(
   if (shownItems.length < totalWorkers) {
     const omitted = totalWorkers - shownItems.length;
     sections.push(
-      `Snapshot overflow: showing ${shownItems.length} of ${totalWorkers}; ${omitted} worker${omitted === 1 ? "" : "s"} omitted by the ${MAX_LIVE_WORKER_CONTEXT_BYTES}-byte limit. Use worker_status once for diagnostics/recovery to inspect omitted worker IDs and current state; do not poll.`,
+      `Showing ${shownItems.length} of ${totalWorkers} workers; ${omitted} omitted to keep this view brief. Use worker_status to inspect their IDs and current state.`,
     );
   }
   if (pendingResultCount > 0) {
     sections.push(
-      `Pending delivery: ${pendingResultCount} settled worker result${pendingResultCount === 1 ? "" : "s"} await automatic delivery. Do not redispatch that work.`,
+      `Pending delivery: ${pendingResultCount} worker result${pendingResultCount === 1 ? " is" : "s are"} ready and will arrive automatically after your current run.`,
     );
   }
 
   const guidance: string[] = [];
   if (activeCount > 0) {
     guidance.push(
-      "Do not duplicate active assignments. Continue useful independent work when it materially advances the outcome.",
+      "These assignments are already underway. Continue useful work that does not depend on their results.",
     );
   }
   if (readyCount > 0) {
     guidance.push(
-      "Ready interactive sessions are retained: use interactive_send with the worker_id for follow-up, or interactive_close when finished.",
+      "Ready workers retain their conversation. Use interactive_send with the worker_id for follow-up, or interactive_close when finished.",
     );
   }
-  guidance.push(
-    "Settled results are delivered automatically after the parent run ends. If progress depends on pending evidence, end the run truthfully rather than polling. Use worker_status only for diagnostics or recovery when this snapshot reports overflow or state appears inconsistent.",
-  );
+  if (activeCount > 0 || pendingResultCount > 0) {
+    guidance.push(
+      "When you need worker results and have no useful independent work left, send a brief pending response without tool calls so automatic delivery can resume you.",
+    );
+  }
   sections.push(`Guidance:\n- ${guidance.join("\n- ")}`);
 
   return sections.join("\n\n");

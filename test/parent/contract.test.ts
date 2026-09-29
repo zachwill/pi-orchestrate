@@ -52,8 +52,12 @@ describe("orchestrator contract", () => {
     expect(twice).toBe(once);
     expectOneContract(once);
     expect(once).toStartWith("Base system prompt.\n\n");
+    expect(once).toContain("`multi_tool_use.parallel`");
+    expect(once).toContain("`functions.orchestrate`");
+    expect(once).toContain("`functions.interactive_send`");
     expect(once).toContain("Compaction does not stop workers.");
-    expect(once).toContain("Do not redispatch work because its dispatch was compacted away.");
+    expect(once).toContain("Pick up existing assignments from the live worker context");
+    expect(once).toContain("pending response without tool calls");
   });
 
   test("replaces in place with the current sorted trusted catalog", () => {

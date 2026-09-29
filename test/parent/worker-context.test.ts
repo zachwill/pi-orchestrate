@@ -92,9 +92,10 @@ describe("live worker context projection", () => {
     expect(content).toContain("lifecycle=one-shot | status=running");
     expect(content).toContain('worker_id="worker-2"');
     expect(content).toContain("lifecycle=interactive | status=ready");
-    expect(content).toContain("Pending delivery: 2 settled worker results await automatic delivery.");
-    expect(content).toContain("Do not duplicate active assignments.");
-    expect(content).toContain("use interactive_send with the worker_id");
+    expect(content).toContain("Pending delivery: 2 worker results are ready");
+    expect(content).toContain("These assignments are already underway.");
+    expect(content).toContain("Use interactive_send with the worker_id");
+    expect(content).toContain("pending response without tool calls");
     expect(content).not.toContain("worker-3");
     expect(content).not.toContain("worker-4");
     expect(content).not.toContain("worker-5");
@@ -136,11 +137,25 @@ describe("live worker context projection", () => {
       { ownerSessionId: "owner-a", pendingResultCount: 0 },
     ));
 
-    expect(content).toContain("Relevant owned workers: 1 (0 active, 1 ready interactive).");
+    expect(content).toContain("Workers: 1 (0 active, 1 ready for follow-up).");
     expect(content).toContain('worker_id="worker-7"');
     expect(content).toContain('assignment="Review the revised patch."');
     expect(content).toContain("interactive_close");
-    expect(content).not.toContain("Do not duplicate active assignments.");
+    expect(content).not.toContain("These assignments are already underway.");
+    expect(content).not.toContain("pending response");
+  });
+
+  test("guides pending-only delivery without suggesting more work or interactive controls", () => {
+    const content = contentOf(projectLiveWorkerContext(
+      snapshot([]),
+      { ownerSessionId: "owner-a", pendingResultCount: 1 },
+    ));
+
+    expect(content).toContain("Pending delivery: 1 worker result is ready");
+    expect(content).toContain("pending response without tool calls");
+    expect(content).not.toContain("These assignments are already underway.");
+    expect(content).not.toContain("interactive_send");
+    expect(content).not.toContain("interactive_close");
   });
 
   test("bounds each worker entry and marks a truncated assignment", () => {
@@ -170,7 +185,7 @@ describe("live worker context projection", () => {
     ));
     const shown = [...content.matchAll(/^- worker_id=/gm)].length;
     const overflow = content.match(
-      /Snapshot overflow: showing (\d+) of 100; (\d+) workers omitted/,
+      /Showing (\d+) of 100 workers; (\d+) omitted/,
     );
 
     expect(Buffer.byteLength(content, "utf8")).toBeLessThanOrEqual(
@@ -179,8 +194,7 @@ describe("live worker context projection", () => {
     expect(overflow).not.toBeNull();
     expect(Number(overflow?.[1])).toBe(shown);
     expect(Number(overflow?.[2])).toBe(100 - shown);
-    expect(content).toContain("worker_status once for diagnostics/recovery");
-    expect(content).toContain("do not poll");
+    expect(content).toContain("Use worker_status to inspect their IDs and current state.");
   });
 
   test("replaces all prior own projections without disturbing unrelated messages", () => {

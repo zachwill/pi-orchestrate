@@ -105,10 +105,10 @@ export function registerOrchestrationTools(
     name: "orchestrate",
     label: "Orchestrate",
     description:
-      "Dispatch one fully briefed worker scope in the background. All orchestrate and interactive_send calls in the same assistant response form one result group; ordinary sibling tools execute concurrently and are not group members.",
-    promptSnippet: "Dispatch one fully briefed worker scope in the background",
+      "Start a background assignment. Choose a catalog name with worker, name the assignment with title, and give the complete brief in instructions. Returns a worker_id for follow-up and controls; the result arrives separately.",
+    promptSnippet: "Start a background worker with a complete assignment brief",
     promptGuidelines: [
-      "orchestrate starts background work and returns acceptance without ending the parent run. Dispatch siblings in one assistant response share a result group; ordinary sibling tools do not join that group.",
+      "Workers receive your instructions, not your conversation. Include the goal, relevant context, owned paths, and expected result.",
     ],
     executionMode: "parallel",
     parameters: taskSchema,
@@ -128,7 +128,7 @@ export function registerOrchestrationTools(
       );
       const readable = acceptedRunSummary(acceptedRun);
       return readableToolResult(
-        `Accepted async run ${readable.run_id}.`,
+        `Accepted ${JSON.stringify(params.title)} as ${readable.worker_id}. Results will arrive automatically.`,
         readable,
       );
     },
@@ -138,10 +138,10 @@ export function registerOrchestrationTools(
     name: "worker_status",
     label: "Worker Status",
     description:
-      "Diagnostics and recovery only: inspect trusted catalog entries, catalog diagnostics, and this session's orchestration state. Never poll for completion.",
-    promptSnippet: "Inspect owned worker state for diagnostics or recovery",
+      "Inspect the worker catalog and this session's workers for diagnostics or recovery. Includes worker IDs, configuration, current state, latest outcomes, and available transcript paths.",
+    promptSnippet: "Recover worker IDs and inspect configuration, state, and outcomes",
     promptGuidelines: [
-      "Use worker_status only for diagnostics or recovery; never poll it for completion.",
+      "Use worker_status to investigate unexpected state or recover missing information. Results arrive automatically, so completion polling is unnecessary.",
     ],
     parameters: statusSchema,
     ...workerStatusToolRenderer,
@@ -151,7 +151,7 @@ export function registerOrchestrationTools(
       const snapshot = await deps.orchestration.snapshot(ownerSessionId);
       const readable = statusSummary(catalog, snapshot);
       return readableToolResult(
-        "Worker diagnostics and recovery snapshot.",
+        "Worker catalog and current state for this session.",
         readable,
       );
     },
@@ -161,11 +161,8 @@ export function registerOrchestrationTools(
     name: "interactive_send",
     label: "Interactive Send",
     description:
-      "Send background follow-up instructions only to an owned lifecycle interactive worker whose status is ready. All interactive_send and orchestrate calls in the same assistant response form one result group; ordinary sibling tools execute concurrently and are not group members. Never use for one-shot or completed workers.",
-    promptSnippet: "Use only for an owned lifecycle interactive worker with status ready; never one-shot/completed because one-shot sessions terminate automatically",
-    promptGuidelines: [
-      "interactive_send starts background follow-up work and returns acceptance without ending the parent run. Dispatch siblings in one assistant response share a result group; ordinary sibling tools do not join that group.",
-    ],
+      "Continue a ready interactive worker from this session. Pass its worker_id and follow-up instructions; it retains its conversation and returns the result in the background.",
+    promptSnippet: "Continue a ready interactive worker using its worker_id",
     parameters: interactiveSendSchema,
     ...interactiveSendToolRenderer,
     async execute(toolCallId, params, signal, _onUpdate, ctx) {
@@ -185,7 +182,7 @@ export function registerOrchestrationTools(
       );
       const readable = acceptedRunSummary(acceptedRun);
       return readableToolResult(
-        `Accepted async run ${readable.run_id}.`,
+        `Accepted follow-up for ${readable.worker_id}. Results will arrive automatically.`,
         readable,
       );
     },
@@ -195,11 +192,8 @@ export function registerOrchestrationTools(
     name: "worker_abort",
     label: "Worker Abort",
     description:
-      "Abort owned active work by worker IDs or all active owned workers. Use interactive_close for owned lifecycle interactive workers whose status is ready.",
-    promptSnippet: "Abort active owned workers by worker IDs or all",
-    promptGuidelines: [
-      "Use worker_abort only for active work; use interactive_close only for an owned lifecycle interactive worker whose status is ready, never for one-shot or completed workers because one-shot sessions terminate automatically.",
-    ],
+      "Stop active workers from this session. Supply worker_ids to select workers, or all: true to stop all active workers belonging to this session.",
+    promptSnippet: "Stop selected active workers or all active workers from this session",
     parameters: workerAbortSchema,
     ...workerAbortToolRenderer,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -218,10 +212,10 @@ export function registerOrchestrationTools(
   pi.registerTool({
     name: "interactive_close",
     label: "Interactive Close",
-    description: "Close only an owned lifecycle interactive worker whose status is ready. Never use for one-shot or completed workers; one-shot sessions terminate automatically.",
-    promptSnippet: "Use only for an owned lifecycle interactive worker with status ready; never one-shot/completed because one-shot sessions terminate automatically",
+    description: "Release a ready interactive worker from this session when you are finished with it. Pass its worker_id to close the retained conversation.",
+    promptSnippet: "Release a ready interactive worker when finished",
     promptGuidelines: [
-      "Use interactive_close only for an owned lifecycle interactive worker whose status is ready; never use it for one-shot or completed workers because one-shot sessions terminate automatically.",
+      "Interactive workers stay available for follow-up until closed. One-shot workers finish automatically; worker_abort stops active work.",
     ],
     parameters: interactiveCloseSchema,
     ...interactiveCloseToolRenderer,
@@ -389,5 +383,5 @@ function readableDetails(title: string, details: unknown): string {
   const truncation = truncateHead(content);
   if (!truncation.truncated) return content;
 
-  return `${truncation.content}\n\n[Output truncated: ${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}. Full structured details remain available.]`;
+  return `${truncation.content}\n\n[Output truncated: ${formatSize(truncation.outputBytes)} of ${formatSize(truncation.totalBytes)}. Full output is retained in this tool result's session data.]`;
 }

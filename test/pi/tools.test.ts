@@ -427,9 +427,10 @@ describe("registerOrchestrationTools", () => {
       worker_id: runtime.acceptedRun.workerId,
     });
     expect(result.content[0]).toMatchObject({ type: "text" });
-    expect(result.content[0]?.type === "text" && result.content[0].text).toContain(
-      "run-accepted",
-    );
+    const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+    expect(text).toStartWith('Accepted "Inspect" as worker-accepted.');
+    expect(text).toContain("Results will arrive automatically.");
+    expect(text).toContain("run-accepted");
   });
 
   test("preserves already-aborted signal reasons at both dispatch adapters", async () => {
@@ -498,6 +499,14 @@ describe("registerOrchestrationTools", () => {
       },
     });
     expect(result).not.toHaveProperty("terminate");
+    const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+    expect(text).toStartWith("Accepted follow-up for worker-accepted.");
+    expect(text).toContain("Results will arrive automatically.");
+    expect(result.details).toEqual({
+      mode: "async",
+      run_id: runtime.acceptedRun.id,
+      worker_id: runtime.acceptedRun.workerId,
+    });
   });
 
   test("worker_status forwards only the current owner and returns catalog diagnostics plus state", async () => {
@@ -537,6 +546,30 @@ describe("registerOrchestrationTools", () => {
     expect(result.content[0]?.type === "text" && result.content[0].text).not.toContain(
       "Inspect the runtime.",
     );
+    const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+    expect(text).toContain('"assistant_text": "Ready for follow-up."');
+    expect(text).toContain('"session_file": "/sessions/worker-owned.jsonl"');
+  });
+
+  test("shortens large status output while retaining full reports in session details", async () => {
+    const { pi, runtime, context } = harness();
+    const report = `${"detail ".repeat(10_000)}REPORT_END`;
+    runtime.snapshotResult = {
+      runs: [],
+      workers: runtime.snapshotResult.workers.map((worker) => ({
+        ...worker,
+        outcome: { status: "ready", assistantText: report },
+      })),
+    };
+
+    const result = await invoke(pi, "worker_status", "large-status", {}, context);
+    const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+    expect(text).toContain("Output truncated:");
+    expect(text).toContain("Full output is retained in this tool result's session data.");
+    expect(text).not.toContain("REPORT_END");
+    expect(result.details).toMatchObject({
+      state: { workers: [{ outcome: { assistant_text: report } }] },
+    });
   });
 
   test("normalizes abort field names without enforcing target policy", async () => {

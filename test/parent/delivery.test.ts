@@ -153,6 +153,8 @@ describe("DeliveryCoordinator worker settlements", () => {
       synthesisGroupSize: 2,
     }));
     expect(parent.sent.map(({ options }) => options.triggerTurn)).toEqual([false, true]);
+    expect(parent.sent[0]?.message.content).not.toContain("Combine these results");
+    expect(parent.sent[1]?.message.content).toContain("Combine these results with your own work");
     expect(parent.sent.map(({ message }) => message.details)).toEqual([
       expect.objectContaining({
         synthesisGroupId: "synthesis-group",
@@ -450,6 +452,28 @@ describe("DeliveryCoordinator worker settlements", () => {
     expect(sent.map((item) => item.options.triggerTurn)).toEqual([true, true]);
   });
 
+  test("shows interactive follow-up tools alongside ready results and preserves failure evidence", () => {
+    const sent = flushQueuedSettlements(2, (index) => index === 0 ? {
+      lifecycle: "interactive",
+      status: "ready",
+      outcome: { status: "ready", assistantText: "Review complete; ready for revisions." },
+    } : {
+      status: "failed",
+      outcome: {
+        status: "failed",
+        message: "Provider disconnected",
+        assistantText: "Partial finding: the handler owns cleanup.",
+      },
+    });
+
+    expect(sent[0]?.message.content).toContain("ready for follow-up with `interactive_send`");
+    expect(sent[0]?.message.content).toContain("release with `interactive_close` when finished");
+    expect(sent[0]?.message.content).toContain("Review complete; ready for revisions.");
+    expect(sent[1]?.message.content).toContain("Failed: Provider disconnected");
+    expect(sent[1]?.message.content).toContain("Partial finding: the handler owns cleanup.");
+    expect(sent[1]?.message.content).not.toContain("interactive_send");
+  });
+
   test("caps individual parent context while retaining the complete structured outcome", () => {
     const coordinator = new DeliveryCoordinator();
     const parent = createBinding("owner-a", 1);
@@ -467,6 +491,7 @@ describe("DeliveryCoordinator worker settlements", () => {
       MAX_WORKER_DELIVERY_MARKDOWN_BYTES,
     );
     expect(delivered?.content).toContain(DELIVERY_TRUNCATION_MARKER);
+    expect(delivered?.content).toContain("worker_status");
     expect(delivered?.content).not.toContain("�");
     expect(delivered?.details.outcome).toEqual({ status: "completed", assistantText: fullBody });
   });

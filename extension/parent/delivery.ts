@@ -5,9 +5,9 @@ import type { WorkerSettlement } from "../orchestration/settlement.ts";
 export const MAX_DELIVERY_MARKDOWN_BYTES = 50 * 1024;
 export const MAX_WORKER_DELIVERY_MARKDOWN_BYTES = 16 * 1024;
 export const DELIVERY_TRUNCATION_MARKER =
-  "\n\n[Worker result truncated for parent context. Full output remains in structured details.]";
+  "\n\n[Worker result shortened for parent context. The full report is retained in session data and the expanded result view. For more detail, use worker_status to look up the worker's latest report and available transcript path.]";
 export const DELIVERY_PARENT_INSTRUCTIONS =
-  "Parent: Use these results as input to the user's task. Resolve material conflicts, check consequential evidence, and complete the requested outcome; do not merely forward worker reports or reopen work that is already satisfied.";
+  "Combine these results with your own work, resolve material conflicts, check consequential evidence, and complete the user's request.";
 
 export type ParentBindingGeneration = string | number | symbol;
 export type ScheduleIdleRecheck = (recheck: () => void) => () => void;
@@ -396,7 +396,7 @@ function truncateUtf8(content: string, byteLimit: number): string {
 
 function renderDisposition(settlement: WorkerSettlement): string | undefined {
   if (settlement.status === "ready" && settlement.lifecycle === "interactive") {
-    return "interactive session retained; use `interactive_send` or `interactive_close`";
+    return "ready for follow-up with `interactive_send`; release with `interactive_close` when finished";
   }
   return undefined;
 }

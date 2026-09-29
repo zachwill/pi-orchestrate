@@ -306,6 +306,7 @@ function providerKind(
   scenario: Scenario,
   systemPrompt: string,
   transcript: string,
+  acceptedRuns: number,
 ): ProviderRequest["kind"] {
   if (systemPrompt.includes("You are a context summarization assistant")) return "compaction";
   if (systemPrompt.includes("direct child worker session")) {
@@ -324,10 +325,9 @@ function providerKind(
         : "parent-interactive-close";
     }
     if (transcript.includes("RESULT_INTERACTIVE_READY")) {
-      const acceptedRuns = transcript.match(/Accepted async run/g)?.length ?? 0;
       return acceptedRuns >= 2 ? "parent-pending" : "parent-interactive-send";
     }
-    if (transcript.includes("Accepted async run")) return "parent-pending";
+    if (acceptedRuns > 0) return "parent-pending";
     return "parent-initial";
   }
   if (
@@ -341,7 +341,7 @@ function providerKind(
   if (transcript.includes("CONTEXT_CHECKPOINT") || transcript.includes("COMPACTED_CHECKPOINT")) {
     return "parent-checkpoint";
   }
-  if (transcript.includes("Accepted async run")) {
+  if (acceptedRuns > 0) {
     if (scenario === "decoupled" && !transcript.includes("second-fixture-content")) {
       return "parent-independent-second";
     }
@@ -368,7 +368,11 @@ function createProviderExtension(
   ): AssistantMessageEventStream => {
     const systemPrompt = context.systemPrompt ?? "";
     const transcript = transcriptText(context);
-    const kind = providerKind(scenario, systemPrompt, transcript);
+    const acceptedRuns = context.messages.filter((message) =>
+      message.role === "toolResult" && !message.isError &&
+      (message.toolName === "orchestrate" || message.toolName === "interactive_send")
+    ).length;
+    const kind = providerKind(scenario, systemPrompt, transcript, acceptedRuns);
     requests.push({
       kind,
       provider: requestedModel.provider,

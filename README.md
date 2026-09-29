@@ -47,6 +47,8 @@ Pi Orchestrate gives the parent five model-facing tools:
 
 The extension supplies the parent with instructions for using these tools.
 
+Long worker reports are shortened in the parent's context. Full reports remain in session data and the expanded result view. For recovery, `worker_status` includes recent workers' latest outcomes and available transcript paths; its output is also size-limited.
+
 ## Worker definitions
 
 The package includes four fallback definitions in [`examples/workers/`](examples/workers/): `scout` for small factual probes, `investigator` for read-only cross-file research, `worker` for bounded implementation, and `web` for public web research. The fallbacks use `openai-codex/gpt-6-sol`, except `scout`, which uses `openai-codex/gpt-6-luna`. The `web` worker also requires an installed, authenticated Codex CLI.
