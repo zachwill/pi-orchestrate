@@ -105,11 +105,8 @@ export function registerOrchestrationTools(
     name: "orchestrate",
     label: "Orchestrate",
     description:
-      "Start a background assignment. Choose a catalog name with worker, name the assignment with title, and give the complete brief in instructions. Returns a worker_id for follow-up and controls; the result arrives separately.",
+      "Start a fresh background worker. Choose a catalog name with worker, name the assignment with title, and give the complete brief in instructions. Returns a worker_id; results arrive separately. One-shot workers finish automatically; interactive workers become ready for follow-up.",
     promptSnippet: "Start a background worker with a complete assignment brief",
-    promptGuidelines: [
-      "Workers receive your instructions, not your conversation. Include the goal, relevant context, owned paths, and expected result.",
-    ],
     executionMode: "parallel",
     parameters: taskSchema,
     ...orchestrateToolRenderer,
@@ -140,9 +137,6 @@ export function registerOrchestrationTools(
     description:
       "Inspect the worker catalog and this session's workers for diagnostics or recovery. Includes worker IDs, configuration, current state, latest outcomes, and available transcript paths.",
     promptSnippet: "Recover worker IDs and inspect configuration, state, and outcomes",
-    promptGuidelines: [
-      "Use worker_status to investigate unexpected state or recover missing information. Results arrive automatically, so completion polling is unnecessary.",
-    ],
     parameters: statusSchema,
     ...workerStatusToolRenderer,
     async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
@@ -212,11 +206,8 @@ export function registerOrchestrationTools(
   pi.registerTool({
     name: "interactive_close",
     label: "Interactive Close",
-    description: "Release a ready interactive worker from this session when you are finished with it. Pass its worker_id to close the retained conversation.",
+    description: "Release a ready interactive worker from this session by worker_id when finished. Its conversation remains available for follow-up until closed.",
     promptSnippet: "Release a ready interactive worker when finished",
-    promptGuidelines: [
-      "Interactive workers stay available for follow-up until closed. One-shot workers finish automatically; worker_abort stops active work.",
-    ],
     parameters: interactiveCloseSchema,
     ...interactiveCloseToolRenderer,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

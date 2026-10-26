@@ -331,6 +331,22 @@ describe("registerOrchestrationTools", () => {
 
   });
 
+  test("describes tool lifecycles without duplicating global coordination guidelines", () => {
+    const { pi } = harness();
+
+    for (const tool of pi.tools) {
+      expect(tool.promptSnippet).toBeTruthy();
+      expect(tool.promptGuidelines ?? []).toEqual([]);
+    }
+    expect(pi.tool("orchestrate").description).toContain("fresh background worker");
+    expect(pi.tool("orchestrate").description).toContain("One-shot workers finish automatically");
+    expect(pi.tool("orchestrate").description).toContain("interactive workers become ready");
+    expect(pi.tool("interactive_send").description).toContain("retains its conversation");
+    expect(pi.tool("interactive_close").description).toContain("available for follow-up until closed");
+    expect(pi.tool("worker_abort").description).toContain("Stop active workers from this session");
+    expect(pi.tool("worker_status").description).toContain("diagnostics or recovery");
+  });
+
   test("tool schemas keep distinct strict transport shapes", () => {
     const { pi } = harness();
     const task = { worker: "scout", title: "Inspect", instructions: "Inspect." };

@@ -93,9 +93,8 @@ describe("live worker context projection", () => {
     expect(content).toContain('worker_id="worker-2"');
     expect(content).toContain("lifecycle=interactive | status=ready");
     expect(content).toContain("Pending delivery: 2 worker results are ready");
-    expect(content).toContain("These assignments are already underway.");
-    expect(content).toContain("Use interactive_send with the worker_id");
-    expect(content).toContain("pending response without tool calls");
+    expect(content).toContain("Ready workers: follow up with interactive_send");
+    expect(content).toContain("End your response without tool calls when ready to receive them.");
     expect(content).not.toContain("worker-3");
     expect(content).not.toContain("worker-4");
     expect(content).not.toContain("worker-5");
@@ -141,8 +140,8 @@ describe("live worker context projection", () => {
     expect(content).toContain('worker_id="worker-7"');
     expect(content).toContain('assignment="Review the revised patch."');
     expect(content).toContain("interactive_close");
-    expect(content).not.toContain("These assignments are already underway.");
-    expect(content).not.toContain("pending response");
+    expect(content).not.toContain("Pending delivery:");
+    expect(content).not.toContain("End your response");
   });
 
   test("guides pending-only delivery without suggesting more work or interactive controls", () => {
@@ -152,11 +151,28 @@ describe("live worker context projection", () => {
     ));
 
     expect(content).toContain("Pending delivery: 1 worker result is ready");
-    expect(content).toContain("pending response without tool calls");
-    expect(content).not.toContain("These assignments are already underway.");
+    expect(content).toContain("End your response without tool calls when ready to receive them.");
+    expect(content).not.toContain("Ready workers:");
     expect(content).not.toContain("interactive_send");
     expect(content).not.toContain("interactive_close");
   });
+
+  test.each(["starting", "running", "stopping"] as const)(
+    "reports %s workers without repeating the coordination contract",
+    (status) => {
+      const content = contentOf(projectLiveWorkerContext(
+        snapshot([worker(1, status)]),
+        { ownerSessionId: "owner-a", pendingResultCount: 0 },
+      ));
+
+      expect(content).toContain("Workers: 1 (1 active, 0 ready for follow-up).");
+      expect(content).toContain(`status=${status}`);
+      expect(content.split("\n\n")).toHaveLength(4);
+      expect(content).not.toContain("Pending delivery:");
+      expect(content).not.toContain("Ready workers:");
+      expect(content).not.toContain("Guidance:");
+    },
+  );
 
   test("bounds each worker entry and marks a truncated assignment", () => {
     const content = contentOf(projectLiveWorkerContext(

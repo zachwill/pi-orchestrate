@@ -52,12 +52,29 @@ describe("orchestrator contract", () => {
     expect(twice).toBe(once);
     expectOneContract(once);
     expect(once).toStartWith("Base system prompt.\n\n");
-    expect(once).toContain("`multi_tool_use.parallel`");
-    expect(once).toContain("`functions.orchestrate`");
-    expect(once).toContain("`functions.interactive_send`");
-    expect(once).toContain("Compaction does not stop workers.");
-    expect(once).toContain("Pick up existing assignments from the live worker context");
-    expect(once).toContain("pending response without tool calls");
+  });
+
+  test("retains coordination and delivery mechanics in the parent contract", () => {
+    const prompt = applyOrchestratorContract("", catalog([]));
+
+    expect(prompt).toContain("integrate needed worker results");
+    expect(prompt).toContain("Build on credible worker checks rather than repeating them");
+    expect(prompt).toContain("Workers receive your brief, not your conversation.");
+    expect(prompt).toContain("Workers edit the same working tree.");
+    expect(prompt).toContain("Avoid overlapping writes");
+    expect(prompt).toContain("`multi_tool_use.parallel`");
+    expect(prompt).toContain("`functions.orchestrate`");
+    expect(prompt).toContain("`functions.interactive_send`");
+    expect(prompt).toContain("return acceptance, not results");
+    expect(prompt).toContain("same response form one result group");
+    expect(prompt).toContain("after all admitted members settle");
+    expect(prompt).toContain("Other tool calls can run alongside dispatches without joining the group");
+    expect(prompt).toContain("pending response without tool calls");
+    expect(prompt).toContain("do not poll for completion");
+    expect(prompt).toContain("without duplicating delegated work or manufacturing activity");
+    expect(prompt).toContain("Compaction does not stop workers.");
+    expect(prompt).toContain("Pick up existing assignments from the live worker context");
+    expect(prompt).toContain("`worker_status` to recover missing IDs or diagnose unexpected state");
   });
 
   test("replaces in place with the current sorted trusted catalog", () => {

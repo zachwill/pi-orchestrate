@@ -124,7 +124,7 @@ function renderContext(
 ): string {
   const sections = [
     "## Pi Orchestrate live worker context",
-    "Current workers for this session, refreshed for each request. Use this view to pick up existing work after compaction.",
+    "Current workers for this session, refreshed for each request.",
     `Workers: ${totalWorkers} (${activeCount} active, ${readyCount} ready for follow-up).`,
   ];
 
@@ -139,27 +139,15 @@ function renderContext(
   }
   if (pendingResultCount > 0) {
     sections.push(
-      `Pending delivery: ${pendingResultCount} worker result${pendingResultCount === 1 ? " is" : "s are"} ready and will arrive automatically after your current run.`,
+      `Pending delivery: ${pendingResultCount} worker result${pendingResultCount === 1 ? " is" : "s are"} ready. End your response without tool calls when ready to receive them.`,
     );
   }
 
-  const guidance: string[] = [];
-  if (activeCount > 0) {
-    guidance.push(
-      "These assignments are already underway. Continue useful work that does not depend on their results.",
-    );
-  }
   if (readyCount > 0) {
-    guidance.push(
-      "Ready workers retain their conversation. Use interactive_send with the worker_id for follow-up, or interactive_close when finished.",
+    sections.push(
+      "Ready workers: follow up with interactive_send or release with interactive_close, using worker_id.",
     );
   }
-  if (activeCount > 0 || pendingResultCount > 0) {
-    guidance.push(
-      "When you need worker results and have no useful independent work left, send a brief pending response without tool calls so automatic delivery can resume you.",
-    );
-  }
-  sections.push(`Guidance:\n- ${guidance.join("\n- ")}`);
 
   return sections.join("\n\n");
 }
